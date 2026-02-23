@@ -1,0 +1,29 @@
+# .NET
+backend/**/bin/
+backend/**/obj/
+backend/**/.vs/
+*.user
+*.suo
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts
+backend/publish/
+
+# Claude Code
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

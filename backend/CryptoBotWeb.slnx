@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CryptoBotWeb.Api/CryptoBotWeb.Api.csproj" />
+    <Project Path="src/CryptoBotWeb.Core/CryptoBotWeb.Core.csproj" />
+    <Project Path="src/CryptoBotWeb.Infrastructure/CryptoBotWeb.Infrastructure.csproj" />
+    <Project Path="src/CryptoBotWeb.Worker/CryptoBotWeb.Worker.csproj" />
+  </Folder>
+</Solution>

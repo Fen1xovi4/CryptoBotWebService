@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-primary: var(--theme-bg-primary);
+  --color-bg-secondary: var(--theme-bg-secondary);
+  --color-bg-tertiary: var(--theme-bg-tertiary);
+  --color-bg-card: var(--theme-bg-card);
+  --color-border: var(--theme-border);
+  --color-text-primary: var(--theme-text-primary);
+  --color-text-secondary: var(--theme-text-secondary);
+  --color-accent-green: #22c55e;
+  --color-accent-red: #ef4444;
+  --color-accent-blue: #3b82f6;
+  --color-accent-yellow: #eab308;
+}
+
+/* Dark theme (default) */
+:root,
+[data-theme="dark"] {
+  --theme-bg-primary: #1a1d2e;
+  --theme-bg-secondary: #242838;
+  --theme-bg-tertiary: #2d3148;
+  --theme-bg-card: #1e2235;
+  --theme-border: #333a50;
+  --theme-text-primary: #e8eaf0;
+  --theme-text-secondary: #7a8299;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --theme-bg-primary: #f5f7fa;
+  --theme-bg-secondary: #ffffff;
+  --theme-bg-tertiary: #eef1f6;
+  --theme-bg-card: #ffffff;
+  --theme-border: #d1d5db;
+  --theme-text-primary: #111827;
+  --theme-text-secondary: #6b7280;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--theme-bg-primary);
+  color: var(--theme-text-primary);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--theme-bg-secondary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--theme-border);
+  border-radius: 3px;
+}
