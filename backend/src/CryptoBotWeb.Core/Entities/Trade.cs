@@ -13,6 +13,10 @@ public class Trade
     public string Status { get; set; } = string.Empty;
     public DateTime ExecutedAt { get; set; } = DateTime.UtcNow;
 
+    // PNL fields (set only on close trades)
+    public decimal? PnlDollar { get; set; }
+    public decimal? Commission { get; set; }
+
     public Strategy Strategy { get; set; } = null!;
     public ExchangeAccount Account { get; set; } = null!;
 }

@@ -3,6 +3,7 @@ using System;
 using CryptoBotWeb.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CryptoBotWeb.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260223130438_AddStrategyLogs")]
+    partial class AddStrategyLogs
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -153,10 +156,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                     b.Property<Guid>("AccountId")
                         .HasColumnType("uuid");
 
-                    b.Property<decimal?>("Commission")
-                        .HasPrecision(18, 8)
-                        .HasColumnType("numeric(18,8)");
-
                     b.Property<string>("ExchangeOrderId")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -164,10 +163,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
 
                     b.Property<DateTime>("ExecutedAt")
                         .HasColumnType("timestamp with time zone");
-
-                    b.Property<decimal?>("PnlDollar")
-                        .HasPrecision(18, 8)
-                        .HasColumnType("numeric(18,8)");
 
                     b.Property<decimal>("Price")
                         .HasPrecision(18, 8)

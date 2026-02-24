@@ -61,7 +61,12 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
 
-        var quantity = Math.Round(quoteAmount / price.Value, 3);
+        var (qtyStep, minQty) = await GetSymbolInfoAsync(symbol);
+        var quantity = FloorToStep(quoteAmount / price.Value, qtyStep);
+
+        if (quantity < minQty)
+            return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} < min {minQty} for {symbol}" };
+
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
             BitgetProductTypeV2.UsdtFutures, symbol, "USDT",
             OrderSide.Buy, OrderType.Market, MarginMode.CrossMargin, quantity,
@@ -83,7 +88,12 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
 
-        var quantity = Math.Round(quoteAmount / price.Value, 3);
+        var (qtyStep, minQty) = await GetSymbolInfoAsync(symbol);
+        var quantity = FloorToStep(quoteAmount / price.Value, qtyStep);
+
+        if (quantity < minQty)
+            return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} < min {minQty} for {symbol}" };
+
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
             BitgetProductTypeV2.UsdtFutures, symbol, "USDT",
             OrderSide.Sell, OrderType.Market, MarginMode.CrossMargin, quantity,
@@ -160,6 +170,24 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         "1w" => TimeSpan.FromDays(7),
         _ => TimeSpan.FromHours(1)
     };
+
+    private async Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string symbol)
+    {
+        var result = await _client.FuturesApiV2.ExchangeData.GetContractsAsync(BitgetProductTypeV2.UsdtFutures);
+        if (result.Success && result.Data != null)
+        {
+            var contract = result.Data.FirstOrDefault(c => c.Symbol == symbol);
+            if (contract != null)
+                return (contract.QuantityStep, contract.MinOrderQuantity);
+        }
+        return (0.001m, 0m);
+    }
+
+    private static decimal FloorToStep(decimal value, decimal step)
+    {
+        if (step <= 0) return value;
+        return Math.Floor(value / step) * step;
+    }
 
     public void Dispose() => _client.Dispose();
 }

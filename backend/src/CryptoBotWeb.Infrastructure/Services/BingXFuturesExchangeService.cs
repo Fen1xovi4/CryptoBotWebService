@@ -63,7 +63,12 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
 
-        var quantity = Math.Round(quoteAmount / price.Value, 3);
+        var (qtyStep, minQty) = await GetSymbolInfoAsync(bingxSymbol);
+        var quantity = FloorToStep(quoteAmount / price.Value, qtyStep);
+
+        if (quantity < minQty)
+            return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} < min {minQty} for {symbol}" };
+
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Buy, FuturesOrderType.Market,
             PositionSide.Long, quantity);
@@ -85,7 +90,12 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
 
-        var quantity = Math.Round(quoteAmount / price.Value, 3);
+        var (qtyStep, minQty) = await GetSymbolInfoAsync(bingxSymbol);
+        var quantity = FloorToStep(quoteAmount / price.Value, qtyStep);
+
+        if (quantity < minQty)
+            return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} < min {minQty} for {symbol}" };
+
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Sell, FuturesOrderType.Market,
             PositionSide.Short, quantity);
@@ -161,6 +171,27 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         "1w" => TimeSpan.FromDays(7),
         _ => TimeSpan.FromHours(1)
     };
+
+    private async Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string bingxSymbol)
+    {
+        var result = await _client.PerpetualFuturesApi.ExchangeData.GetContractsAsync();
+        if (result.Success && result.Data != null)
+        {
+            var contract = result.Data.FirstOrDefault(c => c.Symbol == bingxSymbol);
+            if (contract != null)
+            {
+                var step = (decimal)Math.Pow(10, -contract.QuantityPrecision);
+                return (step, contract.MinOrderQuantity);
+            }
+        }
+        return (0.001m, 0m);
+    }
+
+    private static decimal FloorToStep(decimal value, decimal step)
+    {
+        if (step <= 0) return value;
+        return Math.Floor(value / step) * step;
+    }
 
     public void Dispose() => _client.Dispose();
 }

@@ -3,6 +3,7 @@ using System.Text.Json;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Entities;
 using CryptoBotWeb.Core.Enums;
+using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using Microsoft.AspNetCore.Authorization;
@@ -58,21 +59,60 @@ public class StrategiesController : ControllerBase
     {
         var userId = GetUserId();
 
-        var query = _db.Strategies.Where(s => s.Account.UserId == userId);
+        var query = _db.Strategies
+            .Include(s => s.Trades)
+            .Where(s => s.Account.UserId == userId);
         if (workspaceId.HasValue)
             query = query.Where(s => s.WorkspaceId == workspaceId.Value);
 
-        var stats = await query
+        var strategies = await query.ToListAsync();
+
+        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+        var stats = strategies
             .GroupBy(s => s.WorkspaceId)
-            .Select(g => new
+            .Select(g =>
             {
-                WorkspaceId = g.Key,
-                TotalBots = g.Count(),
-                ActiveBots = g.Count(s => s.Status == StrategyStatus.Running),
-                TotalTrades = g.Sum(s => s.Trades.Count),
-                Pnl = 0m
+                // Realized PNL from closed trades
+                var realizedPnl = g.Sum(s => s.Trades
+                    .Where(t => t.PnlDollar != null)
+                    .Sum(t => t.PnlDollar ?? 0m));
+
+                // Unrealized PNL from open positions
+                var unrealizedPnl = 0m;
+                foreach (var s in g)
+                {
+                    if (string.IsNullOrEmpty(s.StateJson) || s.StateJson == "{}") continue;
+                    try
+                    {
+                        var state = JsonSerializer.Deserialize<EmaBounceState>(s.StateJson, jsonOpts);
+                        if (state == null) continue;
+
+                        if (state.OpenLong != null && state.LastPrice.HasValue && state.OpenLong.EntryPrice > 0)
+                        {
+                            var pnlPct = (state.LastPrice.Value - state.OpenLong.EntryPrice) / state.OpenLong.EntryPrice * 100m;
+                            unrealizedPnl += state.OpenLong.OrderSize * pnlPct / 100m;
+                        }
+                        if (state.OpenShort != null && state.LastPrice.HasValue && state.OpenShort.EntryPrice > 0)
+                        {
+                            var pnlPct = (state.OpenShort.EntryPrice - state.LastPrice.Value) / state.OpenShort.EntryPrice * 100m;
+                            unrealizedPnl += state.OpenShort.OrderSize * pnlPct / 100m;
+                        }
+                    }
+                    catch { /* skip invalid state */ }
+                }
+
+                return new
+                {
+                    WorkspaceId = g.Key,
+                    TotalBots = g.Count(),
+                    ActiveBots = g.Count(s => s.Status == StrategyStatus.Running),
+                    TotalTrades = g.Sum(s => s.Trades.Count),
+                    Pnl = realizedPnl,
+                    UnrealizedPnl = unrealizedPnl
+                };
             })
-            .ToListAsync();
+            .ToList();
 
         return Ok(stats);
     }
@@ -155,9 +195,21 @@ public class StrategiesController : ControllerBase
             strategy.ConfigJson = merged;
         }
 
+        // Preserve martingale state across restarts; clear counters so handler recalculates from history
+        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var prevState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
+            ? new EmaBounceState()
+            : JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, jsonOpts) ?? new EmaBounceState();
+
+        var freshState = new EmaBounceState
+        {
+            ConsecutiveLosses = prevState.ConsecutiveLosses,
+            RunningPnlDollar = prevState.RunningPnlDollar
+        };
+        strategy.StateJson = JsonSerializer.Serialize(freshState, jsonOpts);
+
         strategy.Status = StrategyStatus.Running;
         strategy.StartedAt = DateTime.UtcNow;
-        strategy.StateJson = "{}";
         await _db.SaveChangesAsync();
 
         return Ok(new { message = "Strategy started", status = strategy.Status.ToString() });
@@ -307,6 +359,100 @@ public class StrategiesController : ControllerBase
         await _db.SaveChangesAsync();
 
         return Ok(new { message = "Убытки сброшены", consecutiveLosses = 0 });
+    }
+
+    [HttpGet("{id:guid}/chart")]
+    public async Task<IActionResult> GetChart(Guid id, [FromQuery] int limit = 300)
+    {
+        var strategy = await _db.Strategies
+            .Include(s => s.Account)
+            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
+
+        if (strategy == null) return NotFound();
+
+        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var config = JsonSerializer.Deserialize<EmaBounceConfig>(strategy.ConfigJson, jsonOpts);
+        if (config == null || string.IsNullOrEmpty(config.Symbol))
+            return BadRequest(new { message = "Invalid config" });
+
+        if (limit < 1) limit = 1;
+        if (limit > 1000) limit = 1000;
+
+        try
+        {
+            using var exchange = _exchangeFactory.CreateFutures(strategy.Account);
+            var candles = await exchange.GetKlinesAsync(config.Symbol, config.Timeframe, limit);
+
+            var closePrices = candles.Select(c => c.Close).ToArray();
+            var maValues = config.IndicatorType.Equals("SMA", StringComparison.OrdinalIgnoreCase)
+                ? IndicatorCalculator.CalculateSma(closePrices, config.IndicatorLength)
+                : IndicatorCalculator.CalculateEma(closePrices, config.IndicatorLength);
+
+            var indicatorPoints = new List<object>();
+            for (int i = config.IndicatorLength - 1; i < candles.Count; i++)
+            {
+                if (maValues[i] != 0)
+                {
+                    indicatorPoints.Add(new
+                    {
+                        time = new DateTimeOffset(candles[i].OpenTime).ToUnixTimeSeconds(),
+                        value = maValues[i]
+                    });
+                }
+            }
+
+            return Ok(new { candles, indicatorValues = indicatorPoints });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpGet("{id:guid}/logs")]
+    public async Task<IActionResult> GetLogs(Guid id, [FromQuery] int limit = 200)
+    {
+        var strategy = await _db.Strategies
+            .Where(s => s.Id == id && s.Account.UserId == GetUserId())
+            .Select(s => s.Id)
+            .FirstOrDefaultAsync();
+
+        if (strategy == Guid.Empty) return NotFound();
+
+        if (limit < 1) limit = 1;
+        if (limit > 1000) limit = 1000;
+
+        var logs = await _db.StrategyLogs
+            .Where(l => l.StrategyId == id)
+            .OrderByDescending(l => l.CreatedAt)
+            .Take(limit)
+            .Select(l => new
+            {
+                l.Id,
+                l.Level,
+                l.Message,
+                l.CreatedAt
+            })
+            .ToListAsync();
+
+        return Ok(logs);
+    }
+
+    [HttpDelete("{id:guid}/logs")]
+    public async Task<IActionResult> ClearLogs(Guid id)
+    {
+        var strategy = await _db.Strategies
+            .Where(s => s.Id == id && s.Account.UserId == GetUserId())
+            .Select(s => s.Id)
+            .FirstOrDefaultAsync();
+
+        if (strategy == Guid.Empty) return NotFound();
+
+        var count = await _db.StrategyLogs
+            .Where(l => l.StrategyId == id)
+            .ExecuteDeleteAsync();
+
+        return Ok(new { message = $"Удалено {count} записей" });
     }
 
     [HttpDelete("{id:guid}")]

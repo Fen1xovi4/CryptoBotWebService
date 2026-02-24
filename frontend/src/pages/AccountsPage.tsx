@@ -22,6 +22,7 @@ interface ConnectionStatus {
 
 export default function AccountsPage() {
   const [showModal, setShowModal] = useState(false);
+  const [editAccount, setEditAccount] = useState<ExchangeAccount | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<Record<string, ConnectionStatus>>({});
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -169,6 +170,12 @@ export default function AccountsPage() {
                           </button>
                         )}
                         <button
+                          onClick={() => setEditAccount(acc)}
+                          className="px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-border transition-colors"
+                        >
+                          Edit
+                        </button>
+                        <button
                           onClick={() => {
                             if (confirm('Delete this account?')) deleteMutation.mutate(acc.id);
                           }}
@@ -190,6 +197,7 @@ export default function AccountsPage() {
       </div>
 
       {showModal && <AddAccountModal onClose={() => setShowModal(false)} />}
+      {editAccount && <EditAccountModal account={editAccount} onClose={() => setEditAccount(null)} />}
     </div>
   );
 }
@@ -275,6 +283,86 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
             className="px-4 py-2 text-sm font-medium bg-accent-blue hover:bg-accent-blue/90 text-white rounded-lg transition-colors shadow-md shadow-accent-blue/20 disabled:opacity-50 disabled:shadow-none"
           >
             {mutation.isPending ? 'Adding...' : 'Add Account'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditAccountModal({ account, onClose }: { account: ExchangeAccount; onClose: () => void }) {
+  const [form, setForm] = useState({
+    name: account.name,
+    apiKey: '',
+    apiSecret: '',
+    passphrase: '',
+  });
+  const [error, setError] = useState('');
+  const queryClient = useQueryClient();
+
+  const mutation = useMutation({
+    mutationFn: () => {
+      const payload: Record<string, string> = { name: form.name };
+      if (form.apiKey) payload.apiKey = form.apiKey;
+      if (form.apiSecret) payload.apiSecret = form.apiSecret;
+      if (account.exchangeType === 2 && form.passphrase) payload.passphrase = form.passphrase;
+      return api.put(`/accounts/${account.id}`, payload);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['accounts'] });
+      onClose();
+    },
+    onError: () => setError('Failed to update account'),
+  });
+
+  const inputClass = 'w-full bg-bg-primary border border-border rounded-lg px-4 py-2.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue/40 focus:border-accent-blue transition-all';
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-bg-secondary rounded-xl border border-border p-6 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold mb-1">Edit Account</h3>
+        <p className="text-sm text-text-secondary mb-5">{exchangeNames[account.exchangeType]} — update name or API keys</p>
+
+        {error && (
+          <div className="bg-accent-red/10 border border-accent-red/20 text-accent-red text-sm px-4 py-2.5 rounded-lg mb-4">
+            {error}
+          </div>
+        )}
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Display Name</label>
+            <input type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">API Key</label>
+            <input type="text" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} className={`${inputClass} font-mono`} placeholder="Leave empty to keep current" />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">API Secret</label>
+            <input type="password" value={form.apiSecret} onChange={(e) => setForm({ ...form, apiSecret: e.target.value })} className={`${inputClass} font-mono`} placeholder="Leave empty to keep current" />
+          </div>
+
+          {account.exchangeType === 2 && (
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Passphrase (Bitget)</label>
+              <input type="password" value={form.passphrase} onChange={(e) => setForm({ ...form, passphrase: e.target.value })} className={`${inputClass} font-mono`} placeholder="Leave empty to keep current" />
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-3 mt-6">
+          <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-text-secondary bg-bg-tertiary rounded-lg hover:bg-border transition-colors">
+            Cancel
+          </button>
+          <button
+            onClick={() => mutation.mutate()}
+            disabled={mutation.isPending || !form.name}
+            className="px-4 py-2 text-sm font-medium bg-accent-blue hover:bg-accent-blue/90 text-white rounded-lg transition-colors shadow-md shadow-accent-blue/20 disabled:opacity-50 disabled:shadow-none"
+          >
+            {mutation.isPending ? 'Saving...' : 'Save'}
           </button>
         </div>
       </div>

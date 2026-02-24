@@ -12,6 +12,7 @@ public class AppDbContext : DbContext
     public DbSet<Strategy> Strategies => Set<Strategy>();
     public DbSet<Trade> Trades => Set<Trade>();
     public DbSet<Workspace> Workspaces => Set<Workspace>();
+    public DbSet<StrategyLog> StrategyLogs => Set<StrategyLog>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -84,6 +85,8 @@ public class AppDbContext : DbContext
             e.Property(x => x.Quantity).HasPrecision(18, 8);
             e.Property(x => x.Price).HasPrecision(18, 8);
             e.Property(x => x.Status).HasMaxLength(20);
+            e.Property(x => x.PnlDollar).HasPrecision(18, 8);
+            e.Property(x => x.Commission).HasPrecision(18, 8);
             e.HasOne(x => x.Strategy)
                 .WithMany(s => s.Trades)
                 .HasForeignKey(x => x.StrategyId)
@@ -92,6 +95,20 @@ public class AppDbContext : DbContext
                 .WithMany(a => a.Trades)
                 .HasForeignKey(x => x.AccountId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<StrategyLog>(e =>
+        {
+            e.ToTable("strategy_logs");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.Level).HasMaxLength(10);
+            e.Property(x => x.Message).HasMaxLength(1000);
+            e.HasOne(x => x.Strategy)
+                .WithMany(s => s.Logs)
+                .HasForeignKey(x => x.StrategyId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.StrategyId, x.CreatedAt });
         });
     }
 }

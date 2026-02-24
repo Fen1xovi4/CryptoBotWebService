@@ -18,4 +18,5 @@ public class Strategy
     public ExchangeAccount Account { get; set; } = null!;
     public Workspace? Workspace { get; set; }
     public ICollection<Trade> Trades { get; set; } = new List<Trade>();
+    public ICollection<StrategyLog> Logs { get; set; } = new List<StrategyLog>();
 }

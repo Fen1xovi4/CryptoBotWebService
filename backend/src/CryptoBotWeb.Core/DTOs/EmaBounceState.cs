@@ -13,6 +13,12 @@ public class EmaBounceState
     // Martingale state
     public int ConsecutiveLosses { get; set; }
     public decimal RunningPnlDollar { get; set; }
+
+    // Last fetched market price (for frontend progress display)
+    public decimal? LastPrice { get; set; }
+
+    // Computed next order size (for frontend display)
+    public decimal NextOrderSize { get; set; }
 }
 
 public class OpenPositionInfo

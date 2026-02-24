@@ -58,7 +58,12 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
 
-        var quantity = Math.Round(quoteAmount / price.Value, 3);
+        var (qtyStep, minQty) = await GetSymbolInfoAsync(symbol);
+        var quantity = FloorToStep(quoteAmount / price.Value, qtyStep);
+
+        if (quantity < minQty)
+            return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} < min {minQty} for {symbol}" };
+
         var result = await _client.V5Api.Trading.PlaceOrderAsync(
             Category.Linear, symbol, OrderSide.Buy, NewOrderType.Market, quantity);
 
@@ -78,7 +83,12 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
 
-        var quantity = Math.Round(quoteAmount / price.Value, 3);
+        var (qtyStep, minQty) = await GetSymbolInfoAsync(symbol);
+        var quantity = FloorToStep(quoteAmount / price.Value, qtyStep);
+
+        if (quantity < minQty)
+            return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} < min {minQty} for {symbol}" };
+
         var result = await _client.V5Api.Trading.PlaceOrderAsync(
             Category.Linear, symbol, OrderSide.Sell, NewOrderType.Market, quantity);
 
@@ -153,6 +163,23 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         "1w" => TimeSpan.FromDays(7),
         _ => TimeSpan.FromHours(1)
     };
+
+    private async Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string symbol)
+    {
+        var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(Category.Linear, symbol);
+        if (result.Success && result.Data?.List?.Any() == true)
+        {
+            var info = result.Data.List.First();
+            return (info.LotSizeFilter?.QuantityStep ?? 0.001m, info.LotSizeFilter?.MinOrderQuantity ?? 0m);
+        }
+        return (0.001m, 0m);
+    }
+
+    private static decimal FloorToStep(decimal value, decimal step)
+    {
+        if (step <= 0) return value;
+        return Math.Floor(value / step) * step;
+    }
 
     public void Dispose() => _client.Dispose();
 }

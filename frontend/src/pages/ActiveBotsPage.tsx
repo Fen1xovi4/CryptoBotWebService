@@ -3,6 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../api/client';
 import Header from '../components/Layout/Header';
 import StatusBadge from '../components/ui/StatusBadge';
+import CandlestickChart from '../components/Chart/CandlestickChart';
+import type { CandleData, IndicatorDataPoint } from '../components/Chart/CandlestickChart';
 
 interface Strategy {
   id: string;
@@ -47,8 +49,6 @@ interface WorkspaceConfig {
   drawdownBalance: number;
   drawdownPercent: number;
   drawdownTarget: number;
-  drawdownFixedPnl: number;
-  drawdownRealizedPnl: number;
 }
 
 interface WorkspaceStats {
@@ -57,6 +57,7 @@ interface WorkspaceStats {
   activeBots: number;
   totalTrades: number;
   pnl: number;
+  unrealizedPnl: number;
 }
 
 const defaultConfig: WorkspaceConfig = {
@@ -71,8 +72,6 @@ const defaultConfig: WorkspaceConfig = {
   drawdownBalance: 0,
   drawdownPercent: 10,
   drawdownTarget: 5,
-  drawdownFixedPnl: 0,
-  drawdownRealizedPnl: 0,
 };
 
 const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
@@ -96,6 +95,8 @@ export default function ActiveBotsPage() {
   const queryClient = useQueryClient();
   const [showModal, setShowModal] = useState(false);
   const [editingStrategy, setEditingStrategy] = useState<Strategy | null>(null);
+  const [chartStrategy, setChartStrategy] = useState<Strategy | null>(null);
+  const [logStrategy, setLogStrategy] = useState<Strategy | null>(null);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
 
   // Local config state for instant UI response
@@ -111,6 +112,7 @@ export default function ActiveBotsPage() {
   const { data: strategies, isLoading } = useQuery<Strategy[]>({
     queryKey: ['strategies'],
     queryFn: () => api.get('/strategies').then((r) => r.data),
+    refetchInterval: 5000,
   });
 
   const { data: allStats } = useQuery<WorkspaceStats[]>({
@@ -221,6 +223,7 @@ export default function ActiveBotsPage() {
     activeBots: 0,
     totalTrades: 0,
     pnl: 0,
+    unrealizedPnl: 0,
   };
 
   const handleCreateWorkspace = () => {
@@ -282,7 +285,7 @@ export default function ActiveBotsPage() {
         <StatCard label="Активные боты" value={currentStats.activeBots} accent="green" />
         <StatCard label="Всего ботов" value={currentStats.totalBots} accent="blue" />
         <StatCard label="Сделки" value={currentStats.totalTrades} accent="yellow" />
-        <StatCard label="P&L" value={`$${currentStats.pnl.toFixed(2)}`} accent="red" />
+        <StatCard label="P&L" value={`${currentStats.pnl >= 0 ? '+' : ''}$${currentStats.pnl.toFixed(2)}`} accent={currentStats.pnl >= 0 ? 'green' : 'red'} />
       </div>
 
       {/* Config Panel */}
@@ -467,35 +470,23 @@ export default function ActiveBotsPage() {
         {/* PNL */}
         <div className="w-full border-t border-border/50 mt-1 pt-3 flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-2">
-            <span className="text-xs text-text-secondary">Зафикс. PNL:</span>
-            <span className={`text-sm font-semibold ${localConfig.drawdownFixedPnl < 0 ? 'text-accent-red' : 'text-accent-green'}`}>
-              ${localConfig.drawdownFixedPnl.toFixed(2)}
+            <span className="text-xs text-text-secondary">Незафикс. PNL:</span>
+            <span className={`text-sm font-semibold ${currentStats.unrealizedPnl < 0 ? 'text-accent-red' : currentStats.unrealizedPnl > 0 ? 'text-accent-green' : 'text-text-secondary'}`}>
+              {currentStats.unrealizedPnl >= 0 ? '+' : ''}${currentStats.unrealizedPnl.toFixed(2)}
             </span>
           </div>
 
           <div className="flex items-center gap-2">
             <span className="text-xs text-text-secondary">Реализ. PNL:</span>
-            <span className={`text-sm font-semibold ${localConfig.drawdownRealizedPnl < 0 ? 'text-accent-red' : 'text-accent-green'}`}>
-              ${localConfig.drawdownRealizedPnl.toFixed(2)}
+            <span className={`text-sm font-semibold ${currentStats.pnl < 0 ? 'text-accent-red' : currentStats.pnl > 0 ? 'text-accent-green' : 'text-text-secondary'}`}>
+              {currentStats.pnl >= 0 ? '+' : ''}${currentStats.pnl.toFixed(2)}
             </span>
           </div>
-
-          <button
-            onClick={() => {
-              if (confirm('Сбросить все PNL значения на 0?')) {
-                updateConfig({ drawdownFixedPnl: 0, drawdownRealizedPnl: 0 });
-              }
-            }}
-            title="Сбросить PNL"
-            className="px-2.5 py-1 text-xs font-medium bg-bg-tertiary text-text-secondary border border-border rounded-lg hover:text-text-primary hover:border-accent-blue transition-colors"
-          >
-            Сбросить PNL
-          </button>
         </div>
       </div>
 
-      {/* Bots Table Header */}
-      <div className="flex items-center justify-between mb-3">
+      {/* Bots Header */}
+      <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-widest">
           Мои боты
         </h3>
@@ -507,74 +498,154 @@ export default function ActiveBotsPage() {
         </button>
       </div>
 
-      {/* Bots Table */}
-      <div className="bg-bg-secondary rounded-xl border border-border overflow-hidden">
-        <table className="w-full">
-          <thead>
-            <tr className="text-xs text-text-secondary border-b border-border">
-              <th className="text-left px-5 py-2.5 font-medium">Название</th>
-              <th className="text-left px-5 py-2.5 font-medium">Пара</th>
-              <th className="text-left px-5 py-2.5 font-medium">Аккаунт</th>
-              <th className="text-left px-5 py-2.5 font-medium">Конфиг</th>
-              <th className="text-center px-5 py-2.5 font-medium">Прогресс</th>
-              <th className="text-center px-5 py-2.5 font-medium">Убытки подряд</th>
-              <th className="text-left px-5 py-2.5 font-medium">Статус</th>
-              <th className="text-right px-5 py-2.5 font-medium">Действия</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading ? (
-              <tr>
-                <td colSpan={8} className="px-5 py-8 text-center text-text-secondary text-sm">
-                  Загрузка...
-                </td>
-              </tr>
-            ) : filteredStrategies.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="px-5 py-8 text-center text-text-secondary text-sm">
-                  Нет ботов в этом пространстве
-                </td>
-              </tr>
-            ) : (
-              filteredStrategies.map((s) => {
-                const cfg = parseJson(s.configJson);
-                const state = parseJson(s.stateJson);
-                const consecutiveLosses = state?.consecutiveLosses ?? 0;
-                return (
-                  <tr
-                    key={s.id}
-                    className="border-b border-border/50 hover:bg-bg-tertiary/30 transition-colors"
-                  >
-                    <td className="px-5 py-3">
-                      <div className="text-sm font-medium">{s.name}</div>
-                    </td>
-                    <td className="px-5 py-3 text-sm font-mono">
-                      {cfg?.symbol || '—'}
+      {/* Bots Grid */}
+      {isLoading ? (
+        <div className="text-center py-12 text-text-secondary text-sm">Загрузка...</div>
+      ) : filteredStrategies.length === 0 ? (
+        <div className="text-center py-12 text-text-secondary text-sm">
+          Нет ботов в этом пространстве
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+          {filteredStrategies.map((s) => {
+            const cfg = parseJson(s.configJson);
+            const state = parseJson(s.stateJson);
+            const consecutiveLosses = state?.consecutiveLosses ?? 0;
+            const isRunning = s.status === 'Running';
+            const pos = state?.openLong || state?.openShort;
+            const coinName = cfg?.symbol?.replace(/USDT$/i, '') || '';
+            const borderAccent = isRunning
+              ? pos ? 'border-l-accent-yellow' : 'border-l-accent-green'
+              : 'border-l-border';
+
+            return (
+              <div
+                key={s.id}
+                className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}
+              >
+                {/* Header */}
+                <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-mono font-semibold text-text-primary truncate">
+                        {cfg?.symbol || '—'}
+                      </span>
                       {cfg?.timeframe && (
-                        <span className="ml-1.5 text-text-secondary">{cfg.timeframe}</span>
+                        <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+                          {cfg.timeframe}
+                        </span>
                       )}
-                    </td>
-                    <td className="px-5 py-3 text-sm text-text-secondary">
-                      {s.accountName} ({s.exchange})
-                    </td>
-                    <td className="px-5 py-3">
-                      {cfg && (
-                        <div className="text-xs text-text-secondary space-y-0.5">
-                          <div>
-                            {cfg.indicatorType || 'EMA'}
-                            {cfg.indicatorLength || 50} / {cfg.candleCount || 50} свечей
+                    </div>
+                    <div className="text-[11px] text-text-secondary mt-0.5 truncate">
+                      {s.name} · {s.accountName}
+                    </div>
+                  </div>
+                  <StatusBadge status={s.status} />
+                </div>
+
+                {/* Config chips */}
+                {cfg && (
+                  <div className="px-4 pb-2 flex flex-wrap gap-1">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+                      {cfg.indicatorType || 'EMA'}{cfg.indicatorLength || 50}
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+                      {cfg.candleCount || 50} св.
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-green/10 text-accent-green">
+                      TP {cfg.takeProfitPercent ?? 3}%
+                    </span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-red/10 text-accent-red">
+                      SL {cfg.stopLossPercent ?? 3}%
+                    </span>
+                    {cfg.offsetPercent > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+                        Off {cfg.offsetPercent}%
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Divider */}
+                <div className="border-t border-border/50" />
+
+                {/* Signal / Position */}
+                <div className="px-4 py-2.5 min-h-[52px] flex items-center">
+                  {isRunning && cfg?.candleCount ? (() => {
+                    if (pos) {
+                      const isLong = !!state?.openLong;
+                      const lastPrice = state?.lastPrice;
+                      const tpPct = cfg.takeProfitPercent ?? 3;
+                      const slPct = cfg.stopLossPercent ?? 3;
+
+                      let progress = 0;
+                      let pnlPct = 0;
+                      if (lastPrice && pos.entryPrice) {
+                        pnlPct = isLong
+                          ? (lastPrice - pos.entryPrice) / pos.entryPrice * 100
+                          : (pos.entryPrice - lastPrice) / pos.entryPrice * 100;
+                        progress = pnlPct >= 0
+                          ? Math.min((pnlPct / tpPct) * 100, 100)
+                          : Math.max((pnlPct / slPct) * 100, -100);
+                      }
+
+                      const barColor = progress >= 0 ? 'bg-accent-green' : 'bg-accent-red';
+                      const barWidth = Math.min(Math.abs(progress), 100);
+
+                      return (
+                        <div className="w-full space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'}`}>
+                                {isLong ? 'LONG' : 'SHORT'}
+                              </span>
+                              <span className="text-xs font-semibold text-text-primary">
+                                ${pos.orderSize?.toFixed(2) ?? '—'}
+                              </span>
+                              <span className="text-[10px] text-text-secondary">
+                                {pos.quantity} {coinName}
+                              </span>
+                            </div>
+                            {consecutiveLosses > 0 && (
+                              <span className="text-[10px] text-accent-red font-medium">
+                                {consecutiveLosses} loss
+                              </span>
+                            )}
                           </div>
-                          <div>
-                            TP {cfg.takeProfitPercent ?? 3}% / SL {cfg.stopLossPercent ?? 3}%
-                          </div>
-                          {cfg.offsetPercent > 0 && <div>Offset {cfg.offsetPercent}%</div>}
+                          {lastPrice ? (
+                            <div>
+                              <div className="relative w-full h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+                                {progress >= 0 ? (
+                                  <div
+                                    className={`absolute left-0 top-0 h-full rounded-full ${barColor} transition-all`}
+                                    style={{ width: `${barWidth}%` }}
+                                  />
+                                ) : (
+                                  <div
+                                    className={`absolute right-0 top-0 h-full rounded-full ${barColor} transition-all`}
+                                    style={{ width: `${barWidth}%` }}
+                                  />
+                                )}
+                              </div>
+                              <div className={`text-[10px] font-semibold mt-0.5 ${pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                                {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}% ({progress >= 0 ? '+' : ''}{progress.toFixed(0)}%)
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-text-secondary">загрузка цены...</span>
+                          )}
                         </div>
-                      )}
-                    </td>
-                    <td className="px-5 py-3 text-center">
-                      {s.status === 'Running' && cfg?.candleCount ? (
-                        <div className="inline-flex flex-col items-center gap-0.5">
-                          {!state?.openLong && !localConfig.onlyShort && (
+                      );
+                    }
+
+                    {
+                      const nextBet = state?.nextOrderSize;
+                      const baseBet = cfg.orderSize || localConfig.betAmount;
+                      const betIncreased = nextBet && baseBet && nextBet > baseBet;
+
+                      return (
+                        <div className="flex items-center gap-3 w-full">
+                          {!localConfig.onlyShort && (
                             <div className="flex items-center gap-1">
                               <span className="text-[10px] text-accent-green font-medium">L</span>
                               <span className={`text-sm font-semibold ${(state?.longCounter ?? 0) > 0 ? 'text-accent-green' : 'text-text-secondary'}`}>
@@ -582,7 +653,7 @@ export default function ActiveBotsPage() {
                               </span>
                             </div>
                           )}
-                          {!state?.openShort && !localConfig.onlyLong && (
+                          {!localConfig.onlyLong && (
                             <div className="flex items-center gap-1">
                               <span className="text-[10px] text-accent-red font-medium">S</span>
                               <span className={`text-sm font-semibold ${(state?.shortCounter ?? 0) > 0 ? 'text-accent-red' : 'text-text-secondary'}`}>
@@ -590,97 +661,122 @@ export default function ActiveBotsPage() {
                               </span>
                             </div>
                           )}
-                          {state?.openLong && (
-                            <span className="text-[10px] text-accent-green font-medium">Long открыт</span>
+                          {nextBet != null && nextBet > 0 && (
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${betIncreased ? 'bg-accent-yellow/10 text-accent-yellow' : 'bg-bg-tertiary text-text-secondary'}`}>
+                              ${nextBet.toFixed(2)}
+                            </span>
                           )}
-                          {state?.openShort && (
-                            <span className="text-[10px] text-accent-red font-medium">Short открыт</span>
+                          {consecutiveLosses > 0 && (
+                            <div className="flex items-center gap-1 ml-auto">
+                              <span className="text-accent-red text-xs font-semibold">{consecutiveLosses}</span>
+                              <span className="text-[10px] text-text-secondary">подряд</span>
+                              <button
+                                onClick={() => {
+                                  if (confirm(`Сбросить убытки (${consecutiveLosses}) на 0?`))
+                                    resetLossesMutation.mutate(s.id);
+                                }}
+                                title="Сбросить"
+                                className="p-0.5 text-text-secondary hover:text-accent-blue transition-colors"
+                              >
+                                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                </svg>
+                              </button>
+                            </div>
                           )}
                         </div>
-                      ) : (
-                        <span className="text-text-secondary text-xs">—</span>
-                      )}
-                    </td>
-                    <td className="px-5 py-3 text-center">
-                      <div className="inline-flex items-center gap-1.5">
-                        <span className={`text-sm font-semibold ${consecutiveLosses > 0 ? 'text-accent-red' : 'text-text-secondary'}`}>
-                          {consecutiveLosses}
-                        </span>
-                        {consecutiveLosses > 0 && (
-                          <button
-                            onClick={() => {
-                              if (confirm(`Сбросить убытки (${consecutiveLosses}) на 0?`))
-                                resetLossesMutation.mutate(s.id);
-                            }}
-                            title="Сбросить убытки"
-                            className="p-0.5 text-text-secondary hover:text-accent-blue transition-colors"
-                          >
-                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                            </svg>
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-5 py-3">
-                      <StatusBadge status={s.status} />
-                    </td>
-                    <td className="px-5 py-3 text-right">
-                      <div className="inline-flex items-center gap-2 flex-wrap justify-end">
-                        {s.status === 'Running' ? (
-                          <button
-                            onClick={() => stopMutation.mutate(s.id)}
-                            className="px-3 py-1.5 text-xs font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
-                          >
-                            Стоп
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => startMutation.mutate(s.id)}
-                            className="px-3 py-1.5 text-xs font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
-                          >
-                            Старт
-                          </button>
-                        )}
-                        {s.status !== 'Running' && (
-                          <button
-                            onClick={() => setEditingStrategy(s)}
-                            className="px-3 py-1.5 text-xs font-medium bg-accent-blue/10 text-accent-blue rounded-lg hover:bg-accent-blue/20 transition-colors"
-                          >
-                            Ред.
-                          </button>
-                        )}
-                        {(state?.openLong || state?.openShort) && (
-                          <button
-                            onClick={() => {
-                              const dir = state?.openLong ? 'Long' : 'Short';
-                              const entry = state?.openLong?.entryPrice ?? state?.openShort?.entryPrice;
-                              if (confirm(`Закрыть ${dir} позицию (вход: ${entry}) по рынку?`))
-                                closePositionMutation.mutate(s.id);
-                            }}
-                            disabled={closePositionMutation.isPending}
-                            className="px-3 py-1.5 text-xs font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
-                          >
-                            {closePositionMutation.isPending ? '...' : 'Закрыть позицию'}
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id);
-                          }}
-                          className="px-3 py-1.5 text-xs font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
-                        >
-                          Удалить
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
+                      );
+                    }
+                  })() : (
+                    <span className="text-text-secondary text-xs">—</span>
+                  )}
+                </div>
+
+                {/* Divider */}
+                <div className="border-t border-border/50" />
+
+                {/* Actions */}
+                <div className="px-3 py-2 flex items-center gap-1">
+                  <button
+                    onClick={() => setChartStrategy(s)}
+                    title="График"
+                    className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() => setLogStrategy(s)}
+                    title="Логи"
+                    className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                    </svg>
+                  </button>
+
+                  <div className="flex-1" />
+
+                  {pos && (
+                    <button
+                      onClick={() => {
+                        const dir = state?.openLong ? 'Long' : 'Short';
+                        const entry = state?.openLong?.entryPrice ?? state?.openShort?.entryPrice;
+                        if (confirm(`Закрыть ${dir} позицию (вход: ${entry}) по рынку?`))
+                          closePositionMutation.mutate(s.id);
+                      }}
+                      disabled={closePositionMutation.isPending}
+                      className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
+                    >
+                      {closePositionMutation.isPending ? '...' : 'Закрыть'}
+                    </button>
+                  )}
+
+                  {isRunning ? (
+                    <button
+                      onClick={() => stopMutation.mutate(s.id)}
+                      className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+                    >
+                      Стоп
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => startMutation.mutate(s.id)}
+                        className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+                      >
+                        Старт
+                      </button>
+                      <button
+                        onClick={() => setEditingStrategy(s)}
+                        title="Редактировать"
+                        className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+                        </svg>
+                      </button>
+                    </>
+                  )}
+
+                  <button
+                    onClick={() => {
+                      if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id);
+                    }}
+                    title="Удалить"
+                    className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {showModal && activeWorkspace && (
         <AddStrategyModal
@@ -692,6 +788,14 @@ export default function ActiveBotsPage() {
 
       {editingStrategy && (
         <EditStrategyModal strategy={editingStrategy} onClose={() => setEditingStrategy(null)} />
+      )}
+
+      {chartStrategy && (
+        <ChartModal strategy={chartStrategy} onClose={() => setChartStrategy(null)} />
+      )}
+
+      {logStrategy && (
+        <LogModal strategy={logStrategy} onClose={() => setLogStrategy(null)} />
       )}
     </div>
   );
@@ -1337,6 +1441,189 @@ function EditStrategyModal({
           >
             {mutation.isPending ? 'Сохранение...' : 'Сохранить'}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Chart Modal ───────────────────────────────────────── */
+
+function ChartModal({
+  strategy,
+  onClose,
+}: {
+  strategy: Strategy;
+  onClose: () => void;
+}) {
+  const cfg = parseJson(strategy.configJson) || {};
+
+  const { data: chartData, isLoading } = useQuery<{
+    candles: CandleData[];
+    indicatorValues: IndicatorDataPoint[];
+  }>({
+    queryKey: ['strategy-chart', strategy.id],
+    queryFn: () =>
+      api.get(`/strategies/${strategy.id}/chart?limit=300`).then((r) => r.data),
+    refetchInterval: cfg.timeframe === '1m' ? 5000 : cfg.timeframe === '5m' ? 10000 : 60000,
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="bg-bg-secondary rounded-xl border border-border w-full max-w-5xl shadow-2xl">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+          <div>
+            <h2 className="text-base font-semibold text-text-primary">
+              {cfg.symbol || strategy.name}
+              <span className="ml-2 text-xs text-text-secondary font-normal">
+                {cfg.timeframe} · {cfg.indicatorType || 'EMA'}{cfg.indicatorLength || 50}
+              </span>
+            </h2>
+            <p className="text-xs text-text-secondary mt-0.5">
+              {strategy.accountName} ({strategy.exchange})
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-text-secondary hover:text-text-primary transition-colors"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="p-4">
+          <CandlestickChart
+            data={chartData?.candles || []}
+            isLoading={isLoading}
+            indicatorData={chartData?.indicatorValues}
+            indicatorColor={cfg.indicatorType === 'SMA' ? '#3b82f6' : '#f59e0b'}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Log Modal ────────────────────────────────────────── */
+
+interface StrategyLogEntry {
+  id: string;
+  level: string;
+  message: string;
+  createdAt: string;
+}
+
+function LogModal({
+  strategy,
+  onClose,
+}: {
+  strategy: Strategy;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  const { data: logs, isLoading } = useQuery<StrategyLogEntry[]>({
+    queryKey: ['strategy-logs', strategy.id],
+    queryFn: () =>
+      api.get(`/strategies/${strategy.id}/logs?limit=500`).then((r) => r.data),
+    refetchInterval: 3000,
+  });
+
+  const clearMutation = useMutation({
+    mutationFn: () => api.delete(`/strategies/${strategy.id}/logs`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['strategy-logs', strategy.id] }),
+  });
+
+  // Auto-scroll to bottom when new logs appear
+  useEffect(() => {
+    if (logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs?.length]);
+
+  const levelColors: Record<string, string> = {
+    Info: 'text-accent-blue',
+    Warning: 'text-accent-yellow',
+    Error: 'text-accent-red',
+  };
+
+  const levelBg: Record<string, string> = {
+    Info: 'bg-accent-blue/10',
+    Warning: 'bg-accent-yellow/10',
+    Error: 'bg-accent-red/10',
+  };
+
+  // Show logs oldest first (API returns newest first)
+  const sortedLogs = logs ? [...logs].reverse() : [];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="bg-bg-secondary rounded-xl border border-border w-full max-w-4xl shadow-2xl flex flex-col max-h-[85vh]">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
+          <div>
+            <h2 className="text-base font-semibold text-text-primary">
+              Логи: {strategy.name}
+            </h2>
+            <p className="text-xs text-text-secondary mt-0.5">
+              {strategy.accountName} ({strategy.exchange})
+              {logs && <span className="ml-2">{logs.length} записей</span>}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => {
+                if (confirm('Очистить все логи этого бота?'))
+                  clearMutation.mutate();
+              }}
+              disabled={clearMutation.isPending || !logs?.length}
+              className="px-3 py-1.5 text-xs font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors disabled:opacity-50"
+            >
+              {clearMutation.isPending ? 'Очистка...' : 'Очистить'}
+            </button>
+            <button
+              onClick={onClose}
+              className="text-text-secondary hover:text-text-primary transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 font-mono text-xs">
+          {isLoading ? (
+            <div className="text-center py-8 text-text-secondary">Загрузка логов...</div>
+          ) : sortedLogs.length === 0 ? (
+            <div className="text-center py-8 text-text-secondary">Нет логов. Запустите бота для начала записи.</div>
+          ) : (
+            <div className="space-y-0.5">
+              {sortedLogs.map((log) => (
+                <div
+                  key={log.id}
+                  className={`flex gap-2 px-2 py-1 rounded ${levelBg[log.level] || ''}`}
+                >
+                  <span className="text-text-secondary shrink-0 w-[140px]">
+                    {new Date(log.createdAt).toLocaleString('ru-RU', {
+                      day: '2-digit',
+                      month: '2-digit',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                    })}
+                  </span>
+                  <span className={`shrink-0 w-[52px] font-semibold ${levelColors[log.level] || 'text-text-secondary'}`}>
+                    [{log.level}]
+                  </span>
+                  <span className="text-text-primary break-all">{log.message}</span>
+                </div>
+              ))}
+              <div ref={logEndRef} />
+            </div>
+          )}
         </div>
       </div>
     </div>
