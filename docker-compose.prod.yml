@@ -47,7 +47,7 @@ services:
       - "traefik.http.routers.cryptobot-api.rule=Host(`bot.cryptopizza.pl`) && PathPrefix(`/api`)"
       - "traefik.http.routers.cryptobot-api.entrypoints=websecure"
       - "traefik.http.routers.cryptobot-api.tls=true"
-      - "traefik.http.routers.cryptobot-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.cryptobot-api.tls.certresolver=le"
       - "traefik.http.services.cryptobot-api.loadbalancer.server.port=5000"
 
   # Background Worker
@@ -85,7 +85,7 @@ services:
       - "traefik.http.routers.cryptobot-web.rule=Host(`bot.cryptopizza.pl`)"
       - "traefik.http.routers.cryptobot-web.entrypoints=websecure"
       - "traefik.http.routers.cryptobot-web.tls=true"
-      - "traefik.http.routers.cryptobot-web.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.cryptobot-web.tls.certresolver=le"
       - "traefik.http.routers.cryptobot-web.priority=1"
       - "traefik.http.services.cryptobot-web.loadbalancer.server.port=80"
 
