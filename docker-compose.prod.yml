@@ -1,0 +1,93 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: cryptobot-db
+    restart: always
+    environment:
+      POSTGRES_DB: cryptobot
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cryptobot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API (.NET 8)
+  api:
+    image: cryptobot-backend:latest
+    container_name: cryptobot-api
+    restart: always
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:5000
+      ConnectionStrings__Default: "Host=postgres;Port=5432;Database=cryptobot;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres}"
+      Jwt__Secret: ${JWT_SECRET}
+      Encryption__Key: ${ENCRYPTION_KEY}
+      Admin__Username: ${ADMIN_USERNAME:-admin@cryptopizza.pl}
+      Admin__Password: ${ADMIN_PASSWORD:-AdminPass_2026}
+    networks:
+      - internal
+      - web
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      # API routes
+      - "traefik.http.routers.cryptobot-api.rule=Host(`bot.cryptopizza.pl`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.cryptobot-api.entrypoints=websecure"
+      - "traefik.http.routers.cryptobot-api.tls=true"
+      - "traefik.http.routers.cryptobot-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.cryptobot-api.loadbalancer.server.port=5000"
+
+  # Background Worker
+  worker:
+    image: cryptobot-worker:latest
+    container_name: cryptobot-worker
+    restart: always
+    environment:
+      ConnectionStrings__Default: "Host=postgres;Port=5432;Database=cryptobot;Username=postgres;Password=${POSTGRES_PASSWORD:-postgres}"
+      Encryption__Key: ${ENCRYPTION_KEY}
+    networks:
+      - internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Frontend (React + nginx)
+  frontend:
+    image: cryptobot-frontend:latest
+    container_name: cryptobot-web
+    restart: always
+    networks:
+      - internal
+      - web
+    depends_on:
+      - api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      # Frontend routes (catch-all, lower priority)
+      - "traefik.http.routers.cryptobot-web.rule=Host(`bot.cryptopizza.pl`)"
+      - "traefik.http.routers.cryptobot-web.entrypoints=websecure"
+      - "traefik.http.routers.cryptobot-web.tls=true"
+      - "traefik.http.routers.cryptobot-web.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.cryptobot-web.priority=1"
+      - "traefik.http.services.cryptobot-web.loadbalancer.server.port=80"
+
+networks:
+  internal:
+    driver: bridge
+  web:
+    external: true
+
+volumes:
+  pgdata:

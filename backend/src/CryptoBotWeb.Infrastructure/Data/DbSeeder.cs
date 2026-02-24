@@ -21,6 +21,7 @@ public static class DbSeeder
             Id = Guid.NewGuid(),
             Username = adminUser,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword),
+            IsAdmin = true,
             CreatedAt = DateTime.UtcNow
         };
 
