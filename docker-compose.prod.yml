@@ -21,7 +21,9 @@ services:
 
   # Backend API (.NET 8)
   api:
-    image: cryptobot-backend:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
     container_name: cryptobot-api
     restart: always
     environment:
@@ -50,7 +52,9 @@ services:
 
   # Background Worker
   worker:
-    image: cryptobot-worker:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
     container_name: cryptobot-worker
     restart: always
     environment:
@@ -64,7 +68,9 @@ services:
 
   # Frontend (React + nginx)
   frontend:
-    image: cryptobot-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
     container_name: cryptobot-web
     restart: always
     networks:

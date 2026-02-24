@@ -1,0 +1,19 @@
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+
+# Copy csproj files and restore
+COPY src/CryptoBotWeb.Core/CryptoBotWeb.Core.csproj src/CryptoBotWeb.Core/
+COPY src/CryptoBotWeb.Infrastructure/CryptoBotWeb.Infrastructure.csproj src/CryptoBotWeb.Infrastructure/
+COPY src/CryptoBotWeb.Api/CryptoBotWeb.Api.csproj src/CryptoBotWeb.Api/
+RUN dotnet restore src/CryptoBotWeb.Api/CryptoBotWeb.Api.csproj
+
+# Copy everything and publish (skip global.json which pins SDK 10.x)
+COPY src/ src/
+RUN dotnet publish src/CryptoBotWeb.Api/CryptoBotWeb.Api.csproj -c Release -o /app/publish
+
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+COPY --from=build /app/publish .
+EXPOSE 5000
+ENV ASPNETCORE_URLS=http://+:5000
+ENTRYPOINT ["dotnet", "CryptoBotWeb.Api.dll"]
