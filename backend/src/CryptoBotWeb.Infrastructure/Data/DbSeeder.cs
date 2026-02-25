@@ -1,4 +1,5 @@
 using CryptoBotWeb.Core.Entities;
+using CryptoBotWeb.Core.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -21,7 +22,8 @@ public static class DbSeeder
             Id = Guid.NewGuid(),
             Username = adminUser,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(adminPassword),
-            IsAdmin = true,
+            Role = UserRole.Admin,
+            IsEnabled = true,
             CreatedAt = DateTime.UtcNow
         };
 

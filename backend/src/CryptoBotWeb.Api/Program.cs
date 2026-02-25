@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using System.Text;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
@@ -73,6 +74,33 @@ if (app.Environment.IsDevelopment())
 app.UseCors();
 app.UseAuthentication();
 app.UseAuthorization();
+
+// Check IsEnabled on every authenticated request
+app.Use(async (context, next) =>
+{
+    if (context.User.Identity?.IsAuthenticated == true)
+    {
+        var userIdClaim = context.User.FindFirstValue(System.Security.Claims.ClaimTypes.NameIdentifier);
+        if (userIdClaim != null)
+        {
+            var db = context.RequestServices.GetRequiredService<AppDbContext>();
+            var isEnabled = await db.Users
+                .AsNoTracking()
+                .Where(u => u.Id == Guid.Parse(userIdClaim))
+                .Select(u => (bool?)u.IsEnabled)
+                .FirstOrDefaultAsync();
+
+            if (isEnabled != true)
+            {
+                context.Response.StatusCode = 403;
+                await context.Response.WriteAsJsonAsync(new { message = "Account is disabled" });
+                return;
+            }
+        }
+    }
+    await next();
+});
+
 app.MapControllers();
 
 app.Run();

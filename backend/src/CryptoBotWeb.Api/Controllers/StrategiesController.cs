@@ -28,11 +28,15 @@ public class StrategiesController : ControllerBase
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
 
+    private bool IsAdmin() => User.IsInRole("Admin");
+
     [HttpGet]
-    public async Task<IActionResult> GetAll()
+    public async Task<IActionResult> GetAll([FromQuery] Guid? userId)
     {
+        var targetUserId = IsAdmin() && userId.HasValue ? userId.Value : GetUserId();
+
         var strategies = await _db.Strategies
-            .Where(s => s.Account.UserId == GetUserId())
+            .Where(s => s.Account.UserId == targetUserId)
             .Select(s => new
             {
                 s.Id,
@@ -55,13 +59,13 @@ public class StrategiesController : ControllerBase
     }
 
     [HttpGet("stats")]
-    public async Task<IActionResult> GetStats([FromQuery] Guid? workspaceId)
+    public async Task<IActionResult> GetStats([FromQuery] Guid? workspaceId, [FromQuery] Guid? userId)
     {
-        var userId = GetUserId();
+        var targetUserId = IsAdmin() && userId.HasValue ? userId.Value : GetUserId();
 
         var query = _db.Strategies
             .Include(s => s.Trades)
-            .Where(s => s.Account.UserId == userId);
+            .Where(s => s.Account.UserId == targetUserId);
         if (workspaceId.HasValue)
             query = query.Where(s => s.WorkspaceId == workspaceId.Value);
 
@@ -181,7 +185,7 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> Start(Guid id)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account)
+            .Include(s => s.Account).ThenInclude(a => a.Proxy)
             .Include(s => s.Workspace)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
@@ -255,7 +259,7 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> Stop(Guid id)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account)
+            .Include(s => s.Account).ThenInclude(a => a.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)
@@ -271,7 +275,7 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> Update(Guid id, [FromBody] UpdateStrategyRequest request)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account)
+            .Include(s => s.Account).ThenInclude(a => a.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)
@@ -291,7 +295,7 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> ClosePosition(Guid id)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account)
+            .Include(s => s.Account).ThenInclude(a => a.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)
@@ -339,7 +343,7 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> ResetLosses(Guid id)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account)
+            .Include(s => s.Account).ThenInclude(a => a.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)
@@ -365,7 +369,7 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> GetChart(Guid id, [FromQuery] int limit = 300)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account)
+            .Include(s => s.Account).ThenInclude(a => a.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null) return NotFound();
@@ -459,7 +463,7 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> Delete(Guid id)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account)
+            .Include(s => s.Account).ThenInclude(a => a.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)

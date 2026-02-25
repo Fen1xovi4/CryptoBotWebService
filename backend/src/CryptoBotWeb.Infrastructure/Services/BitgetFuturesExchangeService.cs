@@ -2,6 +2,7 @@ using Bitget.Net.Clients;
 using Bitget.Net.Enums;
 using Bitget.Net.Enums.V2;
 using CryptoExchange.Net.Authentication;
+using CryptoExchange.Net.Objects;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Interfaces;
 
@@ -11,11 +12,12 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 {
     private readonly BitgetRestClient _client;
 
-    public BitgetFuturesExchangeService(string apiKey, string apiSecret, string? passphrase)
+    public BitgetFuturesExchangeService(string apiKey, string apiSecret, string? passphrase, ApiProxy? proxy = null)
     {
         _client = new BitgetRestClient(options =>
         {
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret, passphrase ?? "");
+            if (proxy != null) options.Proxy = proxy;
         });
     }
 

@@ -1,6 +1,7 @@
 using BingX.Net.Clients;
 using BingX.Net.Enums;
 using CryptoExchange.Net.Authentication;
+using CryptoExchange.Net.Objects;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
@@ -11,11 +12,12 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
 {
     private readonly BingXRestClient _client;
 
-    public BingXFuturesExchangeService(string apiKey, string apiSecret)
+    public BingXFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)
     {
         _client = new BingXRestClient(options =>
         {
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret);
+            if (proxy != null) options.Proxy = proxy;
         });
     }
 

@@ -2,23 +2,36 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 
-export default function LoginPage() {
+export default function RegisterPage() {
+  const [inviteCode, setInviteCode] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const login = useAuthStore((s) => s.login);
+  const register = useAuthStore((s) => s.register);
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters');
+      return;
+    }
+
     setLoading(true);
     try {
-      await login(username, password);
+      await register(inviteCode, username, password);
       navigate('/');
-    } catch {
-      setError('Invalid username or password');
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      setError(msg || 'Registration failed');
     } finally {
       setLoading(false);
     }
@@ -38,8 +51,8 @@ export default function LoginPage() {
             </div>
           </div>
           <div className="text-center mb-6">
-            <h1 className="text-xl font-bold text-text-primary">Welcome back</h1>
-            <p className="text-text-secondary text-sm mt-1">Sign in to your admin panel</p>
+            <h1 className="text-xl font-bold text-text-primary">Create Account</h1>
+            <p className="text-text-secondary text-sm mt-1">Register with an invite code</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -50,13 +63,30 @@ export default function LoginPage() {
             )}
 
             <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Invite Code</label>
+              <input
+                type="text"
+                value={inviteCode}
+                onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
+                className={`${inputClass} font-mono tracking-wider uppercase`}
+                placeholder="ABCD1234"
+                required
+              />
+            </div>
+
+            <div>
               <label className="block text-sm font-medium text-text-primary mb-1.5">Username</label>
-              <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} className={inputClass} placeholder="admin" required />
+              <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} className={inputClass} placeholder="Choose a username" required />
             </div>
 
             <div>
               <label className="block text-sm font-medium text-text-primary mb-1.5">Password</label>
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className={inputClass} placeholder="Enter your password" required />
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className={inputClass} placeholder="Min. 6 characters" required />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Confirm Password</label>
+              <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className={inputClass} placeholder="Repeat password" required />
             </div>
 
             <button
@@ -64,14 +94,14 @@ export default function LoginPage() {
               disabled={loading}
               className="w-full bg-accent-blue hover:bg-accent-blue/90 text-white font-medium py-2.5 px-4 rounded-lg text-sm transition-colors shadow-lg shadow-accent-blue/25 disabled:opacity-50 disabled:shadow-none"
             >
-              {loading ? 'Signing in...' : 'Sign In'}
+              {loading ? 'Registering...' : 'Register'}
             </button>
           </form>
 
           <p className="text-center mt-5 text-sm text-text-secondary">
-            Have an invite code?{' '}
-            <Link to="/register" className="text-accent-blue hover:underline font-medium">
-              Register
+            Already have an account?{' '}
+            <Link to="/login" className="text-accent-blue hover:underline font-medium">
+              Sign in
             </Link>
           </p>
         </div>

@@ -3,6 +3,7 @@ using System;
 using CryptoBotWeb.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CryptoBotWeb.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260225103710_AddProxyServers")]
+    partial class AddProxyServers
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -67,80 +70,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("exchange_accounts", (string)null);
-                });
-
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.InviteCode", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasDefaultValueSql("gen_random_uuid()");
-
-                    b.Property<short>("AssignedRole")
-                        .HasColumnType("smallint");
-
-                    b.Property<string>("Code")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("CreatedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsActive")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(true);
-
-                    b.Property<int>("MaxUses")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(1);
-
-                    b.Property<int>("UsedCount")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0);
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("Code")
-                        .IsUnique();
-
-                    b.HasIndex("CreatedByUserId");
-
-                    b.ToTable("invite_codes", (string)null);
-                });
-
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.InviteCodeUsage", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasDefaultValueSql("gen_random_uuid()");
-
-                    b.Property<Guid>("InviteCodeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("UsedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid>("UserId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("UserId");
-
-                    b.HasIndex("InviteCodeId", "UserId");
-
-                    b.ToTable("invite_code_usages", (string)null);
                 });
 
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.ProxyServer", b =>
@@ -336,23 +265,15 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<Guid?>("InvitedByUserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<bool>("IsEnabled")
+                    b.Property<bool>("IsAdmin")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
-                        .HasDefaultValue(true);
+                        .HasDefaultValue(false);
 
                     b.Property<string>("PasswordHash")
                         .IsRequired()
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
-
-                    b.Property<short>("Role")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("smallint")
-                        .HasDefaultValue((short)0);
 
                     b.Property<string>("Username")
                         .IsRequired()
@@ -360,8 +281,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                         .HasColumnType("character varying(50)");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("InvitedByUserId");
 
                     b.HasIndex("Username")
                         .IsUnique();
@@ -420,36 +339,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("Proxy");
-
-                    b.Navigation("User");
-                });
-
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.InviteCode", b =>
-                {
-                    b.HasOne("CryptoBotWeb.Core.Entities.User", "CreatedByUser")
-                        .WithMany("InviteCodes")
-                        .HasForeignKey("CreatedByUserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("CreatedByUser");
-                });
-
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.InviteCodeUsage", b =>
-                {
-                    b.HasOne("CryptoBotWeb.Core.Entities.InviteCode", "InviteCode")
-                        .WithMany("Usages")
-                        .HasForeignKey("InviteCodeId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("CryptoBotWeb.Core.Entities.User", "User")
-                        .WithMany("InviteCodeUsages")
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("InviteCode");
 
                     b.Navigation("User");
                 });
@@ -513,16 +402,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                     b.Navigation("Strategy");
                 });
 
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.User", b =>
-                {
-                    b.HasOne("CryptoBotWeb.Core.Entities.User", "InvitedByUser")
-                        .WithMany()
-                        .HasForeignKey("InvitedByUserId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.Navigation("InvitedByUser");
-                });
-
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.Workspace", b =>
                 {
                     b.HasOne("CryptoBotWeb.Core.Entities.User", "User")
@@ -541,11 +420,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                     b.Navigation("Trades");
                 });
 
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.InviteCode", b =>
-                {
-                    b.Navigation("Usages");
-                });
-
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.ProxyServer", b =>
                 {
                     b.Navigation("ExchangeAccounts");
@@ -561,10 +435,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.User", b =>
                 {
                     b.Navigation("ExchangeAccounts");
-
-                    b.Navigation("InviteCodeUsages");
-
-                    b.Navigation("InviteCodes");
 
                     b.Navigation("ProxyServers");
 

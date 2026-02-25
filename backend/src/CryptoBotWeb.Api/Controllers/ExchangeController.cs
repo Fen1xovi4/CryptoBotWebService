@@ -28,6 +28,7 @@ public class ExchangeController : ControllerBase
     public async Task<ActionResult<AccountBalanceResponse>> GetBalances(Guid accountId)
     {
         var account = await _db.ExchangeAccounts
+            .Include(a => a.Proxy)
             .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
 
         if (account == null)
@@ -57,6 +58,7 @@ public class ExchangeController : ControllerBase
     public async Task<IActionResult> GetTicker(Guid accountId, [FromQuery] string symbol)
     {
         var account = await _db.ExchangeAccounts
+            .Include(a => a.Proxy)
             .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
 
         if (account == null)

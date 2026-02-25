@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { useAuthStore } from '../stores/authStore';
 
 const api = axios.create({
   baseURL: '/api',
@@ -25,6 +26,7 @@ api.interceptors.response.use(
           const { data } = await axios.post('/api/auth/refresh', { refreshToken });
           localStorage.setItem('accessToken', data.accessToken);
           localStorage.setItem('refreshToken', data.refreshToken);
+          useAuthStore.getState().checkAuth();
           originalRequest.headers.Authorization = `Bearer ${data.accessToken}`;
           return api(originalRequest);
         } catch {
@@ -33,6 +35,14 @@ api.interceptors.response.use(
           window.location.href = '/login';
         }
       } else {
+        window.location.href = '/login';
+      }
+    }
+    if (error.response?.status === 403) {
+      const msg = error.response?.data?.message;
+      if (msg === 'Account is disabled') {
+        localStorage.removeItem('accessToken');
+        localStorage.removeItem('refreshToken');
         window.location.href = '/login';
       }
     }

@@ -11,10 +11,12 @@ public class ExchangeAccount
     public string ApiKeyEncrypted { get; set; } = string.Empty;
     public string ApiSecretEncrypted { get; set; } = string.Empty;
     public string? PassphraseEncrypted { get; set; }
+    public Guid? ProxyId { get; set; }
     public bool IsActive { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public User User { get; set; } = null!;
+    public ProxyServer? Proxy { get; set; }
     public ICollection<Strategy> Strategies { get; set; } = new List<Strategy>();
     public ICollection<Trade> Trades { get; set; } = new List<Trade>();
 }

@@ -1,5 +1,6 @@
 using BingX.Net.Clients;
 using CryptoExchange.Net.Authentication;
+using CryptoExchange.Net.Objects;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Interfaces;
 
@@ -9,18 +10,19 @@ public class BingXExchangeService : IExchangeService, IDisposable
 {
     private readonly BingXRestClient _client;
 
-    public BingXExchangeService(string apiKey, string apiSecret)
+    public BingXExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)
     {
         _client = new BingXRestClient(options =>
         {
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret);
+            if (proxy != null) options.Proxy = proxy;
         });
     }
 
-    public async Task<bool> TestConnectionAsync()
+    public async Task<(bool Success, string? Error)> TestConnectionAsync()
     {
         var result = await _client.SpotApi.Account.GetBalancesAsync();
-        return result.Success;
+        return (result.Success, result.Error?.ToString());
     }
 
     public async Task<List<BalanceDto>> GetBalancesAsync()

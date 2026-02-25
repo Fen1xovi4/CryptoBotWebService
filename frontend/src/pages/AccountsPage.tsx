@@ -1,16 +1,26 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import api from '../api/client';
 import Header from '../components/Layout/Header';
-import StatusBadge from '../components/ui/StatusBadge';
+import { useAuthStore } from '../stores/authStore';
 
 interface ExchangeAccount {
   id: string;
   name: string;
   exchangeType: number;
+  proxyId: string | null;
+  proxyName: string | null;
   isActive: boolean;
   createdAt: string;
+}
+
+interface ProxyOption {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  isActive: boolean;
 }
 
 const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
@@ -24,6 +34,7 @@ export default function AccountsPage() {
   const [showModal, setShowModal] = useState(false);
   const [editAccount, setEditAccount] = useState<ExchangeAccount | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<Record<string, ConnectionStatus>>({});
+  const [checking, setChecking] = useState<Record<string, boolean>>({});
   const queryClient = useQueryClient();
   const navigate = useNavigate();
 
@@ -32,13 +43,32 @@ export default function AccountsPage() {
     queryFn: () => api.get('/accounts').then((r) => r.data),
   });
 
+  // Auto-test active accounts on load
+  useEffect(() => {
+    if (!accounts) return;
+    const activeAccounts = accounts.filter((a) => a.isActive);
+    if (activeAccounts.length === 0) return;
+
+    activeAccounts.forEach(async (acc) => {
+      if (connectionStatus[acc.id] !== undefined) return;
+      setChecking((prev) => ({ ...prev, [acc.id]: true }));
+      try {
+        const { data } = await api.post(`/accounts/${acc.id}/test`);
+        setConnectionStatus((prev) => ({ ...prev, [acc.id]: data }));
+      } catch {
+        setConnectionStatus((prev) => ({
+          ...prev,
+          [acc.id]: { success: false, message: 'Request failed' },
+        }));
+      } finally {
+        setChecking((prev) => ({ ...prev, [acc.id]: false }));
+      }
+    });
+  }, [accounts]);
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/accounts/${id}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['accounts'] }),
-  });
-
-  const testMutation = useMutation({
-    mutationFn: (id: string) => api.post(`/accounts/${id}/test`).then((r) => r.data),
   });
 
   const toggleActiveMutation = useMutation({
@@ -76,6 +106,7 @@ export default function AccountsPage() {
             <tr className="text-xs text-text-secondary border-b border-border">
               <th className="text-left px-5 py-2.5 font-medium">Name</th>
               <th className="text-left px-5 py-2.5 font-medium">Exchange</th>
+              <th className="text-left px-5 py-2.5 font-medium">Proxy</th>
               <th className="text-left px-5 py-2.5 font-medium">Status</th>
               <th className="text-left px-5 py-2.5 font-medium">Created</th>
               <th className="text-right px-5 py-2.5 font-medium">Actions</th>
@@ -83,9 +114,9 @@ export default function AccountsPage() {
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={5} className="px-5 py-8 text-center text-text-secondary text-sm">Loading...</td></tr>
+              <tr><td colSpan={6} className="px-5 py-8 text-center text-text-secondary text-sm">Loading...</td></tr>
             ) : accounts?.length === 0 ? (
-              <tr><td colSpan={5} className="px-5 py-8 text-center text-text-secondary text-sm">No accounts yet. Add one to get started.</td></tr>
+              <tr><td colSpan={6} className="px-5 py-8 text-center text-text-secondary text-sm">No accounts yet. Add one to get started.</td></tr>
             ) : (
               accounts?.map((acc) => {
                 const status = connectionStatus[acc.id];
@@ -98,8 +129,28 @@ export default function AccountsPage() {
                       {acc.name}
                     </td>
                     <td className="px-5 py-3 text-sm text-text-secondary">{exchangeNames[acc.exchangeType]}</td>
+                    <td className="px-5 py-3 text-sm text-text-secondary">
+                      {acc.proxyName ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-accent-blue/10 text-accent-blue">
+                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+                          </svg>
+                          {acc.proxyName}
+                        </span>
+                      ) : (
+                        <span className="text-text-secondary/50">—</span>
+                      )}
+                    </td>
                     <td className="px-5 py-3">
-                      {status?.success ? (
+                      {checking[acc.id] ? (
+                        <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-accent-blue/10 text-accent-blue">
+                          <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                          Checking...
+                        </span>
+                      ) : status?.success ? (
                         <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-accent-green/10 text-accent-green">
                           <span className="w-1.5 h-1.5 rounded-full bg-accent-green animate-pulse" />
                           Connected
@@ -107,15 +158,13 @@ export default function AccountsPage() {
                       ) : status && !status.success ? (
                         <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-accent-red/10 text-accent-red">
                           <span className="w-1.5 h-1.5 rounded-full bg-accent-red" />
-                          Error
+                          Disconnected
                         </span>
-                      ) : !acc.isActive ? (
+                      ) : (
                         <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-bg-tertiary text-text-secondary">
                           <span className="w-1.5 h-1.5 rounded-full bg-text-secondary" />
                           Disconnected
                         </span>
-                      ) : (
-                        <StatusBadge status="Active" />
                       )}
                     </td>
                     <td className="px-5 py-3 text-sm text-text-secondary">
@@ -131,42 +180,29 @@ export default function AccountsPage() {
                           >
                             {toggleActiveMutation.isPending ? 'Disconnecting...' : 'Disconnect'}
                           </button>
-                        ) : !acc.isActive ? (
-                          <button
-                            onClick={async () => {
-                              toggleActiveMutation.mutate({ id: acc.id, isActive: true });
-                              try {
-                                const result = await testMutation.mutateAsync(acc.id);
-                                setConnectionStatus((prev) => ({ ...prev, [acc.id]: result }));
-                              } catch {
-                                setConnectionStatus((prev) => ({
-                                  ...prev,
-                                  [acc.id]: { success: false, message: 'Request failed' },
-                                }));
-                              }
-                            }}
-                            disabled={testMutation.isPending || toggleActiveMutation.isPending}
-                            className="px-3 py-1.5 text-xs font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
-                          >
-                            {testMutation.isPending ? 'Connecting...' : 'Connect'}
-                          </button>
                         ) : (
                           <button
                             onClick={async () => {
+                              if (!acc.isActive) {
+                                toggleActiveMutation.mutate({ id: acc.id, isActive: true });
+                              }
+                              setChecking((prev) => ({ ...prev, [acc.id]: true }));
                               try {
-                                const result = await testMutation.mutateAsync(acc.id);
-                                setConnectionStatus((prev) => ({ ...prev, [acc.id]: result }));
+                                const { data } = await api.post(`/accounts/${acc.id}/test`);
+                                setConnectionStatus((prev) => ({ ...prev, [acc.id]: data }));
                               } catch {
                                 setConnectionStatus((prev) => ({
                                   ...prev,
                                   [acc.id]: { success: false, message: 'Request failed' },
                                 }));
+                              } finally {
+                                setChecking((prev) => ({ ...prev, [acc.id]: false }));
                               }
                             }}
-                            disabled={testMutation.isPending}
-                            className="px-3 py-1.5 text-xs font-medium bg-accent-blue/10 text-accent-blue rounded-lg hover:bg-accent-blue/20 transition-colors"
+                            disabled={checking[acc.id] || toggleActiveMutation.isPending}
+                            className="px-3 py-1.5 text-xs font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
                           >
-                            {testMutation.isPending ? 'Testing...' : 'Test'}
+                            {checking[acc.id] ? 'Connecting...' : 'Connect'}
                           </button>
                         )}
                         <button
@@ -209,22 +245,37 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
     apiKey: '',
     apiSecret: '',
     passphrase: '',
+    proxyId: '',
   });
   const [error, setError] = useState('');
   const queryClient = useQueryClient();
+  const isAdmin = useAuthStore((s) => s.role === 'Admin');
+
+  const { data: proxies } = useQuery<ProxyOption[]>({
+    queryKey: ['proxies'],
+    queryFn: () => api.get('/proxies').then((r) => r.data),
+  });
 
   const mutation = useMutation({
     mutationFn: () =>
       api.post('/accounts', {
         ...form,
         passphrase: form.exchangeType === 2 ? form.passphrase : undefined,
+        proxyId: form.proxyId || undefined,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts'] });
       onClose();
     },
-    onError: () => setError('Failed to create account'),
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message;
+      setError(msg || 'Failed to create account');
+    },
   });
+
+  const activeProxies = proxies?.filter((p) => p.isActive) ?? [];
+  const hasProxies = activeProxies.length > 0;
+  const proxyRequired = !isAdmin && !form.proxyId;
 
   const inputClass = 'w-full bg-bg-primary border border-border rounded-lg px-4 py-2.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue/40 focus:border-accent-blue transition-all';
 
@@ -241,6 +292,27 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
         )}
 
         <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Proxy</label>
+            {!hasProxies && !isAdmin ? (
+              <div className="bg-accent-yellow/10 border border-accent-yellow/20 text-accent-yellow text-sm px-4 py-2.5 rounded-lg">
+                No proxies available. <Link to="/proxies" className="underline font-medium" onClick={onClose}>Add a proxy first</Link>
+              </div>
+            ) : (
+              <select
+                value={form.proxyId}
+                onChange={(e) => setForm({ ...form, proxyId: e.target.value })}
+                className={inputClass}
+              >
+                {isAdmin && <option value="">No proxy (admin)</option>}
+                {!isAdmin && <option value="">Select proxy...</option>}
+                {activeProxies.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name} ({p.host}:{p.port})</option>
+                ))}
+              </select>
+            )}
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-text-primary mb-1.5">Display Name</label>
             <input type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} placeholder="My Bybit Account" />
@@ -279,7 +351,7 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
           </button>
           <button
             onClick={() => mutation.mutate()}
-            disabled={mutation.isPending || !form.name || !form.apiKey || !form.apiSecret}
+            disabled={mutation.isPending || !form.name || !form.apiKey || !form.apiSecret || proxyRequired}
             className="px-4 py-2 text-sm font-medium bg-accent-blue hover:bg-accent-blue/90 text-white rounded-lg transition-colors shadow-md shadow-accent-blue/20 disabled:opacity-50 disabled:shadow-none"
           >
             {mutation.isPending ? 'Adding...' : 'Add Account'}
@@ -296,16 +368,28 @@ function EditAccountModal({ account, onClose }: { account: ExchangeAccount; onCl
     apiKey: '',
     apiSecret: '',
     passphrase: '',
+    proxyId: account.proxyId || '',
   });
   const [error, setError] = useState('');
   const queryClient = useQueryClient();
+  const isAdmin = useAuthStore((s) => s.role === 'Admin');
+
+  const { data: proxies } = useQuery<ProxyOption[]>({
+    queryKey: ['proxies'],
+    queryFn: () => api.get('/proxies').then((r) => r.data),
+  });
 
   const mutation = useMutation({
     mutationFn: () => {
-      const payload: Record<string, string> = { name: form.name };
+      const payload: Record<string, string | null | undefined> = { name: form.name };
       if (form.apiKey) payload.apiKey = form.apiKey;
       if (form.apiSecret) payload.apiSecret = form.apiSecret;
       if (account.exchangeType === 2 && form.passphrase) payload.passphrase = form.passphrase;
+      if (form.proxyId) {
+        payload.proxyId = form.proxyId;
+      } else if (isAdmin) {
+        payload.proxyId = '00000000-0000-0000-0000-000000000000';
+      }
       return api.put(`/accounts/${account.id}`, payload);
     },
     onSuccess: () => {
@@ -315,13 +399,15 @@ function EditAccountModal({ account, onClose }: { account: ExchangeAccount; onCl
     onError: () => setError('Failed to update account'),
   });
 
+  const activeProxies = proxies?.filter((p) => p.isActive) ?? [];
+
   const inputClass = 'w-full bg-bg-primary border border-border rounded-lg px-4 py-2.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue/40 focus:border-accent-blue transition-all';
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
       <div className="bg-bg-secondary rounded-xl border border-border p-6 w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-lg font-semibold mb-1">Edit Account</h3>
-        <p className="text-sm text-text-secondary mb-5">{exchangeNames[account.exchangeType]} — update name or API keys</p>
+        <p className="text-sm text-text-secondary mb-5">{exchangeNames[account.exchangeType]} — update name, keys, or proxy</p>
 
         {error && (
           <div className="bg-accent-red/10 border border-accent-red/20 text-accent-red text-sm px-4 py-2.5 rounded-lg mb-4">
@@ -330,6 +416,21 @@ function EditAccountModal({ account, onClose }: { account: ExchangeAccount; onCl
         )}
 
         <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Proxy</label>
+            <select
+              value={form.proxyId}
+              onChange={(e) => setForm({ ...form, proxyId: e.target.value })}
+              className={inputClass}
+            >
+              {isAdmin && <option value="">No proxy (admin)</option>}
+              {!isAdmin && !form.proxyId && <option value="">Select proxy...</option>}
+              {activeProxies.map((p) => (
+                <option key={p.id} value={p.id}>{p.name} ({p.host}:{p.port})</option>
+              ))}
+            </select>
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-text-primary mb-1.5">Display Name</label>
             <input type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} />

@@ -21,21 +21,22 @@ public class DashboardController : ControllerBase
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+    private bool IsAdmin() => User.IsInRole("Admin");
 
     [HttpGet("summary")]
-    public async Task<ActionResult<DashboardSummary>> GetSummary()
+    public async Task<ActionResult<DashboardSummary>> GetSummary([FromQuery] Guid? userId)
     {
-        var userId = GetUserId();
+        var targetUserId = IsAdmin() && userId.HasValue ? userId.Value : GetUserId();
 
         var accounts = await _db.ExchangeAccounts
-            .Where(a => a.UserId == userId)
+            .Where(a => a.UserId == targetUserId)
             .ToListAsync();
 
         var runningStrategies = await _db.Strategies
-            .CountAsync(s => s.Account.UserId == userId && s.Status == StrategyStatus.Running);
+            .CountAsync(s => s.Account.UserId == targetUserId && s.Status == StrategyStatus.Running);
 
         var totalTrades = await _db.Trades
-            .CountAsync(t => t.Account.UserId == userId);
+            .CountAsync(t => t.Account.UserId == targetUserId);
 
         return Ok(new DashboardSummary
         {

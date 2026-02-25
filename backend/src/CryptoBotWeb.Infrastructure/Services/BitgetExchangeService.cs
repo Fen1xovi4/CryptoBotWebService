@@ -1,5 +1,6 @@
 using Bitget.Net.Clients;
 using CryptoExchange.Net.Authentication;
+using CryptoExchange.Net.Objects;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Interfaces;
 
@@ -9,18 +10,19 @@ public class BitgetExchangeService : IExchangeService, IDisposable
 {
     private readonly BitgetRestClient _client;
 
-    public BitgetExchangeService(string apiKey, string apiSecret, string? passphrase)
+    public BitgetExchangeService(string apiKey, string apiSecret, string? passphrase, ApiProxy? proxy = null)
     {
         _client = new BitgetRestClient(options =>
         {
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret, passphrase ?? "");
+            if (proxy != null) options.Proxy = proxy;
         });
     }
 
-    public async Task<bool> TestConnectionAsync()
+    public async Task<(bool Success, string? Error)> TestConnectionAsync()
     {
         var result = await _client.SpotApiV2.Account.GetSpotBalancesAsync();
-        return result.Success;
+        return (result.Success, result.Error?.ToString());
     }
 
     public async Task<List<BalanceDto>> GetBalancesAsync()

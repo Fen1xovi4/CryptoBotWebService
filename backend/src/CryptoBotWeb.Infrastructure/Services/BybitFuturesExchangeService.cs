@@ -1,6 +1,7 @@
 using Bybit.Net.Clients;
 using Bybit.Net.Enums;
 using CryptoExchange.Net.Authentication;
+using CryptoExchange.Net.Objects;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Interfaces;
 
@@ -10,11 +11,12 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 {
     private readonly BybitRestClient _client;
 
-    public BybitFuturesExchangeService(string apiKey, string apiSecret)
+    public BybitFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)
     {
         _client = new BybitRestClient(options =>
         {
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret);
+            if (proxy != null) options.Proxy = proxy;
         });
     }
 

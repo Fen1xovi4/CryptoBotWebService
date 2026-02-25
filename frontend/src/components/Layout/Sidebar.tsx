@@ -12,6 +12,15 @@ const navItems = [
     ),
   },
   {
+    to: '/proxies',
+    label: 'Proxies',
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+      </svg>
+    ),
+  },
+  {
     to: '/accounts',
     label: 'Accounts',
     icon: (
@@ -60,7 +69,28 @@ const navItems = [
   },
 ];
 
+const managementNavItems = [
+  {
+    to: '/invite-codes',
+    label: 'Invite Codes',
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+      </svg>
+    ),
+  },
+];
+
 const adminNavItems = [
+  {
+    to: '/admin/users',
+    label: 'Users',
+    icon: (
+      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
+      </svg>
+    ),
+  },
   {
     to: '/tester',
     label: 'Tester',
@@ -72,9 +102,23 @@ const adminNavItems = [
   },
 ];
 
+const navLinkClass = ({ isActive }: { isActive: boolean }) =>
+  `flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13px] font-medium transition-colors ${
+    isActive
+      ? 'bg-accent-blue text-white shadow-md shadow-accent-blue/25'
+      : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
+  }`;
+
+const roleBadgeColors: Record<string, string> = {
+  Admin: 'bg-accent-blue/15 text-accent-blue',
+  Manager: 'bg-purple-500/15 text-purple-400',
+  User: 'bg-bg-tertiary text-text-secondary',
+};
+
 export default function Sidebar() {
   const logout = useAuthStore((s) => s.logout);
-  const isAdmin = useAuthStore((s) => s.isAdmin);
+  const role = useAuthStore((s) => s.role);
+  const username = useAuthStore((s) => s.username);
 
   return (
     <aside className="w-64 shrink-0 bg-bg-secondary flex flex-col h-full border-r border-border">
@@ -92,41 +136,32 @@ export default function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
+      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
         <p className="px-3 mb-2 text-[10px] font-semibold text-text-secondary uppercase tracking-widest">Menu</p>
         {navItems.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.to === '/'}
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13px] font-medium transition-colors ${
-                isActive
-                  ? 'bg-accent-blue text-white shadow-md shadow-accent-blue/25'
-                  : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
-              }`
-            }
-          >
+          <NavLink key={item.to} to={item.to} end={item.to === '/'} className={navLinkClass}>
             {item.icon}
             {item.label}
           </NavLink>
         ))}
 
-        {isAdmin && (
+        {(role === 'Admin' || role === 'Manager') && (
+          <>
+            <p className="px-3 mt-4 mb-2 text-[10px] font-semibold text-text-secondary uppercase tracking-widest">Management</p>
+            {managementNavItems.map((item) => (
+              <NavLink key={item.to} to={item.to} className={navLinkClass}>
+                {item.icon}
+                {item.label}
+              </NavLink>
+            ))}
+          </>
+        )}
+
+        {role === 'Admin' && (
           <>
             <p className="px-3 mt-4 mb-2 text-[10px] font-semibold text-text-secondary uppercase tracking-widest">Admin</p>
             {adminNavItems.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-3 py-2.5 rounded-lg text-[13px] font-medium transition-colors ${
-                    isActive
-                      ? 'bg-accent-blue text-white shadow-md shadow-accent-blue/25'
-                      : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
-                  }`
-                }
-              >
+              <NavLink key={item.to} to={item.to} className={navLinkClass}>
                 {item.icon}
                 {item.label}
               </NavLink>
@@ -135,8 +170,23 @@ export default function Sidebar() {
         )}
       </nav>
 
-      {/* Logout */}
-      <div className="px-3 py-4 border-t border-border">
+      {/* User info + Logout */}
+      <div className="px-3 py-4 border-t border-border space-y-3">
+        {username && (
+          <div className="flex items-center gap-2 px-3">
+            <div className="w-8 h-8 rounded-full bg-bg-tertiary flex items-center justify-center text-xs font-bold text-text-primary uppercase">
+              {username[0]}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-text-primary truncate">{username}</p>
+              {role && (
+                <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded ${roleBadgeColors[role] || ''}`}>
+                  {role}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
         <button
           onClick={logout}
           className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-[13px] font-medium text-text-secondary hover:bg-accent-red/10 hover:text-accent-red transition-colors"
