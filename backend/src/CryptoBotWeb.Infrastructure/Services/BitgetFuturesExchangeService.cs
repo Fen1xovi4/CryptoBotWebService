@@ -4,6 +4,8 @@ using Bitget.Net.Enums.V2;
 using CryptoExchange.Net.Authentication;
 using CryptoExchange.Net.Objects;
 using CryptoBotWeb.Core.DTOs;
+using CryptoBotWeb.Core.Enums;
+using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
 
 namespace CryptoBotWeb.Infrastructure.Services;
@@ -23,9 +25,10 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit)
     {
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
         var interval = MapInterval(timeframe);
         var result = await _client.FuturesApiV2.ExchangeData.GetKlinesAsync(
-            BitgetProductTypeV2.UsdtFutures, symbol, interval, limit: limit);
+            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, interval, limit: limit);
 
         if (!result.Success)
             throw new Exception($"Bitget GetKlines failed: {result.Error?.Message ?? "unknown error"}");
@@ -49,30 +52,32 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<decimal?> GetTickerPriceAsync(string symbol)
     {
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
         var result = await _client.FuturesApiV2.ExchangeData.GetTickersAsync(
             BitgetProductTypeV2.UsdtFutures);
 
         if (!result.Success || result.Data == null)
             return null;
 
-        var ticker = result.Data.FirstOrDefault(t => t.Symbol == symbol);
+        var ticker = result.Data.FirstOrDefault(t => t.Symbol == bitgetSymbol);
         return ticker?.LastPrice;
     }
 
     public async Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount)
     {
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
         var price = await GetTickerPriceAsync(symbol);
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
 
-        var (qtyStep, minQty) = await GetSymbolInfoAsync(symbol);
+        var (qtyStep, minQty) = await GetSymbolInfoAsync(bitgetSymbol);
         var quantity = FloorToStep(quoteAmount / price.Value, qtyStep);
 
         if (quantity < minQty)
             return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} < min {minQty} for {symbol}" };
 
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
-            BitgetProductTypeV2.UsdtFutures, symbol, "USDT",
+            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
             OrderSide.Buy, OrderType.Market, MarginMode.CrossMargin, quantity,
             tradeSide: TradeSide.Open);
 
@@ -88,18 +93,19 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> OpenShortAsync(string symbol, decimal quoteAmount)
     {
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
         var price = await GetTickerPriceAsync(symbol);
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
 
-        var (qtyStep, minQty) = await GetSymbolInfoAsync(symbol);
+        var (qtyStep, minQty) = await GetSymbolInfoAsync(bitgetSymbol);
         var quantity = FloorToStep(quoteAmount / price.Value, qtyStep);
 
         if (quantity < minQty)
             return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} < min {minQty} for {symbol}" };
 
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
-            BitgetProductTypeV2.UsdtFutures, symbol, "USDT",
+            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
             OrderSide.Sell, OrderType.Market, MarginMode.CrossMargin, quantity,
             tradeSide: TradeSide.Open);
 
@@ -115,8 +121,9 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> CloseLongAsync(string symbol, decimal quantity)
     {
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
-            BitgetProductTypeV2.UsdtFutures, symbol, "USDT",
+            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
             OrderSide.Sell, OrderType.Market, MarginMode.CrossMargin, quantity,
             tradeSide: TradeSide.Close, reduceOnly: true);
 
@@ -130,8 +137,9 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> CloseShortAsync(string symbol, decimal quantity)
     {
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
-            BitgetProductTypeV2.UsdtFutures, symbol, "USDT",
+            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
             OrderSide.Buy, OrderType.Market, MarginMode.CrossMargin, quantity,
             tradeSide: TradeSide.Close, reduceOnly: true);
 
@@ -175,12 +183,12 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         _ => TimeSpan.FromHours(1)
     };
 
-    private async Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string symbol)
+    private async Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string bitgetSymbol)
     {
         var result = await _client.FuturesApiV2.ExchangeData.GetContractsAsync(BitgetProductTypeV2.UsdtFutures);
         if (result.Success && result.Data != null)
         {
-            var contract = result.Data.FirstOrDefault(c => c.Symbol == symbol);
+            var contract = result.Data.FirstOrDefault(c => c.Symbol == bitgetSymbol);
             if (contract != null)
                 return (contract.QuantityStep, contract.MinOrderQuantity);
         }

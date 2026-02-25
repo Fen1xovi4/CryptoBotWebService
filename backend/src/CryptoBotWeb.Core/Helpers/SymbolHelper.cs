@@ -8,6 +8,8 @@ public static class SymbolHelper
 
     public static string ToExchangeSymbol(string symbol, ExchangeType exchange)
     {
+        symbol = symbol.Replace(" ", "").Trim().ToUpperInvariant();
+
         return exchange switch
         {
             ExchangeType.BingX => ConvertToBingX(symbol),

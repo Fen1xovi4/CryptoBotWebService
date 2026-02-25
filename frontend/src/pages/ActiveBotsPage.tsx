@@ -992,7 +992,7 @@ function AddStrategyModal({
       offsetPercent: Number(form.offsetPercent),
       takeProfitPercent: Number(form.takeProfitPercent),
       stopLossPercent: Number(form.stopLossPercent),
-      symbol: form.symbol.toUpperCase(),
+      symbol: form.symbol.replace(/\s+/g, '').toUpperCase(),
       timeframe: form.timeframe,
     });
 
@@ -1250,7 +1250,7 @@ function EditStrategyModal({
       offsetPercent: Number(form.offsetPercent),
       takeProfitPercent: Number(form.takeProfitPercent),
       stopLossPercent: Number(form.stopLossPercent),
-      symbol: form.symbol.toUpperCase(),
+      symbol: form.symbol.replace(/\s+/g, '').toUpperCase(),
       timeframe: form.timeframe,
       onlyLong: form.onlyLong,
       onlyShort: form.onlyShort,
