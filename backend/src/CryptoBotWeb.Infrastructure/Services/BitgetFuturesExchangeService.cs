@@ -4,7 +4,6 @@ using Bitget.Net.Enums.V2;
 using CryptoExchange.Net.Authentication;
 using CryptoExchange.Net.Objects;
 using CryptoBotWeb.Core.DTOs;
-using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
 
@@ -23,9 +22,21 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         });
     }
 
+    public async Task<List<SymbolDto>> GetSymbolsAsync()
+    {
+        var result = await _client.FuturesApiV2.ExchangeData.GetContractsAsync(BitgetProductTypeV2.UsdtFutures);
+        if (!result.Success || result.Data == null)
+            return new List<SymbolDto>();
+
+        return result.Data
+            .Select(c => new SymbolDto { Symbol = c.Symbol })
+            .OrderBy(s => s.Symbol)
+            .ToList();
+    }
+
     public async Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit)
     {
-        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
         var interval = MapInterval(timeframe);
         var result = await _client.FuturesApiV2.ExchangeData.GetKlinesAsync(
             BitgetProductTypeV2.UsdtFutures, bitgetSymbol, interval, limit: limit);
@@ -52,7 +63,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<decimal?> GetTickerPriceAsync(string symbol)
     {
-        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
         var result = await _client.FuturesApiV2.ExchangeData.GetTickersAsync(
             BitgetProductTypeV2.UsdtFutures);
 
@@ -65,7 +76,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount)
     {
-        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
         var price = await GetTickerPriceAsync(symbol);
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
@@ -93,7 +104,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> OpenShortAsync(string symbol, decimal quoteAmount)
     {
-        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
         var price = await GetTickerPriceAsync(symbol);
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
@@ -121,7 +132,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> CloseLongAsync(string symbol, decimal quantity)
     {
-        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
             BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
             OrderSide.Sell, OrderType.Market, MarginMode.CrossMargin, quantity,
@@ -137,7 +148,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> CloseShortAsync(string symbol, decimal quantity)
     {
-        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bitget);
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
             BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
             OrderSide.Buy, OrderType.Market, MarginMode.CrossMargin, quantity,

@@ -4,6 +4,7 @@ namespace CryptoBotWeb.Core.Interfaces;
 
 public interface IFuturesExchangeService : IDisposable
 {
+    Task<List<SymbolDto>> GetSymbolsAsync();
     Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit);
     Task<decimal?> GetTickerPriceAsync(string symbol);
     Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount);

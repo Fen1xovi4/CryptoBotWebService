@@ -54,6 +54,28 @@ public class ExchangeController : ControllerBase
         }
     }
 
+    [HttpGet("{accountId:guid}/symbols")]
+    public async Task<ActionResult<List<SymbolDto>>> GetSymbols(Guid accountId)
+    {
+        var account = await _db.ExchangeAccounts
+            .Include(a => a.Proxy)
+            .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
+
+        if (account == null)
+            return NotFound();
+
+        try
+        {
+            using var service = _exchangeFactory.CreateFutures(account);
+            var symbols = await service.GetSymbolsAsync();
+            return Ok(symbols);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
     [HttpGet("{accountId:guid}/ticker")]
     public async Task<IActionResult> GetTicker(Guid accountId, [FromQuery] string symbol)
     {

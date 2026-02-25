@@ -3,7 +3,6 @@ using Bybit.Net.Enums;
 using CryptoExchange.Net.Authentication;
 using CryptoExchange.Net.Objects;
 using CryptoBotWeb.Core.DTOs;
-using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
 
@@ -22,9 +21,21 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         });
     }
 
+    public async Task<List<SymbolDto>> GetSymbolsAsync()
+    {
+        var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(Category.Linear);
+        if (!result.Success || result.Data?.List == null)
+            return new List<SymbolDto>();
+
+        return result.Data.List
+            .Select(s => new SymbolDto { Symbol = s.Name })
+            .OrderBy(s => s.Symbol)
+            .ToList();
+    }
+
     public async Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit)
     {
-        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bybit);
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
         var interval = MapInterval(timeframe);
         var result = await _client.V5Api.ExchangeData.GetKlinesAsync(
             Category.Linear, bybitSymbol, interval, limit: limit);
@@ -51,7 +62,7 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     public async Task<decimal?> GetTickerPriceAsync(string symbol)
     {
-        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bybit);
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
         var result = await _client.V5Api.ExchangeData.GetLinearInverseTickersAsync(Category.Linear, bybitSymbol);
         if (!result.Success || result.Data?.List == null)
             return null;
@@ -62,7 +73,7 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount)
     {
-        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bybit);
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
         var price = await GetTickerPriceAsync(symbol);
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
@@ -88,7 +99,7 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> OpenShortAsync(string symbol, decimal quoteAmount)
     {
-        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bybit);
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
         var price = await GetTickerPriceAsync(symbol);
         if (price == null || price == 0)
             return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
@@ -114,7 +125,7 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> CloseLongAsync(string symbol, decimal quantity)
     {
-        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bybit);
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
         var result = await _client.V5Api.Trading.PlaceOrderAsync(
             Category.Linear, bybitSymbol, OrderSide.Sell, NewOrderType.Market, quantity,
             reduceOnly: true);
@@ -129,7 +140,7 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderResultDto> CloseShortAsync(string symbol, decimal quantity)
     {
-        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bybit);
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
         var result = await _client.V5Api.Trading.PlaceOrderAsync(
             Category.Linear, bybitSymbol, OrderSide.Buy, NewOrderType.Market, quantity,
             reduceOnly: true);

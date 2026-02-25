@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../api/client';
 import Header from '../components/Layout/Header';
 import StatusBadge from '../components/ui/StatusBadge';
+import SearchableSelect from '../components/ui/SearchableSelect';
 import CandlestickChart from '../components/Chart/CandlestickChart';
 import type { CandleData, IndicatorDataPoint } from '../components/Chart/CandlestickChart';
 
@@ -954,7 +955,7 @@ function AddStrategyModal({
   const [form, setForm] = useState({
     accountId: '',
     name: '',
-    symbol: 'BTCUSDT',
+    symbol: '',
     timeframe: '1h',
     indicatorType: 'EMA',
     indicatorLength: '50',
@@ -963,6 +964,18 @@ function AddStrategyModal({
     takeProfitPercent: '3',
     stopLossPercent: '3',
   });
+
+  const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
+    queryKey: ['symbols', form.accountId],
+    queryFn: () => api.get(`/exchange/${form.accountId}/symbols`).then((r) => r.data),
+    enabled: !!form.accountId,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const symbolOptions = useMemo(
+    () => (symbolsData || []).map((s) => s.symbol),
+    [symbolsData],
+  );
 
   const [error, setError] = useState('');
 
@@ -1046,7 +1059,7 @@ function AddStrategyModal({
             <label className={labelCls}>Аккаунт *</label>
             <select
               value={form.accountId}
-              onChange={(e) => setForm({ ...form, accountId: e.target.value })}
+              onChange={(e) => setForm({ ...form, accountId: e.target.value, symbol: '' })}
               className={inputCls}
             >
               <option value="">Выберите аккаунт...</option>
@@ -1080,11 +1093,13 @@ function AddStrategyModal({
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelCls}>Символ *</label>
-              <input
-                type="text"
+              <SearchableSelect
                 value={form.symbol}
-                onChange={(e) => setForm({ ...form, symbol: e.target.value })}
-                placeholder="BTCUSDT"
+                onChange={(val) => setForm({ ...form, symbol: val })}
+                options={symbolOptions}
+                placeholder="Выберите символ"
+                isLoading={symbolsLoading}
+                disabled={!form.accountId}
                 className={inputCls}
               />
             </div>
@@ -1222,6 +1237,17 @@ function EditStrategyModal({
     onlyShort: cfg.onlyShort ?? false,
   });
 
+  const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
+    queryKey: ['symbols', strategy.accountId],
+    queryFn: () => api.get(`/exchange/${strategy.accountId}/symbols`).then((r) => r.data),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const symbolOptions = useMemo(
+    () => (symbolsData || []).map((s) => s.symbol),
+    [symbolsData],
+  );
+
   const [error, setError] = useState('');
 
   const mutation = useMutation({
@@ -1311,10 +1337,12 @@ function EditStrategyModal({
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className={labelCls}>Символ *</label>
-              <input
-                type="text"
+              <SearchableSelect
                 value={form.symbol}
-                onChange={(e) => setForm({ ...form, symbol: e.target.value })}
+                onChange={(val) => setForm({ ...form, symbol: val })}
+                options={symbolOptions}
+                placeholder="Выберите символ"
+                isLoading={symbolsLoading}
                 className={inputCls}
               />
             </div>

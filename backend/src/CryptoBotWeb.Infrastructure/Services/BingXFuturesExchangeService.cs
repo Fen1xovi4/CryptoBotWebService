@@ -21,6 +21,18 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         });
     }
 
+    public async Task<List<SymbolDto>> GetSymbolsAsync()
+    {
+        var result = await _client.PerpetualFuturesApi.ExchangeData.GetContractsAsync();
+        if (!result.Success || result.Data == null)
+            return new List<SymbolDto>();
+
+        return result.Data
+            .Select(c => new SymbolDto { Symbol = c.Symbol.Replace("-", "") })
+            .OrderBy(s => s.Symbol)
+            .ToList();
+    }
+
     public async Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit)
     {
         var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
