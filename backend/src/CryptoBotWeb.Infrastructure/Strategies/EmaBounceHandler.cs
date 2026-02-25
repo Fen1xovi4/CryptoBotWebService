@@ -64,7 +64,7 @@ public class EmaBounceHandler : IStrategyHandler
         var candles = await exchange.GetKlinesAsync(config.Symbol, config.Timeframe, needsCandles);
         if (candles.Count < config.IndicatorLength)
         {
-            _logger.LogDebug("Not enough candles ({Count}/{Need}) for strategy {Id}",
+            _logger.LogWarning("Not enough candles ({Count}/{Need}) for strategy {Id}",
                 candles.Count, config.IndicatorLength, strategy.Id);
             return;
         }

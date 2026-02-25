@@ -28,7 +28,9 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         var result = await _client.PerpetualFuturesApi.ExchangeData.GetKlinesAsync(
             bingxSymbol, interval, limit: limit);
 
-        if (!result.Success || result.Data == null)
+        if (!result.Success)
+            throw new Exception($"BingX GetKlines failed: {result.Error?.Message ?? "unknown error"}");
+        if (result.Data == null)
             return new List<CandleDto>();
 
         return result.Data

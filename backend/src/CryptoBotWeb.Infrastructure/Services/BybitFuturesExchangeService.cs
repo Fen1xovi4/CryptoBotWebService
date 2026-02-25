@@ -26,7 +26,9 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         var result = await _client.V5Api.ExchangeData.GetKlinesAsync(
             Category.Linear, symbol, interval, limit: limit);
 
-        if (!result.Success || result.Data?.List == null)
+        if (!result.Success)
+            throw new Exception($"Bybit GetKlines failed: {result.Error?.Message ?? "unknown error"}");
+        if (result.Data?.List == null)
             return new List<CandleDto>();
 
         return result.Data.List

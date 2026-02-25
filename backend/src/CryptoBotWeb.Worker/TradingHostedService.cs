@@ -31,7 +31,7 @@ public class TradingHostedService : BackgroundService
                 var handlers = scope.ServiceProvider.GetServices<IStrategyHandler>();
 
                 var runningStrategies = await db.Strategies
-                    .Include(s => s.Account)
+                    .Include(s => s.Account).ThenInclude(a => a.Proxy)
                     .Where(s => s.Status == StrategyStatus.Running)
                     .ToListAsync(stoppingToken);
 

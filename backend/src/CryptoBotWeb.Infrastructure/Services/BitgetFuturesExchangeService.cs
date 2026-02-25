@@ -27,7 +27,9 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         var result = await _client.FuturesApiV2.ExchangeData.GetKlinesAsync(
             BitgetProductTypeV2.UsdtFutures, symbol, interval, limit: limit);
 
-        if (!result.Success || result.Data == null)
+        if (!result.Success)
+            throw new Exception($"Bitget GetKlines failed: {result.Error?.Message ?? "unknown error"}");
+        if (result.Data == null)
             return new List<CandleDto>();
 
         return result.Data
