@@ -58,9 +58,12 @@ public class EmaBounceHandler : IStrategyHandler
 
         // 2. Check for new closed candle
         var isFirstRun = !state.LastProcessedCandleTime.HasValue;
+        // Request 600 candles minimum so EMA has enough warm-up beyond the SMA seed
+        // (for EMA200 need ~3x period; 600 covers up to EMA200 comfortably)
+        var minCandles = 600;
         var needsCandles = isFirstRun
-            ? config.IndicatorLength + config.CandleCount + 10
-            : config.IndicatorLength + 10;
+            ? Math.Max(config.IndicatorLength + config.CandleCount + 10, minCandles)
+            : Math.Max(config.IndicatorLength + 10, minCandles);
         var candles = await exchange.GetKlinesAsync(config.Symbol, config.Timeframe, needsCandles);
         if (candles.Count < config.IndicatorLength)
         {
