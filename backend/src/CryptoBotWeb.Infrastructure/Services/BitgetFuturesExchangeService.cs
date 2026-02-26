@@ -136,7 +136,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
             BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
             OrderSide.Sell, OrderType.Market, MarginMode.CrossMargin, quantity,
-            tradeSide: TradeSide.Close, reduceOnly: true);
+            tradeSide: TradeSide.Close);
 
         return new OrderResultDto
         {
@@ -152,7 +152,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
             BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
             OrderSide.Buy, OrderType.Market, MarginMode.CrossMargin, quantity,
-            tradeSide: TradeSide.Close, reduceOnly: true);
+            tradeSide: TradeSide.Close);
 
         return new OrderResultDto
         {
