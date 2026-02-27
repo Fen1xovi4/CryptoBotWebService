@@ -1,121 +1,186 @@
 import { useQuery } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import Header from '../components/Layout/Header';
-import StatusBadge from '../components/ui/StatusBadge';
 
-interface DashboardSummary {
-  totalAccounts: number;
-  activeAccounts: number;
-  runningStrategies: number;
+interface PnlPoint {
+  date: string;
+  cumPnl: number;
+}
+
+interface WorkspaceDashboard {
+  workspaceId: string;
+  workspaceName: string;
+  totalBots: number;
+  runningBots: number;
+  botsInPosition: number;
+  realizedPnl: number;
+  unrealizedPnl: number;
   totalTrades: number;
-  accounts: { accountId: string; name: string; exchange: string; isActive: boolean }[];
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number;
+  pnlCurve: PnlPoint[];
 }
 
 export default function DashboardPage() {
-  const { data, isLoading } = useQuery<DashboardSummary>({
-    queryKey: ['dashboard'],
-    queryFn: () => api.get('/dashboard/summary').then((r) => r.data),
-    refetchInterval: 30000,
+  const navigate = useNavigate();
+
+  const { data: workspaces, isLoading } = useQuery<WorkspaceDashboard[]>({
+    queryKey: ['dashboard-workspaces'],
+    queryFn: () => api.get('/dashboard/workspaces').then((r) => r.data),
+    refetchInterval: 15000,
   });
+
+  const totalPnl = workspaces?.reduce((s, w) => s + w.realizedPnl, 0) ?? 0;
+  const totalUnrealized = workspaces?.reduce((s, w) => s + w.unrealizedPnl, 0) ?? 0;
+  const totalBots = workspaces?.reduce((s, w) => s + w.totalBots, 0) ?? 0;
+  const totalInPosition = workspaces?.reduce((s, w) => s + w.botsInPosition, 0) ?? 0;
 
   return (
     <div>
-      <Header title="Dashboard" subtitle="Overview of your trading platform" />
+      <Header title="Dashboard" subtitle="Обзор торговых воркспейсов" />
 
+      {/* Summary row */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+        <MiniStat
+          label="Realized PnL"
+          value={`$${totalPnl.toFixed(2)}`}
+          color={totalPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}
+        />
+        <MiniStat
+          label="Unrealized"
+          value={`$${totalUnrealized.toFixed(2)}`}
+          color={totalUnrealized >= 0 ? 'text-accent-green' : 'text-accent-red'}
+        />
+        <MiniStat label="Всего ботов" value={String(totalBots)} color="text-text-primary" />
+        <MiniStat label="В позиции" value={String(totalInPosition)} color="text-accent-yellow" />
+      </div>
+
+      {/* Workspace cards */}
       {isLoading ? (
-        <div className="text-text-secondary text-sm">Loading...</div>
+        <div className="text-text-secondary text-sm">Загрузка...</div>
+      ) : !workspaces?.length ? (
+        <div className="bg-bg-secondary rounded-xl border border-border p-8 text-center text-text-secondary text-sm">
+          Нет воркспейсов. Создайте первый на странице «Активные боты».
+        </div>
       ) : (
-        <>
-          <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
-            <StatCard label="Total Accounts" value={data?.totalAccounts ?? 0} icon={<WalletIcon />} iconBg="bg-accent-blue/15" iconColor="text-accent-blue" />
-            <StatCard label="Active Accounts" value={data?.activeAccounts ?? 0} icon={<CheckIcon />} iconBg="bg-accent-green/15" iconColor="text-accent-green" />
-            <StatCard label="Running Strategies" value={data?.runningStrategies ?? 0} icon={<ChartIcon />} iconBg="bg-accent-yellow/15" iconColor="text-accent-yellow" />
-            <StatCard label="Total Trades" value={data?.totalTrades ?? 0} icon={<ClockIcon />} iconBg="bg-accent-red/15" iconColor="text-accent-red" />
-          </div>
-
-          <div className="bg-bg-secondary rounded-xl border border-border overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-border">
-              <h3 className="text-sm font-semibold text-text-primary">Exchange Accounts</h3>
-            </div>
-            <table className="w-full">
-              <thead>
-                <tr className="text-xs text-text-secondary border-b border-border">
-                  <th className="text-left px-5 py-2.5 font-medium">Name</th>
-                  <th className="text-left px-5 py-2.5 font-medium">Exchange</th>
-                  <th className="text-left px-5 py-2.5 font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data?.accounts?.map((acc) => (
-                  <tr key={acc.accountId} className="border-b border-border/50 hover:bg-bg-tertiary/30 transition-colors">
-                    <td className="px-5 py-3 text-sm font-medium">{acc.name}</td>
-                    <td className="px-5 py-3 text-sm text-text-secondary">{acc.exchange}</td>
-                    <td className="px-5 py-3">
-                      <StatusBadge status={acc.isActive ? 'Active' : 'Inactive'} />
-                    </td>
-                  </tr>
-                ))}
-                {(!data?.accounts || data.accounts.length === 0) && (
-                  <tr>
-                    <td colSpan={3} className="px-5 py-8 text-center text-text-secondary text-sm">
-                      No accounts added yet
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {workspaces.map((ws) => (
+            <WorkspaceCard key={ws.workspaceId} ws={ws} onClick={() => navigate(`/workspace/${ws.workspaceId}`)} />
+          ))}
+        </div>
       )}
     </div>
   );
 }
 
-function StatCard({ label, value, icon, iconBg, iconColor }: {
-  label: string; value: number; icon: React.ReactNode; iconBg: string; iconColor: string;
-}) {
+function WorkspaceCard({ ws, onClick }: { ws: WorkspaceDashboard; onClick: () => void }) {
+  const totalPnl = ws.realizedPnl + ws.unrealizedPnl;
+
   return (
-    <div className="bg-bg-secondary rounded-xl border border-border p-4">
-      <div className="flex items-center justify-between mb-3">
-        <div className={`w-9 h-9 rounded-lg ${iconBg} flex items-center justify-center ${iconColor}`}>
-          {icon}
-        </div>
+    <div
+      onClick={onClick}
+      className="bg-bg-secondary rounded-xl border border-border p-5 cursor-pointer hover:border-accent-blue/40 transition-all group"
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-base font-semibold text-text-primary group-hover:text-accent-blue transition-colors">
+          {ws.workspaceName}
+        </h3>
+        <span className={`text-lg font-bold ${totalPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+          {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)}$
+        </span>
       </div>
-      <p className="text-2xl font-bold text-text-primary leading-none">{value}</p>
-      <p className="text-xs text-text-secondary mt-1.5">{label}</p>
+
+      {/* Stats row */}
+      <div className="flex items-center gap-4 text-xs text-text-secondary mb-3">
+        <span>
+          <span className="text-text-primary font-medium">{ws.runningBots}</span>/{ws.totalBots} ботов
+        </span>
+        <span>
+          <span className="text-accent-yellow font-medium">{ws.botsInPosition}</span> в позиции
+        </span>
+        <span>
+          <span className="text-text-primary font-medium">{ws.totalTrades}</span> сделок
+        </span>
+      </div>
+
+      {/* PnL breakdown + Win rate */}
+      <div className="flex items-center gap-4 text-xs mb-4">
+        <span className={ws.realizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}>
+          Realized: {ws.realizedPnl >= 0 ? '+' : ''}{ws.realizedPnl.toFixed(2)}$
+        </span>
+        {ws.unrealizedPnl !== 0 && (
+          <span className={ws.unrealizedPnl >= 0 ? 'text-accent-green/70' : 'text-accent-red/70'}>
+            Unrealized: {ws.unrealizedPnl >= 0 ? '+' : ''}{ws.unrealizedPnl.toFixed(2)}$
+          </span>
+        )}
+        <span className="ml-auto text-text-secondary">
+          WR: <span className="text-text-primary font-medium">{ws.winRate}%</span>
+          <span className="text-text-secondary ml-1">({ws.winningTrades}W / {ws.losingTrades}L)</span>
+        </span>
+      </div>
+
+      {/* Sparkline */}
+      {ws.pnlCurve.length > 1 && (
+        <Sparkline points={ws.pnlCurve} />
+      )}
+      {ws.pnlCurve.length <= 1 && (
+        <div className="h-10 flex items-center justify-center text-[10px] text-text-secondary">
+          Нет данных для графика
+        </div>
+      )}
     </div>
   );
 }
 
-function WalletIcon() {
+function Sparkline({ points }: { points: PnlPoint[] }) {
+  const values = points.map((p) => p.cumPnl);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  const w = 300;
+  const h = 40;
+  const pad = 2;
+
+  const coords = values.map((v, i) => {
+    const x = pad + (i / (values.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((v - min) / range) * (h - pad * 2);
+    return `${x},${y}`;
+  });
+
+  const last = values[values.length - 1];
+  const color = last >= 0 ? '#22c55e' : '#ef4444';
+
+  // Fill area
+  const fillCoords = [
+    `${pad},${h - pad}`,
+    ...coords,
+    `${w - pad},${h - pad}`,
+  ].join(' ');
+
   return (
-    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5z" />
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-10" preserveAspectRatio="none">
+      <polygon points={fillCoords} fill={color} fillOpacity={0.08} />
+      <polyline
+        points={coords.join(' ')}
+        fill="none"
+        stroke={color}
+        strokeWidth={1.5}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }
 
-function CheckIcon() {
+function MiniStat({ label, value, color }: { label: string; value: string; color: string }) {
   return (
-    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-    </svg>
-  );
-}
-
-function ChartIcon() {
-  return (
-    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6a7.5 7.5 0 107.5 7.5h-7.5V6z" />
-      <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 10.5H21A7.5 7.5 0 0013.5 3v7.5z" />
-    </svg>
-  );
-}
-
-function ClockIcon() {
-  return (
-    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-    </svg>
+    <div className="bg-bg-secondary rounded-lg border border-border px-4 py-3">
+      <p className={`text-lg font-bold ${color} leading-none`}>{value}</p>
+      <p className="text-[11px] text-text-secondary mt-1">{label}</p>
+    </div>
   );
 }

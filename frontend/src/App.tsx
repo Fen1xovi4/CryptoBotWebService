@@ -14,6 +14,7 @@ import TesterPage from './pages/TesterPage';
 import ProxiesPage from './pages/ProxiesPage';
 import UsersPage from './pages/UsersPage';
 import InviteCodesPage from './pages/InviteCodesPage';
+import WorkspaceDetailPage from './pages/WorkspaceDetailPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -55,6 +56,7 @@ export default function App() {
           }
         >
           <Route path="/" element={<DashboardPage />} />
+          <Route path="/workspace/:id" element={<WorkspaceDetailPage />} />
           <Route path="/proxies" element={<ProxiesPage />} />
           <Route path="/accounts" element={<AccountsPage />} />
           <Route path="/accounts/:id" element={<AccountDetailPage />} />
