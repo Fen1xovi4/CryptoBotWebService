@@ -424,6 +424,22 @@ public class EmaBounceHandler : IStrategyHandler
         {
             Log(strategy, "Error", $"Ошибка закрытия LONG: {result.ErrorMessage}");
             _logger.LogError("Strategy {Id}: Failed to close LONG: {Error}", strategy.Id, result.ErrorMessage);
+
+            // Position already closed on exchange side — clear local state to stop retry loop
+            if (result.ErrorMessage != null && result.ErrorMessage.Contains("No position", StringComparison.OrdinalIgnoreCase))
+            {
+                var estPnlPercent = (closePrice - position.EntryPrice) / position.EntryPrice * 100m;
+                var estPnlDollar = position.OrderSize * estPnlPercent / 100m;
+                var estCommission = position.OrderSize * 2m * 0.0005m;
+                UpdateMartingaleState(config, state, estPnlPercent, position.OrderSize);
+                RecordTrade(strategy, config.Symbol, "Sell", position.Quantity, closePrice, null, reason + " (exchange-closed)",
+                    pnlDollar: estPnlDollar - estCommission, commission: estCommission);
+                state.OpenLong = null;
+                state.LastPrice = null;
+                state.LongCounter = 0;
+                state.WaitNextCandleAfterLongClose = true;
+                Log(strategy, "Warning", $"LONG позиция уже закрыта на бирже — state очищен (примерный PnL={Math.Round(estPnlPercent, 4)}%)");
+            }
             return;
         }
 
@@ -460,6 +476,22 @@ public class EmaBounceHandler : IStrategyHandler
         {
             Log(strategy, "Error", $"Ошибка закрытия SHORT: {result.ErrorMessage}");
             _logger.LogError("Strategy {Id}: Failed to close SHORT: {Error}", strategy.Id, result.ErrorMessage);
+
+            // Position already closed on exchange side — clear local state to stop retry loop
+            if (result.ErrorMessage != null && result.ErrorMessage.Contains("No position", StringComparison.OrdinalIgnoreCase))
+            {
+                var estPnlPercent = (position.EntryPrice - closePrice) / position.EntryPrice * 100m;
+                var estPnlDollar = position.OrderSize * estPnlPercent / 100m;
+                var estCommission = position.OrderSize * 2m * 0.0005m;
+                UpdateMartingaleState(config, state, estPnlPercent, position.OrderSize);
+                RecordTrade(strategy, config.Symbol, "Buy", position.Quantity, closePrice, null, reason + " (exchange-closed)",
+                    pnlDollar: estPnlDollar - estCommission, commission: estCommission);
+                state.OpenShort = null;
+                state.LastPrice = null;
+                state.ShortCounter = 0;
+                state.WaitNextCandleAfterShortClose = true;
+                Log(strategy, "Warning", $"SHORT позиция уже закрыта на бирже — state очищен (примерный PnL={Math.Round(estPnlPercent, 4)}%)");
+            }
             return;
         }
 

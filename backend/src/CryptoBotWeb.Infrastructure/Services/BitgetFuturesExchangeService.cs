@@ -133,32 +133,46 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
     public async Task<OrderResultDto> CloseLongAsync(string symbol, decimal quantity)
     {
         var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
-        var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
-            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
-            OrderSide.Sell, OrderType.Market, MarginMode.CrossMargin, quantity,
-            tradeSide: TradeSide.Close);
+        var result = await _client.FuturesApiV2.Trading.ClosePositionsAsync(
+            BitgetProductTypeV2.UsdtFutures,
+            symbol: bitgetSymbol,
+            side: PositionSide.Long);
 
+        if (!result.Success)
+            return new OrderResultDto { Success = false, ErrorMessage = result.Error?.Message };
+
+        var fail = result.Data?.Failed?.FirstOrDefault();
+        if (fail != null)
+            return new OrderResultDto { Success = false, ErrorMessage = fail.ErrorMessage };
+
+        var success = result.Data?.Success?.FirstOrDefault();
         return new OrderResultDto
         {
-            Success = result.Success,
-            OrderId = result.Data?.OrderId,
-            ErrorMessage = result.Error?.Message
+            Success = true,
+            OrderId = success?.OrderId,
         };
     }
 
     public async Task<OrderResultDto> CloseShortAsync(string symbol, decimal quantity)
     {
         var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
-        var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
-            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
-            OrderSide.Buy, OrderType.Market, MarginMode.CrossMargin, quantity,
-            tradeSide: TradeSide.Close);
+        var result = await _client.FuturesApiV2.Trading.ClosePositionsAsync(
+            BitgetProductTypeV2.UsdtFutures,
+            symbol: bitgetSymbol,
+            side: PositionSide.Short);
 
+        if (!result.Success)
+            return new OrderResultDto { Success = false, ErrorMessage = result.Error?.Message };
+
+        var fail = result.Data?.Failed?.FirstOrDefault();
+        if (fail != null)
+            return new OrderResultDto { Success = false, ErrorMessage = fail.ErrorMessage };
+
+        var success = result.Data?.Success?.FirstOrDefault();
         return new OrderResultDto
         {
-            Success = result.Success,
-            OrderId = result.Data?.OrderId,
-            ErrorMessage = result.Error?.Message
+            Success = true,
+            OrderId = success?.OrderId,
         };
     }
 
