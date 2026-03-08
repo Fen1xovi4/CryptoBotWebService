@@ -23,14 +23,23 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     public async Task<List<SymbolDto>> GetSymbolsAsync()
     {
-        var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(Category.Linear);
-        if (!result.Success || result.Data?.List == null)
-            return new List<SymbolDto>();
+        var all = new List<SymbolDto>();
+        string? cursor = null;
 
-        return result.Data.List
-            .Select(s => new SymbolDto { Symbol = s.Name })
-            .OrderBy(s => s.Symbol)
-            .ToList();
+        do
+        {
+            var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(
+                Category.Linear, limit: 1000, cursor: cursor);
+
+            if (!result.Success || result.Data?.List == null)
+                break;
+
+            all.AddRange(result.Data.List.Select(s => new SymbolDto { Symbol = s.Name }));
+            cursor = result.Data.NextPageCursor;
+        }
+        while (!string.IsNullOrEmpty(cursor));
+
+        return all.OrderBy(s => s.Symbol).ToList();
     }
 
     public async Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit)

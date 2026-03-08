@@ -310,30 +310,133 @@ public class StrategiesController : ControllerBase
         if (state == null || (state.OpenLong == null && state.OpenShort == null))
             return BadRequest(new { message = "Нет открытой позиции" });
 
-        var config = JsonSerializer.Deserialize<JsonElement>(strategy.ConfigJson);
-        var symbol = config.GetProperty("symbol").GetString()!;
+        var emaConfig = JsonSerializer.Deserialize<EmaBounceConfig>(strategy.ConfigJson, jsonOpts);
+        var configEl = JsonSerializer.Deserialize<JsonElement>(strategy.ConfigJson);
+        var symbol = configEl.GetProperty("symbol").GetString()!;
 
         using var exchange = _exchangeFactory.CreateFutures(strategy.Account);
+
+        // Get current price for PnL calculation
+        var currentPrice = await exchange.GetTickerPriceAsync(symbol);
 
         var results = new List<string>();
 
         if (state.OpenLong != null)
         {
-            var result = await exchange.CloseLongAsync(symbol, state.OpenLong.Quantity);
-            results.Add($"Long closed: qty={state.OpenLong.Quantity}, orderId={result.OrderId}");
+            var position = state.OpenLong;
+            var result = await exchange.CloseLongAsync(symbol, position.Quantity);
+            var closePrice = currentPrice ?? position.EntryPrice;
+            var pnlPercent = (closePrice - position.EntryPrice) / position.EntryPrice * 100m;
+            var pnlDollar = position.OrderSize * pnlPercent / 100m;
+            var commission = position.OrderSize * 2m * 0.0005m;
+            var netPnl = pnlDollar - commission;
+
+            // Update martingale state
+            if (emaConfig?.UseMartingale == true)
+            {
+                state.RunningPnlDollar += pnlDollar;
+                if (pnlPercent > 0)
+                    state.ConsecutiveLosses = 0;
+                else
+                    state.ConsecutiveLosses++;
+            }
+
+            // Record trade
+            _db.Trades.Add(new Trade
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                AccountId = strategy.AccountId,
+                ExchangeOrderId = result.OrderId ?? "",
+                Symbol = symbol,
+                Side = "Sell",
+                Quantity = position.Quantity,
+                Price = closePrice,
+                Status = "ManualClose",
+                ExecutedAt = DateTime.UtcNow,
+                PnlDollar = netPnl,
+                Commission = commission
+            });
+
+            // Write log
+            _db.StrategyLogs.Add(new StrategyLog
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                Level = "Info",
+                Message = $"LONG закрыт вручную: цена={closePrice}, вход={position.EntryPrice}, PnL={Math.Round(pnlPercent, 4)}% (${Math.Round(netPnl, 2)})",
+                CreatedAt = DateTime.UtcNow
+            });
+
+            results.Add($"Long closed: qty={position.Quantity}, price={closePrice}, PnL=${Math.Round(netPnl, 2)}");
             state.OpenLong = null;
-            state.WaitNextCandleAfterLongClose = false;
+            state.LastPrice = null;
+            state.LongCounter = 0;
+            state.WaitNextCandleAfterLongClose = true;
         }
 
         if (state.OpenShort != null)
         {
-            var result = await exchange.CloseShortAsync(symbol, state.OpenShort.Quantity);
-            results.Add($"Short closed: qty={state.OpenShort.Quantity}, orderId={result.OrderId}");
+            var position = state.OpenShort;
+            var result = await exchange.CloseShortAsync(symbol, position.Quantity);
+            var closePrice = currentPrice ?? position.EntryPrice;
+            var pnlPercent = (position.EntryPrice - closePrice) / position.EntryPrice * 100m;
+            var pnlDollar = position.OrderSize * pnlPercent / 100m;
+            var commission = position.OrderSize * 2m * 0.0005m;
+            var netPnl = pnlDollar - commission;
+
+            // Update martingale state
+            if (emaConfig?.UseMartingale == true)
+            {
+                state.RunningPnlDollar += pnlDollar;
+                if (pnlPercent > 0)
+                    state.ConsecutiveLosses = 0;
+                else
+                    state.ConsecutiveLosses++;
+            }
+
+            // Record trade
+            _db.Trades.Add(new Trade
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                AccountId = strategy.AccountId,
+                ExchangeOrderId = result.OrderId ?? "",
+                Symbol = symbol,
+                Side = "Buy",
+                Quantity = position.Quantity,
+                Price = closePrice,
+                Status = "ManualClose",
+                ExecutedAt = DateTime.UtcNow,
+                PnlDollar = netPnl,
+                Commission = commission
+            });
+
+            // Write log
+            _db.StrategyLogs.Add(new StrategyLog
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                Level = "Info",
+                Message = $"SHORT закрыт вручную: цена={closePrice}, вход={position.EntryPrice}, PnL={Math.Round(pnlPercent, 4)}% (${Math.Round(netPnl, 2)})",
+                CreatedAt = DateTime.UtcNow
+            });
+
+            results.Add($"Short closed: qty={position.Quantity}, price={closePrice}, PnL=${Math.Round(netPnl, 2)}");
             state.OpenShort = null;
-            state.WaitNextCandleAfterShortClose = false;
+            state.LastPrice = null;
+            state.ShortCounter = 0;
+            state.WaitNextCandleAfterShortClose = true;
         }
 
-        strategy.StateJson = JsonSerializer.Serialize(state, jsonOpts);
+        // Recompute next order size for state display
+        if (emaConfig != null)
+            state.NextOrderSize = emaConfig.OrderSize;
+
+        strategy.StateJson = JsonSerializer.Serialize(state, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        });
         await _db.SaveChangesAsync();
 
         return Ok(new { message = "Позиция закрыта по рынку", details = results });
