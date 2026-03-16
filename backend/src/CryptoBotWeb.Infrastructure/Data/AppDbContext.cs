@@ -20,6 +20,8 @@ public class AppDbContext : DbContext
     public DbSet<Subscription> Subscriptions => Set<Subscription>();
     public DbSet<PaymentWallet> PaymentWallets => Set<PaymentWallet>();
     public DbSet<PaymentSession> PaymentSessions => Set<PaymentSession>();
+    public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
+    public DbSet<SupportMessage> SupportMessages => Set<SupportMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -236,6 +238,38 @@ public class AppDbContext : DbContext
             e.HasIndex(x => new { x.WalletId, x.Status });
             e.HasIndex(x => new { x.UserId, x.CreatedAt });
             e.HasIndex(x => x.GuestToken);
+        });
+
+        modelBuilder.Entity<SupportTicket>(e =>
+        {
+            e.ToTable("support_tickets");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.Subject).HasMaxLength(255);
+            e.Property(x => x.Status).HasConversion<short>().HasDefaultValue(TicketStatus.Open);
+            e.HasIndex(x => x.UserId);
+            e.HasIndex(x => x.Status);
+            e.HasOne(x => x.User)
+                .WithMany(u => u.SupportTickets)
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SupportMessage>(e =>
+        {
+            e.ToTable("support_messages");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.Text).HasMaxLength(4000);
+            e.HasIndex(x => x.TicketId);
+            e.HasOne(x => x.Ticket)
+                .WithMany(t => t.Messages)
+                .HasForeignKey(x => x.TicketId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.Sender)
+                .WithMany()
+                .HasForeignKey(x => x.SenderId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
     }
 }

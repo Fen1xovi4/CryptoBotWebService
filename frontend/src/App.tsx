@@ -20,6 +20,10 @@ import PaymentPage from './pages/PaymentPage';
 import AdminWalletsPage from './pages/AdminWalletsPage';
 import AdminPaymentsPage from './pages/AdminPaymentsPage';
 import GuestPaymentPage from './pages/GuestPaymentPage';
+import SupportPage from './pages/SupportPage';
+import SupportChatPage from './pages/SupportChatPage';
+import AdminSupportPage from './pages/AdminSupportPage';
+import AdminSupportChatPage from './pages/AdminSupportChatPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -78,10 +82,14 @@ export default function App() {
           <Route path="/trades" element={<TradeHistoryPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/payment" element={<PaymentPage />} />
+          <Route path="/support" element={<SupportPage />} />
+          <Route path="/support/:id" element={<SupportChatPage />} />
           <Route path="/invite-codes" element={<AdminOrManagerRoute><InviteCodesPage /></AdminOrManagerRoute>} />
           <Route path="/admin/users" element={<AdminRoute><UsersPage /></AdminRoute>} />
           <Route path="/admin/wallets" element={<AdminRoute><AdminWalletsPage /></AdminRoute>} />
           <Route path="/admin/payments" element={<AdminRoute><AdminPaymentsPage /></AdminRoute>} />
+          <Route path="/admin/support" element={<AdminRoute><AdminSupportPage /></AdminRoute>} />
+          <Route path="/admin/support/:id" element={<AdminRoute><AdminSupportChatPage /></AdminRoute>} />
           <Route path="/tester" element={<AdminRoute><TesterPage /></AdminRoute>} />
         </Route>
 

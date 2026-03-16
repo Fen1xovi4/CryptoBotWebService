@@ -21,4 +21,5 @@ public class User
     public ICollection<InviteCode> InviteCodes { get; set; } = new List<InviteCode>();
     public ICollection<InviteCodeUsage> InviteCodeUsages { get; set; } = new List<InviteCodeUsage>();
     public Subscription? Subscription { get; set; }
+    public ICollection<SupportTicket> SupportTickets { get; set; } = new List<SupportTicket>();
 }
