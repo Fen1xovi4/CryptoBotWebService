@@ -60,6 +60,19 @@ services:
       - api
     ports:
       - "3100:80"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cryptobotweb.rule=Host(`bot.cryptopizza.pl`)"
+      - "traefik.http.routers.cryptobotweb.entrypoints=websecure"
+      - "traefik.http.routers.cryptobotweb.tls.certresolver=le"
+      - "traefik.http.services.cryptobotweb.loadbalancer.server.port=80"
+    networks:
+      - default
+      - web
 
 volumes:
   pgdata:
+
+networks:
+  web:
+    external: true
