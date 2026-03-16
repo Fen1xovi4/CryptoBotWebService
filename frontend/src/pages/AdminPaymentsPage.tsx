@@ -166,6 +166,7 @@ export default function AdminPaymentsPage() {
       </div>
 
       <div className="bg-bg-secondary rounded-xl border border-border overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="text-xs text-text-secondary border-b border-border">
@@ -258,6 +259,7 @@ export default function AdminPaymentsPage() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Confirm Modal */}

@@ -51,6 +51,7 @@ export default function AccountDetailPage() {
         ) : error ? (
           <div className="px-5 py-8 text-center text-accent-red text-sm">Failed to load balances</div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="text-xs text-text-secondary border-b border-border">
@@ -79,6 +80,7 @@ export default function AccountDetailPage() {
               )}
             </tbody>
           </table>
+          </div>
         )}
       </div>
     </div>

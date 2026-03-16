@@ -605,6 +605,7 @@ function PaymentHistory({ history }: { history: PaymentSession[] }) {
 
   return (
     <div className="bg-bg-secondary rounded-xl border border-border overflow-hidden">
+      <div className="overflow-x-auto">
       <table className="w-full">
         <thead>
           <tr className="text-xs text-text-secondary border-b border-border">
@@ -650,6 +651,7 @@ function PaymentHistory({ history }: { history: PaymentSession[] }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

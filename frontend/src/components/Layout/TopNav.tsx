@@ -1,7 +1,24 @@
-export default function TopBar() {
+interface TopBarProps {
+  onMenuToggle: () => void;
+}
+
+export default function TopBar({ onMenuToggle }: TopBarProps) {
   return (
-    <header className="h-16 shrink-0 bg-bg-secondary border-b border-border flex items-center justify-between px-6">
-      <div />
+    <header className="h-14 sm:h-16 shrink-0 bg-bg-secondary border-b border-border flex items-center justify-between px-3 sm:px-6">
+      {/* Hamburger menu — mobile only */}
+      <button
+        onClick={onMenuToggle}
+        className="p-2 rounded-lg text-text-secondary hover:bg-bg-tertiary hover:text-text-primary transition-colors lg:hidden"
+        aria-label="Open menu"
+      >
+        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+        </svg>
+      </button>
+
+      {/* Spacer for desktop (no hamburger) */}
+      <div className="hidden lg:block" />
+
       <div className="flex items-center gap-4">
         <button className="relative p-2 rounded-lg text-text-secondary hover:bg-bg-tertiary hover:text-text-primary transition-colors">
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
@@ -15,7 +32,7 @@ export default function TopBar() {
               <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
             </svg>
           </div>
-          <div>
+          <div className="hidden sm:block">
             <p className="text-sm font-medium text-text-primary leading-tight">Admin</p>
             <p className="text-[11px] text-text-secondary leading-tight">Manager</p>
           </div>

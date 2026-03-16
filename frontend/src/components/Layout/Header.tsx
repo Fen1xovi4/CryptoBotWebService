@@ -6,9 +6,9 @@ interface HeaderProps {
 
 export default function Header({ title, subtitle, children }: HeaderProps) {
   return (
-    <header className="flex items-center justify-between mb-6">
+    <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4 sm:mb-6">
       <div>
-        <h2 className="text-2xl font-semibold text-text-primary">{title}</h2>
+        <h2 className="text-xl sm:text-2xl font-semibold text-text-primary">{title}</h2>
         {subtitle && <p className="text-sm text-text-secondary mt-0.5">{subtitle}</p>}
       </div>
       {children && <div className="flex items-center gap-3">{children}</div>}

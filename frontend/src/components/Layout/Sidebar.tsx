@@ -165,7 +165,12 @@ const roleBadgeColors: Record<string, string> = {
   User: 'bg-bg-tertiary text-text-secondary',
 };
 
-export default function Sidebar() {
+interface SidebarProps {
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export default function Sidebar({ isOpen, onClose }: SidebarProps) {
   const logout = useAuthStore((s) => s.logout);
   const role = useAuthStore((s) => s.role);
   const username = useAuthStore((s) => s.username);
@@ -187,109 +192,126 @@ export default function Sidebar() {
   });
 
   return (
-    <aside className="w-64 shrink-0 bg-bg-secondary flex flex-col h-full border-r border-border">
-      {/* Logo */}
-      <Link to="/" className="flex items-center gap-3 px-5 h-16 border-b border-border hover:bg-bg-tertiary transition-colors">
-        <div className="w-9 h-9 rounded-lg bg-accent-blue flex items-center justify-center shrink-0">
-          <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-        </div>
-        <div>
-          <h1 className="text-sm font-bold text-text-primary leading-tight">CryptoBot</h1>
-          <p className="text-[10px] text-text-secondary leading-tight">Trading Platform</p>
-        </div>
-      </Link>
+    <>
+      {/* Mobile overlay */}
+      {isOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 lg:hidden"
+          onClick={onClose}
+        />
+      )}
 
-      {/* Nav */}
-      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-        <p className="px-3 mb-2 text-[10px] font-semibold text-text-secondary uppercase tracking-widest">Menu</p>
-        {navItems.map((item) => (
-          <NavLink key={item.to} to={item.to} end={item.to === '/dashboard'} className={navLinkClass}>
-            {item.icon}
-            {item.label}
-          </NavLink>
-        ))}
-        {/* Support link with unread badge */}
-        <NavLink to={supportNavItem.to} className={navLinkClass}>
-          {supportNavItem.icon}
-          <span className="flex-1">{supportNavItem.label}</span>
-          {(userUnread?.count ?? 0) > 0 && (
-            <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent-blue text-white text-[10px] font-bold">
-              {userUnread!.count}
-            </span>
-          )}
-        </NavLink>
+      <aside
+        className={`
+          fixed inset-y-0 left-0 z-50 w-64 bg-bg-secondary flex flex-col h-full border-r border-border
+          transform transition-transform duration-200 ease-in-out
+          lg:static lg:translate-x-0 lg:shrink-0
+          ${isOpen ? 'translate-x-0' : '-translate-x-full'}
+        `}
+      >
+        {/* Logo */}
+        <Link to="/" className="flex items-center gap-3 px-5 h-16 border-b border-border hover:bg-bg-tertiary transition-colors">
+          <div className="w-9 h-9 rounded-lg bg-accent-blue flex items-center justify-center shrink-0">
+            <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <div>
+            <h1 className="text-sm font-bold text-text-primary leading-tight">CryptoBot</h1>
+            <p className="text-[10px] text-text-secondary leading-tight">Trading Platform</p>
+          </div>
+        </Link>
 
-        {(role === 'Admin' || role === 'Manager') && (
-          <>
-            <p className="px-3 mt-4 mb-2 text-[10px] font-semibold text-text-secondary uppercase tracking-widest">Management</p>
-            {managementNavItems.map((item) => (
-              <NavLink key={item.to} to={item.to} className={navLinkClass}>
-                {item.icon}
-                {item.label}
-              </NavLink>
-            ))}
-          </>
-        )}
-
-        {role === 'Admin' && (
-          <>
-            <p className="px-3 mt-4 mb-2 text-[10px] font-semibold text-text-secondary uppercase tracking-widest">Admin</p>
-            {adminNavItems.map((item) => (
-              <NavLink key={item.to} to={item.to} className={navLinkClass}>
-                {item.icon}
-                {item.label}
-              </NavLink>
-            ))}
-            {/* Admin support link with unread badge */}
-            <NavLink to={adminSupportNavItem.to} className={navLinkClass}>
-              {adminSupportNavItem.icon}
-              <span className="flex-1">{adminSupportNavItem.label}</span>
-              {(adminUnread?.count ?? 0) > 0 && (
-                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent-blue text-white text-[10px] font-bold">
-                  {adminUnread!.count}
-                </span>
-              )}
+        {/* Nav */}
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+          <p className="px-3 mb-2 text-[10px] font-semibold text-text-secondary uppercase tracking-widest">Menu</p>
+          {navItems.map((item) => (
+            <NavLink key={item.to} to={item.to} end={item.to === '/dashboard'} className={navLinkClass}>
+              {item.icon}
+              {item.label}
             </NavLink>
-          </>
-        )}
-      </nav>
+          ))}
+          {/* Support link with unread badge */}
+          <NavLink to={supportNavItem.to} className={navLinkClass}>
+            {supportNavItem.icon}
+            <span className="flex-1">{supportNavItem.label}</span>
+            {(userUnread?.count ?? 0) > 0 && (
+              <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent-blue text-white text-[10px] font-bold">
+                {userUnread!.count}
+              </span>
+            )}
+          </NavLink>
 
-      {/* User info + Logout */}
-      <div className="px-3 py-4 border-t border-border space-y-3">
-        {username && (
-          <div className="flex items-center gap-2 px-3">
-            <div className="w-8 h-8 rounded-full bg-bg-tertiary flex items-center justify-center text-xs font-bold text-text-primary uppercase">
-              {username[0]}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-text-primary truncate">{username}</p>
-              <div className="flex items-center gap-1.5">
-                {role && (
-                  <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded ${roleBadgeColors[role] || ''}`}>
-                    {role}
+          {(role === 'Admin' || role === 'Manager') && (
+            <>
+              <p className="px-3 mt-4 mb-2 text-[10px] font-semibold text-text-secondary uppercase tracking-widest">Management</p>
+              {managementNavItems.map((item) => (
+                <NavLink key={item.to} to={item.to} className={navLinkClass}>
+                  {item.icon}
+                  {item.label}
+                </NavLink>
+              ))}
+            </>
+          )}
+
+          {role === 'Admin' && (
+            <>
+              <p className="px-3 mt-4 mb-2 text-[10px] font-semibold text-text-secondary uppercase tracking-widest">Admin</p>
+              {adminNavItems.map((item) => (
+                <NavLink key={item.to} to={item.to} className={navLinkClass}>
+                  {item.icon}
+                  {item.label}
+                </NavLink>
+              ))}
+              {/* Admin support link with unread badge */}
+              <NavLink to={adminSupportNavItem.to} className={navLinkClass}>
+                {adminSupportNavItem.icon}
+                <span className="flex-1">{adminSupportNavItem.label}</span>
+                {(adminUnread?.count ?? 0) > 0 && (
+                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-accent-blue text-white text-[10px] font-bold">
+                    {adminUnread!.count}
                   </span>
                 )}
-                {plan && (
-                  <span className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded bg-accent-green/15 text-accent-green">
-                    {plan}
-                  </span>
-                )}
+              </NavLink>
+            </>
+          )}
+        </nav>
+
+        {/* User info + Logout */}
+        <div className="px-3 py-4 border-t border-border space-y-3">
+          {username && (
+            <div className="flex items-center gap-2 px-3">
+              <div className="w-8 h-8 rounded-full bg-bg-tertiary flex items-center justify-center text-xs font-bold text-text-primary uppercase">
+                {username[0]}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-text-primary truncate">{username}</p>
+                <div className="flex items-center gap-1.5">
+                  {role && (
+                    <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded ${roleBadgeColors[role] || ''}`}>
+                      {role}
+                    </span>
+                  )}
+                  {plan && (
+                    <span className="inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded bg-accent-green/15 text-accent-green">
+                      {plan}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        )}
-        <button
-          onClick={logout}
-          className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-[13px] font-medium text-text-secondary hover:bg-accent-red/10 hover:text-accent-red transition-colors"
-        >
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
-          </svg>
-          Logout
-        </button>
-      </div>
-    </aside>
+          )}
+          <button
+            onClick={logout}
+            className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-[13px] font-medium text-text-secondary hover:bg-accent-red/10 hover:text-accent-red transition-colors"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
+            </svg>
+            Logout
+          </button>
+        </div>
+      </aside>
+    </>
   );
 }

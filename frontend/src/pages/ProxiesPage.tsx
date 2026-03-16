@@ -50,6 +50,7 @@ export default function ProxiesPage() {
       </Header>
 
       <div className="bg-bg-secondary rounded-xl border border-border overflow-hidden">
+        <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="text-xs text-text-secondary border-b border-border">
@@ -146,6 +147,7 @@ export default function ProxiesPage() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
 
       {showModal && <AddProxyModal onClose={() => setShowModal(false)} />}

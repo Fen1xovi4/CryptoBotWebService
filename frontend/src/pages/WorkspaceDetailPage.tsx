@@ -112,6 +112,7 @@ export default function WorkspaceDetailPage() {
             Боты ({ws.runningBots}/{ws.totalBots} активных, {ws.botsInPosition} в позиции)
           </h3>
         </div>
+        <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="text-xs text-text-secondary border-b border-border">
@@ -157,6 +158,7 @@ export default function WorkspaceDetailPage() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Recent trades */}
@@ -164,6 +166,7 @@ export default function WorkspaceDetailPage() {
         <div className="px-5 py-3.5 border-b border-border">
           <h3 className="text-sm font-semibold text-text-primary">Последние сделки ({ws.totalTrades} всего)</h3>
         </div>
+        <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="text-xs text-text-secondary border-b border-border">
@@ -202,6 +205,7 @@ export default function WorkspaceDetailPage() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

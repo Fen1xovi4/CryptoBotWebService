@@ -62,6 +62,7 @@ services:
       - "3100:80"
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=web"
       - "traefik.http.routers.cryptobotweb.rule=Host(`bot.cryptopizza.pl`)"
       - "traefik.http.routers.cryptobotweb.entrypoints=websecure"
       - "traefik.http.routers.cryptobotweb.tls.certresolver=le"
