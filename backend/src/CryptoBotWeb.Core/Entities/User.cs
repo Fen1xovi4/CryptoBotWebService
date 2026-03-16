@@ -10,6 +10,8 @@ public class User
     public UserRole Role { get; set; } = UserRole.User;
     public bool IsEnabled { get; set; } = true;
     public Guid? InvitedByUserId { get; set; }
+    public bool TwoFactorEnabled { get; set; } = false;
+    public string? TwoFactorSecret { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public bool IsAdmin => Role == UserRole.Admin;

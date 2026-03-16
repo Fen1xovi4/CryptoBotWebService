@@ -5,6 +5,8 @@ import { useAuthStore } from '../stores/authStore';
 export default function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [totpCode, setTotpCode] = useState('');
+  const [requires2fa, setRequires2fa] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const login = useAuthStore((s) => s.login);
@@ -15,13 +17,23 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
     try {
-      await login(username, password);
+      await login(username, password, requires2fa ? totpCode : undefined);
       navigate('/dashboard');
-    } catch {
-      setError('Invalid username or password');
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'requiresTwoFactor' in err) {
+        setRequires2fa(true);
+      } else {
+        setError(requires2fa ? 'Invalid 2FA code' : 'Invalid username or password');
+      }
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleBack = () => {
+    setRequires2fa(false);
+    setTotpCode('');
+    setError('');
   };
 
   const inputClass = 'w-full bg-bg-primary border border-border rounded-lg px-4 py-2.5 text-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-accent-blue/40 focus:border-accent-blue transition-all';
@@ -38,8 +50,12 @@ export default function LoginPage() {
             </div>
           </div>
           <div className="text-center mb-6">
-            <h1 className="text-xl font-bold text-text-primary">Welcome back</h1>
-            <p className="text-text-secondary text-sm mt-1">Sign in to your admin panel</p>
+            <h1 className="text-xl font-bold text-text-primary">
+              {requires2fa ? 'Two-Factor Authentication' : 'Welcome back'}
+            </h1>
+            <p className="text-text-secondary text-sm mt-1">
+              {requires2fa ? 'Enter the code from your authenticator app' : 'Sign in to your admin panel'}
+            </p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -49,31 +65,58 @@ export default function LoginPage() {
               </div>
             )}
 
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Username</label>
-              <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} className={inputClass} placeholder="admin" required />
-            </div>
+            {!requires2fa ? (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-text-primary mb-1.5">Username</label>
+                  <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} className={inputClass} placeholder="admin" required />
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Password</label>
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className={inputClass} placeholder="Enter your password" required />
-            </div>
+                <div>
+                  <label className="block text-sm font-medium text-text-primary mb-1.5">Password</label>
+                  <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className={inputClass} placeholder="Enter your password" required />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Authentication Code</label>
+                <input
+                  type="text"
+                  value={totpCode}
+                  onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  className={`${inputClass} text-center text-lg tracking-widest`}
+                  placeholder="000000"
+                  maxLength={6}
+                  pattern="[0-9]{6}"
+                  autoFocus
+                  required
+                />
+              </div>
+            )}
 
             <button
               type="submit"
               disabled={loading}
               className="w-full bg-accent-blue hover:bg-accent-blue/90 text-white font-medium py-2.5 px-4 rounded-lg text-sm transition-colors shadow-lg shadow-accent-blue/25 disabled:opacity-50 disabled:shadow-none"
             >
-              {loading ? 'Signing in...' : 'Sign In'}
+              {loading ? 'Verifying...' : requires2fa ? 'Verify' : 'Sign In'}
             </button>
           </form>
 
-          <p className="text-center mt-5 text-sm text-text-secondary">
-            Have an invite code?{' '}
-            <Link to="/register" className="text-accent-blue hover:underline font-medium">
-              Register
-            </Link>
-          </p>
+          {requires2fa ? (
+            <p className="text-center mt-5 text-sm text-text-secondary">
+              <button onClick={handleBack} className="text-accent-blue hover:underline font-medium">
+                Back to login
+              </button>
+            </p>
+          ) : (
+            <p className="text-center mt-5 text-sm text-text-secondary">
+              Have an invite code?{' '}
+              <Link to="/register" className="text-accent-blue hover:underline font-medium">
+                Register
+              </Link>
+            </p>
+          )}
         </div>
       </div>
     </div>

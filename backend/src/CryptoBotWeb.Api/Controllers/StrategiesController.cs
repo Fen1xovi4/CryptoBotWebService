@@ -123,6 +123,76 @@ public class StrategiesController : ControllerBase
         return Ok(stats);
     }
 
+    [AllowAnonymous]
+    [HttpGet("top")]
+    public async Task<IActionResult> GetTopBots()
+    {
+        var since = DateTime.UtcNow.AddDays(-90);
+        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+        var topBots = await _db.Strategies
+            .Include(s => s.Trades)
+            .Include(s => s.Account)
+            .Where(s => s.Trades.Any(t => t.PnlDollar != null && t.ExecutedAt >= since))
+            .Select(s => new
+            {
+                Strategy = s,
+                Trades90d = s.Trades.Where(t => t.PnlDollar != null && t.ExecutedAt >= since).ToList(),
+                Exchange = s.Account.ExchangeType.ToString()
+            })
+            .ToListAsync();
+
+        var result = topBots
+            .Select(x =>
+            {
+                var pnl = x.Trades90d.Sum(t => t.PnlDollar ?? 0m);
+                var winning = x.Trades90d.Count(t => t.PnlDollar > 0);
+                var total = x.Trades90d.Count;
+
+                EmaBounceConfig? config = null;
+                try { config = JsonSerializer.Deserialize<EmaBounceConfig>(x.Strategy.ConfigJson, jsonOpts); }
+                catch { }
+
+                var totalVolume = x.Trades90d.Sum(t => t.Quantity * t.Price);
+                var pnlPercent = totalVolume > 0 ? pnl / totalVolume * 100m : 0m;
+
+                var runningDays = (DateTime.UtcNow - x.Strategy.CreatedAt).Days;
+
+                return new TopBotDto
+                {
+                    Id = x.Strategy.Id,
+                    Name = x.Strategy.Name,
+                    Symbol = config?.Symbol ?? "",
+                    Exchange = x.Exchange,
+                    StrategyType = x.Strategy.Type,
+                    Timeframe = config?.Timeframe ?? "",
+                    RealizedPnlPercent = Math.Round(pnlPercent, 2),
+                    RunningDays = runningDays,
+                    TotalTrades = total,
+                    WinningTrades = winning,
+                    WinRate = total > 0 ? Math.Round((decimal)winning / total * 100, 1) : 0,
+                    Config = config != null ? new TopBotConfigDto
+                    {
+                        IndicatorType = config.IndicatorType,
+                        IndicatorLength = config.IndicatorLength,
+                        TakeProfitPercent = config.TakeProfitPercent,
+                        StopLossPercent = config.StopLossPercent,
+                        OrderSize = config.OrderSize,
+                        UseMartingale = config.UseMartingale,
+                        MartingaleCoeff = config.MartingaleCoeff,
+                        OnlyLong = config.OnlyLong,
+                        OnlyShort = config.OnlyShort
+                    } : null
+                };
+            })
+            .Where(b => b.RealizedPnlPercent > 0)
+            .OrderByDescending(b => b.RealizedPnlPercent)
+            .Take(6)
+            .ToList();
+
+        return Ok(result);
+    }
+
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> GetById(Guid id)
     {

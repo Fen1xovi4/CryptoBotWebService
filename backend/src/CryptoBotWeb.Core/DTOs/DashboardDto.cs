@@ -71,3 +71,32 @@ public class BotSummaryDto
     public decimal RealizedPnl { get; set; }
     public int TotalTrades { get; set; }
 }
+
+public class TopBotDto
+{
+    public Guid Id { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string Symbol { get; set; } = string.Empty;
+    public string Exchange { get; set; } = string.Empty;
+    public string StrategyType { get; set; } = string.Empty;
+    public string Timeframe { get; set; } = string.Empty;
+    public decimal RealizedPnlPercent { get; set; }
+    public int RunningDays { get; set; }
+    public int TotalTrades { get; set; }
+    public int WinningTrades { get; set; }
+    public decimal WinRate { get; set; }
+    public TopBotConfigDto? Config { get; set; }
+}
+
+public class TopBotConfigDto
+{
+    public string IndicatorType { get; set; } = string.Empty;
+    public int IndicatorLength { get; set; }
+    public decimal TakeProfitPercent { get; set; }
+    public decimal StopLossPercent { get; set; }
+    public decimal OrderSize { get; set; }
+    public bool UseMartingale { get; set; }
+    public decimal MartingaleCoeff { get; set; }
+    public bool OnlyLong { get; set; }
+    public bool OnlyShort { get; set; }
+}

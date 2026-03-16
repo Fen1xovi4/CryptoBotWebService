@@ -35,7 +35,7 @@ interface AuthState {
   isAuthenticated: boolean;
   role: UserRole | null;
   username: string | null;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string, totpCode?: string) => Promise<void>;
   register: (inviteCode: string, username: string, password: string) => Promise<void>;
   logout: () => void;
   checkAuth: () => void;
@@ -46,8 +46,13 @@ export const useAuthStore = create<AuthState>((set) => ({
   role: getRoleFromToken(),
   username: getUsernameFromToken(),
 
-  login: async (username: string, password: string) => {
-    const { data } = await api.post('/auth/login', { username, password });
+  login: async (username: string, password: string, totpCode?: string) => {
+    const { data } = await api.post('/auth/login', { username, password, totpCode });
+    if (data.requiresTwoFactor) {
+      const err = new Error('2FA required') as Error & { requiresTwoFactor: boolean };
+      err.requiresTwoFactor = true;
+      throw err;
+    }
     localStorage.setItem('accessToken', data.accessToken);
     localStorage.setItem('refreshToken', data.refreshToken);
     set({ isAuthenticated: true, role: getRoleFromToken(), username });

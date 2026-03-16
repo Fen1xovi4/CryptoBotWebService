@@ -4,10 +4,12 @@ using System.Text;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Entities;
 using CryptoBotWeb.Core.Enums;
+using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using OtpNet;
 
 namespace CryptoBotWeb.Api.Controllers;
 
@@ -17,11 +19,13 @@ public class AuthController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IConfiguration _config;
+    private readonly IEncryptionService _encryption;
 
-    public AuthController(AppDbContext db, IConfiguration config)
+    public AuthController(AppDbContext db, IConfiguration config, IEncryptionService encryption)
     {
         _db = db;
         _config = config;
+        _encryption = encryption;
     }
 
     [HttpPost("login")]
@@ -33,6 +37,19 @@ public class AuthController : ControllerBase
 
         if (!user.IsEnabled)
             return StatusCode(403, new { message = "Account is disabled" });
+
+        if (user.TwoFactorEnabled)
+        {
+            if (string.IsNullOrEmpty(request.TotpCode))
+                return Ok(new AuthResponse { RequiresTwoFactor = true });
+
+            var base32Secret = _encryption.Decrypt(user.TwoFactorSecret!);
+            var key = Base32Encoding.ToBytes(base32Secret);
+            var totp = new Totp(key);
+
+            if (!totp.VerifyTotp(request.TotpCode, out _, VerificationWindow.RfcSpecifiedNetworkDelay))
+                return Unauthorized(new { message = "Invalid 2FA code" });
+        }
 
         var expiresAt = DateTime.UtcNow.AddMinutes(60);
         var accessToken = GenerateToken(user.Id, user.Username, user.Role, expiresAt);
@@ -111,6 +128,7 @@ public class AuthController : ControllerBase
             Plan = SubscriptionPlan.Basic,
             Status = SubscriptionStatus.Active,
             StartedAt = DateTime.UtcNow,
+            ExpiresAt = DateTime.UtcNow.AddDays(30),
             CreatedAt = DateTime.UtcNow
         });
 

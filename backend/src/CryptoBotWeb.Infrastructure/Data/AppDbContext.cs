@@ -35,6 +35,8 @@ public class AppDbContext : DbContext
             e.Property(x => x.PasswordHash).HasMaxLength(256);
             e.Property(x => x.Role).HasConversion<short>().HasDefaultValue(UserRole.User);
             e.Property(x => x.IsEnabled).HasDefaultValue(true);
+            e.Property(x => x.TwoFactorEnabled).HasDefaultValue(false);
+            e.Property(x => x.TwoFactorSecret).HasMaxLength(512);
             e.Ignore(x => x.IsAdmin);
             e.HasOne(x => x.InvitedByUser)
                 .WithMany()
