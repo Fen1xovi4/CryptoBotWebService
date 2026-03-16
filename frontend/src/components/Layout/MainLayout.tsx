@@ -1,8 +1,17 @@
+import { useEffect } from 'react';
 import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import TopBar from './TopNav';
+import { useSubscriptionStore } from '../../stores/subscriptionStore';
 
 export default function MainLayout() {
+  const fetchSubscription = useSubscriptionStore((s) => s.fetchSubscription);
+  const loaded = useSubscriptionStore((s) => s.loaded);
+
+  useEffect(() => {
+    if (!loaded) fetchSubscription();
+  }, [loaded, fetchSubscription]);
+
   return (
     <div className="flex h-screen overflow-hidden bg-bg-primary">
       <Sidebar />

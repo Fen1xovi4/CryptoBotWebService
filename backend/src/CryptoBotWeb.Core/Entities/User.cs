@@ -20,4 +20,5 @@ public class User
     public ICollection<Workspace> Workspaces { get; set; } = new List<Workspace>();
     public ICollection<InviteCode> InviteCodes { get; set; } = new List<InviteCode>();
     public ICollection<InviteCodeUsage> InviteCodeUsages { get; set; } = new List<InviteCodeUsage>();
+    public Subscription? Subscription { get; set; }
 }

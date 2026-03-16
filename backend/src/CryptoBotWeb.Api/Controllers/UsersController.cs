@@ -28,6 +28,7 @@ public class UsersController : ControllerBase
         var users = await _db.Users
             .AsNoTracking()
             .Include(u => u.InvitedByUser)
+            .Include(u => u.Subscription)
             .OrderByDescending(u => u.CreatedAt)
             .Select(u => new UserDto
             {
@@ -38,7 +39,9 @@ public class UsersController : ControllerBase
                 InvitedBy = u.InvitedByUser != null ? u.InvitedByUser.Username : null,
                 CreatedAt = u.CreatedAt,
                 AccountsCount = u.ExchangeAccounts.Count,
-                StrategiesCount = u.ExchangeAccounts.SelectMany(a => a.Strategies).Count()
+                StrategiesCount = u.ExchangeAccounts.SelectMany(a => a.Strategies).Count(),
+                Plan = u.Subscription != null ? u.Subscription.Plan.ToString() : "Basic",
+                SubscriptionExpiresAt = u.Subscription != null ? u.Subscription.ExpiresAt : null
             })
             .ToListAsync();
 

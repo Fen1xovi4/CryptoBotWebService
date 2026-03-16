@@ -1,11 +1,13 @@
 using System.Security.Claims;
 using System.Text.Json;
+using CryptoBotWeb.Core.Constants;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Entities;
 using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
+using CryptoBotWeb.Infrastructure.Strategies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -184,13 +186,26 @@ public class StrategiesController : ControllerBase
     [HttpPost("{id:guid}/start")]
     public async Task<IActionResult> Start(Guid id)
     {
+        var userId = GetUserId();
+
         var strategy = await _db.Strategies
             .Include(s => s.Account).ThenInclude(a => a.Proxy)
             .Include(s => s.Workspace)
-            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
+            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == userId);
 
         if (strategy == null)
             return NotFound();
+
+        // Subscription limit check for active bots
+        if (!IsAdmin())
+        {
+            var sub = await _db.Subscriptions.AsNoTracking().FirstOrDefaultAsync(s => s.UserId == userId);
+            var limits = PlanLimits.GetLimits(sub?.Plan ?? SubscriptionPlan.Basic);
+            var runningCount = await _db.Strategies
+                .CountAsync(s => s.Account.UserId == userId && s.Status == StrategyStatus.Running);
+            if (runningCount >= limits.MaxActiveBots)
+                return StatusCode(403, new { message = $"Active bots limit reached ({runningCount}/{limits.MaxActiveBots}). Upgrade your plan to run more bots." });
+        }
 
         // Merge workspace config into strategy config at start time
         if (strategy.Workspace != null)
@@ -429,9 +444,9 @@ public class StrategiesController : ControllerBase
             state.WaitNextCandleAfterShortClose = true;
         }
 
-        // Recompute next order size for state display
+        // Recompute next order size with proper martingale calculation
         if (emaConfig != null)
-            state.NextOrderSize = emaConfig.OrderSize;
+            state.NextOrderSize = EmaBounceHandler.GetCurrentOrderSize(emaConfig, state).orderSize;
 
         strategy.StateJson = JsonSerializer.Serialize(state, new JsonSerializerOptions
         {

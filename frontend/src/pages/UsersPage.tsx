@@ -7,6 +7,8 @@ interface UserDto {
   id: string;
   username: string;
   role: string;
+  plan?: string;
+  subscriptionExpiresAt?: string | null;
   isEnabled: boolean;
   invitedBy: string | null;
   createdAt: string;
@@ -20,11 +22,21 @@ const roleBadge: Record<string, string> = {
   User: 'bg-bg-tertiary text-text-secondary',
 };
 
+const planBadge: Record<string, string> = {
+  Basic: 'bg-bg-tertiary text-text-secondary',
+  Advanced: 'bg-accent-blue/15 text-accent-blue',
+  Pro: 'bg-accent-green/15 text-accent-green',
+};
+
 const roles = ['Admin', 'Manager', 'User'] as const;
+const plans = ['Basic', 'Advanced', 'Pro'] as const;
 
 export default function UsersPage() {
   const queryClient = useQueryClient();
   const [roleChanging, setRoleChanging] = useState<string | null>(null);
+  const [planChanging, setPlanChanging] = useState<string | null>(null);
+  const [trialEditing, setTrialEditing] = useState<string | null>(null);
+  const [extendMonths, setExtendMonths] = useState<number>(1);
 
   const { data: users, isLoading } = useQuery<UserDto[]>({
     queryKey: ['admin-users'],
@@ -37,6 +49,16 @@ export default function UsersPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin-users'] });
       setRoleChanging(null);
+    },
+  });
+
+  const planMutation = useMutation({
+    mutationFn: ({ id, plan, expiresAt }: { id: string; plan: string; expiresAt?: string | null }) =>
+      api.put(`/subscriptions/${id}`, { plan, expiresAt }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+      setPlanChanging(null);
+      setTrialEditing(null);
     },
   });
 
@@ -56,6 +78,8 @@ export default function UsersPage() {
             <tr className="text-xs text-text-secondary border-b border-border">
               <th className="text-left px-5 py-2.5 font-medium">Username</th>
               <th className="text-left px-5 py-2.5 font-medium">Role</th>
+              <th className="text-left px-5 py-2.5 font-medium">Plan</th>
+              <th className="text-left px-5 py-2.5 font-medium">Expires</th>
               <th className="text-left px-5 py-2.5 font-medium">Status</th>
               <th className="text-left px-5 py-2.5 font-medium">Invited by</th>
               <th className="text-left px-5 py-2.5 font-medium">Accounts</th>
@@ -66,9 +90,9 @@ export default function UsersPage() {
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={8} className="px-5 py-8 text-center text-text-secondary text-sm">Loading...</td></tr>
+              <tr><td colSpan={10} className="px-5 py-8 text-center text-text-secondary text-sm">Loading...</td></tr>
             ) : users?.length === 0 ? (
-              <tr><td colSpan={8} className="px-5 py-8 text-center text-text-secondary text-sm">No users found.</td></tr>
+              <tr><td colSpan={10} className="px-5 py-8 text-center text-text-secondary text-sm">No users found.</td></tr>
             ) : (
               users?.map((user) => (
                 <tr key={user.id} className="border-b border-border/50 hover:bg-bg-tertiary/30 transition-colors">
@@ -106,6 +130,104 @@ export default function UsersPage() {
                         className={`inline-flex items-center text-xs font-semibold px-2.5 py-1 rounded-full cursor-pointer hover:opacity-80 ${roleBadge[user.role] || ''}`}
                       >
                         {user.role}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-5 py-3">
+                    {planChanging === user.id ? (
+                      <div className="flex items-center gap-1">
+                        {plans.map((p) => (
+                          <button
+                            key={p}
+                            onClick={() => {
+                              if (p !== user.plan) planMutation.mutate({ id: user.id, plan: p });
+                              else setPlanChanging(null);
+                            }}
+                            className={`text-[10px] font-semibold px-2 py-0.5 rounded transition-colors ${
+                              p === user.plan
+                                ? 'ring-1 ring-accent-blue ' + (planBadge[p] || '')
+                                : 'bg-bg-tertiary text-text-secondary hover:bg-border'
+                            }`}
+                          >
+                            {p}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <span
+                        onClick={() => setPlanChanging(user.id)}
+                        className={`inline-flex items-center text-xs font-semibold px-2.5 py-1 rounded-full cursor-pointer hover:opacity-80 ${planBadge[user.plan ?? 'Basic'] || planBadge['Basic']}`}
+                      >
+                        {user.plan ?? 'Basic'}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-5 py-3">
+                    {trialEditing === user.id ? (
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {[1, 2, 3, 6, 12].map((m) => (
+                          <button
+                            key={m}
+                            onClick={() => setExtendMonths(m)}
+                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded transition-colors ${
+                              extendMonths === m
+                                ? 'bg-accent-blue/20 text-accent-blue ring-1 ring-accent-blue'
+                                : 'bg-bg-tertiary text-text-secondary hover:bg-border'
+                            }`}
+                          >
+                            {m}m
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => {
+                            // If user has active (future) expiry — extend from that date, otherwise from now
+                            const base = user.subscriptionExpiresAt && new Date(user.subscriptionExpiresAt) > new Date()
+                              ? new Date(user.subscriptionExpiresAt)
+                              : new Date();
+                            base.setMonth(base.getMonth() + extendMonths);
+                            planMutation.mutate({ id: user.id, plan: user.plan ?? 'Basic', expiresAt: base.toISOString() });
+                          }}
+                          className="text-[10px] font-semibold px-2 py-0.5 rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25"
+                        >
+                          Extend
+                        </button>
+                        {user.subscriptionExpiresAt && (
+                          <button
+                            onClick={() => planMutation.mutate({ id: user.id, plan: user.plan ?? 'Basic', expiresAt: null })}
+                            className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-accent-red/15 text-accent-red hover:bg-accent-red/25"
+                            title="Make permanent (no expiry)"
+                          >
+                            Permanent
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setTrialEditing(null)}
+                          className="text-[10px] text-text-secondary hover:text-text-primary"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <span
+                        onClick={() => { setTrialEditing(user.id); setExtendMonths(1); }}
+                        className={`text-xs cursor-pointer hover:opacity-80 ${
+                          user.subscriptionExpiresAt
+                            ? new Date(user.subscriptionExpiresAt) < new Date()
+                              ? 'text-accent-red font-medium'
+                              : 'text-text-secondary'
+                            : 'text-text-secondary/50'
+                        }`}
+                      >
+                        {user.subscriptionExpiresAt
+                          ? (() => {
+                              const exp = new Date(user.subscriptionExpiresAt);
+                              const now = new Date();
+                              const daysLeft = Math.ceil((exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                              return daysLeft > 0
+                                ? `${exp.toLocaleDateString()} (${daysLeft}d)`
+                                : `Expired ${exp.toLocaleDateString()}`;
+                            })()
+                          : 'Permanent'}
                       </span>
                     )}
                   </td>

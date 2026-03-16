@@ -3,6 +3,7 @@ using System;
 using CryptoBotWeb.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CryptoBotWeb.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260309132552_AddSubscriptions")]
+    partial class AddSubscriptions
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -21,108 +24,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
-
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.PaymentWallet", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasDefaultValueSql("gen_random_uuid()");
-
-                    b.Property<string>("AddressBep20")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<string>("AddressTrc20")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsActive")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(true);
-
-                    b.HasKey("Id");
-
-                    b.ToTable("payment_wallets", (string)null);
-                });
-
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.PaymentSession", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasDefaultValueSql("gen_random_uuid()");
-
-                    b.Property<Guid?>("AssignedInviteCodeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime?>("ConfirmedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("ConfirmedByAdminId")
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<decimal>("ExpectedAmount")
-                        .HasPrecision(18, 2)
-                        .HasColumnType("numeric(18,2)");
-
-                    b.Property<DateTime>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("GuestToken")
-                        .HasColumnType("uuid");
-
-                    b.Property<short>("Network")
-                        .HasColumnType("smallint");
-
-                    b.Property<short>("Plan")
-                        .HasColumnType("smallint");
-
-                    b.Property<decimal?>("ReceivedAmount")
-                        .HasPrecision(18, 6)
-                        .HasColumnType("numeric(18,6)");
-
-                    b.Property<short>("Status")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("smallint")
-                        .HasDefaultValue((short)0);
-
-                    b.Property<short>("Token")
-                        .HasColumnType("smallint");
-
-                    b.Property<string>("TxHash")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)");
-
-                    b.Property<Guid?>("UserId")
-                        .HasColumnType("uuid");
-
-                    b.Property<Guid>("WalletId")
-                        .HasColumnType("uuid");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AssignedInviteCodeId");
-
-                    b.HasIndex("GuestToken");
-
-                    b.HasIndex("ConfirmedByAdminId");
-
-                    b.HasIndex("WalletId", "Status");
-
-                    b.HasIndex("UserId", "CreatedAt");
-
-                    b.ToTable("payment_sessions", (string)null);
-                });
 
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.ExchangeAccount", b =>
                 {
@@ -550,38 +451,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                     b.ToTable("workspaces", (string)null);
                 });
 
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.PaymentSession", b =>
-                {
-                    b.HasOne("CryptoBotWeb.Core.Entities.InviteCode", "AssignedInviteCode")
-                        .WithMany()
-                        .HasForeignKey("AssignedInviteCodeId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("CryptoBotWeb.Core.Entities.User", "ConfirmedByAdmin")
-                        .WithMany()
-                        .HasForeignKey("ConfirmedByAdminId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("CryptoBotWeb.Core.Entities.User", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.SetNull);
-
-                    b.HasOne("CryptoBotWeb.Core.Entities.PaymentWallet", "Wallet")
-                        .WithMany("PaymentSessions")
-                        .HasForeignKey("WalletId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("AssignedInviteCode");
-
-                    b.Navigation("ConfirmedByAdmin");
-
-                    b.Navigation("User");
-
-                    b.Navigation("Wallet");
-                });
-
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.ExchangeAccount", b =>
                 {
                     b.HasOne("CryptoBotWeb.Core.Entities.ProxyServer", "Proxy")
@@ -770,11 +639,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.Workspace", b =>
                 {
                     b.Navigation("Strategies");
-                });
-
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.PaymentWallet", b =>
-                {
-                    b.Navigation("PaymentSessions");
                 });
 #pragma warning restore 612, 618
         }

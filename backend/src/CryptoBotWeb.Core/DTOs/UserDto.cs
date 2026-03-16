@@ -10,6 +10,8 @@ public class UserDto
     public DateTime CreatedAt { get; set; }
     public int AccountsCount { get; set; }
     public int StrategiesCount { get; set; }
+    public string? Plan { get; set; }
+    public DateTime? SubscriptionExpiresAt { get; set; }
 }
 
 public class UpdateUserRoleRequest

@@ -17,6 +17,9 @@ public class AppDbContext : DbContext
     public DbSet<StrategyLog> StrategyLogs => Set<StrategyLog>();
     public DbSet<InviteCode> InviteCodes => Set<InviteCode>();
     public DbSet<InviteCodeUsage> InviteCodeUsages => Set<InviteCodeUsage>();
+    public DbSet<Subscription> Subscriptions => Set<Subscription>();
+    public DbSet<PaymentWallet> PaymentWallets => Set<PaymentWallet>();
+    public DbSet<PaymentSession> PaymentSessions => Set<PaymentSession>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -170,6 +173,69 @@ public class AppDbContext : DbContext
                 .HasForeignKey(x => x.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => new { x.InviteCodeId, x.UserId });
+        });
+
+        modelBuilder.Entity<Subscription>(e =>
+        {
+            e.ToTable("subscriptions");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.Plan).HasConversion<short>().HasDefaultValue(SubscriptionPlan.Basic);
+            e.Property(x => x.Status).HasConversion<short>().HasDefaultValue(SubscriptionStatus.Active);
+            e.HasIndex(x => x.UserId).IsUnique();
+            e.HasOne(x => x.User)
+                .WithOne(u => u.Subscription)
+                .HasForeignKey<Subscription>(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.AssignedByUser)
+                .WithMany()
+                .HasForeignKey(x => x.AssignedByUserId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<PaymentWallet>(e =>
+        {
+            e.ToTable("payment_wallets");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.AddressTrc20).HasMaxLength(100);
+            e.Property(x => x.AddressBep20).HasMaxLength(100);
+            e.Property(x => x.IsActive).HasDefaultValue(true);
+        });
+
+        modelBuilder.Entity<PaymentSession>(e =>
+        {
+            e.ToTable("payment_sessions");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.Plan).HasConversion<short>();
+            e.Property(x => x.Network).HasConversion<short>();
+            e.Property(x => x.Token).HasConversion<short>();
+            e.Property(x => x.ExpectedAmount).HasPrecision(18, 2);
+            e.Property(x => x.ReceivedAmount).HasPrecision(18, 6);
+            e.Property(x => x.Status).HasConversion<short>().HasDefaultValue(PaymentSessionStatus.Pending);
+            e.Property(x => x.TxHash).HasMaxLength(200);
+            e.HasOne(x => x.User)
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .IsRequired(false)
+                .OnDelete(DeleteBehavior.SetNull);
+            e.HasOne(x => x.Wallet)
+                .WithMany(w => w.PaymentSessions)
+                .HasForeignKey(x => x.WalletId)
+                .OnDelete(DeleteBehavior.Restrict);
+            e.HasOne(x => x.ConfirmedByAdmin)
+                .WithMany()
+                .HasForeignKey(x => x.ConfirmedByAdminId)
+                .OnDelete(DeleteBehavior.SetNull);
+            e.HasOne(x => x.AssignedInviteCode)
+                .WithMany()
+                .HasForeignKey(x => x.AssignedInviteCodeId)
+                .IsRequired(false)
+                .OnDelete(DeleteBehavior.SetNull);
+            e.HasIndex(x => new { x.WalletId, x.Status });
+            e.HasIndex(x => new { x.UserId, x.CreatedAt });
+            e.HasIndex(x => x.GuestToken);
         });
     }
 }

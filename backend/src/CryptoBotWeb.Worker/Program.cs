@@ -16,7 +16,13 @@ builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>()
 
 builder.Services.AddScoped<IStrategyHandler, EmaBounceHandler>();
 
+builder.Services.AddHttpClient("TronGrid");
+builder.Services.AddHttpClient("BscRpc");
+builder.Services.AddScoped<TronGridService>();
+builder.Services.AddScoped<BscScanService>();
+
 builder.Services.AddHostedService<TradingHostedService>();
+builder.Services.AddHostedService<PaymentVerificationService>();
 
 var host = builder.Build();
 host.Run();

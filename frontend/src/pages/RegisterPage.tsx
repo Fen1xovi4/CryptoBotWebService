@@ -1,9 +1,13 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 
 export default function RegisterPage() {
-  const [inviteCode, setInviteCode] = useState('');
+  const [searchParams] = useSearchParams();
+  const [inviteCode, setInviteCode] = useState(() => {
+    const code = searchParams.get('code');
+    return code ? code.toUpperCase() : '';
+  });
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -28,7 +32,7 @@ export default function RegisterPage() {
     setLoading(true);
     try {
       await register(inviteCode, username, password);
-      navigate('/');
+      navigate('/dashboard');
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
       setError(msg || 'Registration failed');

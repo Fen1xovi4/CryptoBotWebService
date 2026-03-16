@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from './stores/authStore';
 import MainLayout from './components/Layout/MainLayout';
+import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
@@ -15,6 +16,10 @@ import ProxiesPage from './pages/ProxiesPage';
 import UsersPage from './pages/UsersPage';
 import InviteCodesPage from './pages/InviteCodesPage';
 import WorkspaceDetailPage from './pages/WorkspaceDetailPage';
+import PaymentPage from './pages/PaymentPage';
+import AdminWalletsPage from './pages/AdminWalletsPage';
+import AdminPaymentsPage from './pages/AdminPaymentsPage';
+import GuestPaymentPage from './pages/GuestPaymentPage';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -24,13 +29,13 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 function AdminRoute({ children }: { children: React.ReactNode }) {
   const role = useAuthStore((s) => s.role);
-  if (role !== 'Admin') return <Navigate to="/" replace />;
+  if (role !== 'Admin') return <Navigate to="/dashboard" replace />;
   return <>{children}</>;
 }
 
 function AdminOrManagerRoute({ children }: { children: React.ReactNode }) {
   const role = useAuthStore((s) => s.role);
-  if (role !== 'Admin' && role !== 'Manager') return <Navigate to="/" replace />;
+  if (role !== 'Admin' && role !== 'Manager') return <Navigate to="/dashboard" replace />;
   return <>{children}</>;
 }
 
@@ -40,14 +45,22 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
+        {/* Public: Landing page at root */}
+        <Route
+          path="/"
+          element={<LandingPage />}
+        />
         <Route
           path="/login"
-          element={isAuthenticated ? <Navigate to="/" replace /> : <LoginPage />}
+          element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <LoginPage />}
         />
         <Route
           path="/register"
-          element={isAuthenticated ? <Navigate to="/" replace /> : <RegisterPage />}
+          element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <RegisterPage />}
         />
+        <Route path="/buy" element={<GuestPaymentPage />} />
+
+        {/* Protected: Dashboard and app pages */}
         <Route
           element={
             <ProtectedRoute>
@@ -55,7 +68,7 @@ export default function App() {
             </ProtectedRoute>
           }
         >
-          <Route path="/" element={<DashboardPage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/workspace/:id" element={<WorkspaceDetailPage />} />
           <Route path="/proxies" element={<ProxiesPage />} />
           <Route path="/accounts" element={<AccountsPage />} />
@@ -64,11 +77,16 @@ export default function App() {
           <Route path="/active-bots" element={<ActiveBotsPage />} />
           <Route path="/trades" element={<TradeHistoryPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/payment" element={<PaymentPage />} />
           <Route path="/invite-codes" element={<AdminOrManagerRoute><InviteCodesPage /></AdminOrManagerRoute>} />
           <Route path="/admin/users" element={<AdminRoute><UsersPage /></AdminRoute>} />
+          <Route path="/admin/wallets" element={<AdminRoute><AdminWalletsPage /></AdminRoute>} />
+          <Route path="/admin/payments" element={<AdminRoute><AdminPaymentsPage /></AdminRoute>} />
           <Route path="/tester" element={<AdminRoute><TesterPage /></AdminRoute>} />
         </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
+
+        {/* Catch-all */}
+        <Route path="*" element={<Navigate to={isAuthenticated ? "/dashboard" : "/"} replace />} />
       </Routes>
     </BrowserRouter>
   );

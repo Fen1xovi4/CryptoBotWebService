@@ -4,6 +4,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import api from '../api/client';
 import Header from '../components/Layout/Header';
 import { useAuthStore } from '../stores/authStore';
+import { useSubscriptionStore } from '../stores/subscriptionStore';
 
 interface ExchangeAccount {
   id: string;
@@ -37,6 +38,10 @@ export default function AccountsPage() {
   const [checking, setChecking] = useState<Record<string, boolean>>({});
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const { maxAccounts, currentAccounts } = useSubscriptionStore();
+  const role = useAuthStore((s) => s.role);
+  const isAdmin = role === 'Admin';
+  const atLimit = !isAdmin && currentAccounts >= maxAccounts && maxAccounts > 0;
 
   const { data: accounts, isLoading } = useQuery<ExchangeAccount[]>({
     queryKey: ['accounts'],
@@ -68,7 +73,10 @@ export default function AccountsPage() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/accounts/${id}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['accounts'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['accounts'] });
+      useSubscriptionStore.getState().fetchSubscription();
+    },
   });
 
   const toggleActiveMutation = useMutation({
@@ -89,15 +97,34 @@ export default function AccountsPage() {
   return (
     <div>
       <Header title="Exchange Accounts" subtitle="Manage your exchange API connections">
-        <button
-          onClick={() => setShowModal(true)}
-          className="inline-flex items-center gap-2 bg-accent-blue hover:bg-accent-blue/90 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors shadow-md shadow-accent-blue/20"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-          </svg>
-          Add Account
-        </button>
+        <div className="flex items-center gap-3">
+          {!isAdmin && maxAccounts > 0 && (
+            <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${
+              atLimit
+                ? 'bg-accent-red/10 text-accent-red'
+                : 'bg-bg-tertiary text-text-secondary'
+            }`}>
+              Accounts: {currentAccounts}/{maxAccounts}
+            </span>
+          )}
+          <div className="relative group">
+            <button
+              onClick={() => !atLimit && setShowModal(true)}
+              disabled={atLimit}
+              className="inline-flex items-center gap-2 bg-accent-blue hover:bg-accent-blue/90 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors shadow-md shadow-accent-blue/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              Add Account
+            </button>
+            {atLimit && (
+              <div className="absolute right-0 top-full mt-2 w-56 bg-bg-secondary border border-border rounded-lg px-3 py-2 text-xs text-text-secondary shadow-lg z-10 hidden group-hover:block">
+                Upgrade your plan to add more accounts
+              </div>
+            )}
+          </div>
+        </div>
       </Header>
 
       <div className="bg-bg-secondary rounded-xl border border-border overflow-hidden">
@@ -265,11 +292,17 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts'] });
+      useSubscriptionStore.getState().fetchSubscription();
       onClose();
     },
     onError: (err: any) => {
+      const status = err?.response?.status;
       const msg = err?.response?.data?.message;
-      setError(msg || 'Failed to create account');
+      if (status === 403) {
+        setError('Account limit reached. Upgrade your plan to add more accounts.');
+      } else {
+        setError(msg || 'Failed to create account');
+      }
     },
   });
 

@@ -5,6 +5,7 @@ using CryptoBotWeb.Core.Entities;
 using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 namespace CryptoBotWeb.Infrastructure.Strategies;
@@ -30,6 +31,9 @@ public class EmaBounceHandler : IStrategyHandler
 
     public async Task ProcessAsync(Strategy strategy, IFuturesExchangeService exchange, CancellationToken ct)
     {
+        // Reload from DB to get freshest state (prevents overwriting API changes, e.g. manual close)
+        await _db.Entry(strategy).ReloadAsync(ct);
+
         var config = JsonSerializer.Deserialize<EmaBounceConfig>(strategy.ConfigJson, JsonOptions);
         if (config == null || string.IsNullOrEmpty(config.Symbol))
         {
@@ -77,7 +81,9 @@ public class EmaBounceHandler : IStrategyHandler
 
         if (state.LastProcessedCandleTime.HasValue && lastClosed.CloseTime <= state.LastProcessedCandleTime.Value)
         {
-            // No new candle — save state from TP/SL checks and return
+            // No new candle — check for external close before saving
+            if (await SyncIfClosedExternally(strategy, state, ct))
+                return;
             SaveState(strategy, config, state);
             await _db.SaveChangesAsync(ct);
             return;
@@ -94,6 +100,8 @@ public class EmaBounceHandler : IStrategyHandler
         var maValue = maValues[^1];
         if (maValue == 0)
         {
+            if (await SyncIfClosedExternally(strategy, state, ct))
+                return;
             SaveState(strategy, config, state);
             await _db.SaveChangesAsync(ct);
             return;
@@ -133,7 +141,9 @@ public class EmaBounceHandler : IStrategyHandler
         if (!config.OnlyLong && ShouldOpenShort(config, state, lastClosed, ema))
             await OpenShort(strategy, config, state, exchange, ema, lastClosed, ct);
 
-        // 8. Save state
+        // 8. Save state — check for external close before saving
+        if (await SyncIfClosedExternally(strategy, state, ct))
+            return;
         SaveState(strategy, config, state);
         await _db.SaveChangesAsync(ct);
     }
@@ -232,7 +242,7 @@ public class EmaBounceHandler : IStrategyHandler
         return candle.High >= offsetLine;
     }
 
-    private static (decimal orderSize, string reason) GetCurrentOrderSize(EmaBounceConfig config, EmaBounceState state)
+    public static (decimal orderSize, string reason) GetCurrentOrderSize(EmaBounceConfig config, EmaBounceState state)
     {
         if (!config.UseMartingale)
             return (config.OrderSize, "martingale=OFF");
@@ -425,20 +435,42 @@ public class EmaBounceHandler : IStrategyHandler
             Log(strategy, "Error", $"Ошибка закрытия LONG: {result.ErrorMessage}");
             _logger.LogError("Strategy {Id}: Failed to close LONG: {Error}", strategy.Id, result.ErrorMessage);
 
-            // Position already closed on exchange side — clear local state to stop retry loop
+            // Position already closed on exchange side — check DB for correct state
             if (result.ErrorMessage != null && result.ErrorMessage.Contains("No position", StringComparison.OrdinalIgnoreCase))
             {
-                var estPnlPercent = (closePrice - position.EntryPrice) / position.EntryPrice * 100m;
-                var estPnlDollar = position.OrderSize * estPnlPercent / 100m;
-                var estCommission = position.OrderSize * 2m * 0.0005m;
-                UpdateMartingaleState(config, state, estPnlPercent, position.OrderSize);
-                RecordTrade(strategy, config.Symbol, "Sell", position.Quantity, closePrice, null, reason + " (exchange-closed)",
-                    pnlDollar: estPnlDollar - estCommission, commission: estCommission);
-                state.OpenLong = null;
-                state.LastPrice = null;
-                state.LongCounter = 0;
-                state.WaitNextCandleAfterLongClose = true;
-                Log(strategy, "Warning", $"LONG позиция уже закрыта на бирже — state очищен (примерный PnL={Math.Round(estPnlPercent, 4)}%)");
+                // Check if API already handled the close (manual close) with correct PnL
+                var dbValues = await _db.Entry(strategy).GetDatabaseValuesAsync(ct);
+                var dbStateJson = dbValues?.GetValue<string>(nameof(Strategy.StateJson));
+                EmaBounceState? dbState = null;
+                if (!string.IsNullOrEmpty(dbStateJson))
+                    dbState = JsonSerializer.Deserialize<EmaBounceState>(dbStateJson, JsonOptions);
+
+                if (dbState?.OpenLong == null)
+                {
+                    // DB confirms position is closed — adopt DB's martingale state (correct PnL)
+                    state.OpenLong = null;
+                    state.LastPrice = null;
+                    state.LongCounter = 0;
+                    state.WaitNextCandleAfterLongClose = true;
+                    state.ConsecutiveLosses = dbState!.ConsecutiveLosses;
+                    state.RunningPnlDollar = dbState.RunningPnlDollar;
+                    Log(strategy, "Info", "LONG позиция закрыта извне — state синхронизирован из БД");
+                }
+                else
+                {
+                    // DB still shows position open — estimate PnL as fallback
+                    var estPnlPercent = (closePrice - position.EntryPrice) / position.EntryPrice * 100m;
+                    var estPnlDollar = position.OrderSize * estPnlPercent / 100m;
+                    var estCommission = position.OrderSize * 2m * 0.0005m;
+                    UpdateMartingaleState(config, state, estPnlPercent, position.OrderSize);
+                    RecordTrade(strategy, config.Symbol, "Sell", position.Quantity, closePrice, null, reason + " (exchange-closed)",
+                        pnlDollar: estPnlDollar - estCommission, commission: estCommission);
+                    state.OpenLong = null;
+                    state.LastPrice = null;
+                    state.LongCounter = 0;
+                    state.WaitNextCandleAfterLongClose = true;
+                    Log(strategy, "Warning", $"LONG позиция уже закрыта на бирже — state очищен (примерный PnL={Math.Round(estPnlPercent, 4)}%)");
+                }
             }
             return;
         }
@@ -477,20 +509,42 @@ public class EmaBounceHandler : IStrategyHandler
             Log(strategy, "Error", $"Ошибка закрытия SHORT: {result.ErrorMessage}");
             _logger.LogError("Strategy {Id}: Failed to close SHORT: {Error}", strategy.Id, result.ErrorMessage);
 
-            // Position already closed on exchange side — clear local state to stop retry loop
+            // Position already closed on exchange side — check DB for correct state
             if (result.ErrorMessage != null && result.ErrorMessage.Contains("No position", StringComparison.OrdinalIgnoreCase))
             {
-                var estPnlPercent = (position.EntryPrice - closePrice) / position.EntryPrice * 100m;
-                var estPnlDollar = position.OrderSize * estPnlPercent / 100m;
-                var estCommission = position.OrderSize * 2m * 0.0005m;
-                UpdateMartingaleState(config, state, estPnlPercent, position.OrderSize);
-                RecordTrade(strategy, config.Symbol, "Buy", position.Quantity, closePrice, null, reason + " (exchange-closed)",
-                    pnlDollar: estPnlDollar - estCommission, commission: estCommission);
-                state.OpenShort = null;
-                state.LastPrice = null;
-                state.ShortCounter = 0;
-                state.WaitNextCandleAfterShortClose = true;
-                Log(strategy, "Warning", $"SHORT позиция уже закрыта на бирже — state очищен (примерный PnL={Math.Round(estPnlPercent, 4)}%)");
+                // Check if API already handled the close (manual close) with correct PnL
+                var dbValues = await _db.Entry(strategy).GetDatabaseValuesAsync(ct);
+                var dbStateJson = dbValues?.GetValue<string>(nameof(Strategy.StateJson));
+                EmaBounceState? dbState = null;
+                if (!string.IsNullOrEmpty(dbStateJson))
+                    dbState = JsonSerializer.Deserialize<EmaBounceState>(dbStateJson, JsonOptions);
+
+                if (dbState?.OpenShort == null)
+                {
+                    // DB confirms position is closed — adopt DB's martingale state (correct PnL)
+                    state.OpenShort = null;
+                    state.LastPrice = null;
+                    state.ShortCounter = 0;
+                    state.WaitNextCandleAfterShortClose = true;
+                    state.ConsecutiveLosses = dbState!.ConsecutiveLosses;
+                    state.RunningPnlDollar = dbState.RunningPnlDollar;
+                    Log(strategy, "Info", "SHORT позиция закрыта извне — state синхронизирован из БД");
+                }
+                else
+                {
+                    // DB still shows position open — estimate PnL as fallback
+                    var estPnlPercent = (position.EntryPrice - closePrice) / position.EntryPrice * 100m;
+                    var estPnlDollar = position.OrderSize * estPnlPercent / 100m;
+                    var estCommission = position.OrderSize * 2m * 0.0005m;
+                    UpdateMartingaleState(config, state, estPnlPercent, position.OrderSize);
+                    RecordTrade(strategy, config.Symbol, "Buy", position.Quantity, closePrice, null, reason + " (exchange-closed)",
+                        pnlDollar: estPnlDollar - estCommission, commission: estCommission);
+                    state.OpenShort = null;
+                    state.LastPrice = null;
+                    state.ShortCounter = 0;
+                    state.WaitNextCandleAfterShortClose = true;
+                    Log(strategy, "Warning", $"SHORT позиция уже закрыта на бирже — state очищен (примерный PnL={Math.Round(estPnlPercent, 4)}%)");
+                }
             }
             return;
         }
@@ -599,6 +653,40 @@ public class EmaBounceHandler : IStrategyHandler
                 return candles[i];
         }
         return null;
+    }
+
+    /// <summary>
+    /// Detects if a position was closed externally (e.g. manual close via API).
+    /// If yes, reloads entity from DB (preserving correct PnL/martingale) and saves logs.
+    /// Returns true if caller should return immediately.
+    /// </summary>
+    private async Task<bool> SyncIfClosedExternally(Strategy strategy, EmaBounceState state, CancellationToken ct)
+    {
+        if (state.OpenLong == null && state.OpenShort == null)
+            return false;
+
+        var dbValues = await _db.Entry(strategy).GetDatabaseValuesAsync(ct);
+        if (dbValues == null) return false;
+
+        var dbStateJson = dbValues.GetValue<string>(nameof(Strategy.StateJson));
+        if (string.IsNullOrEmpty(dbStateJson)) return false;
+
+        var dbState = JsonSerializer.Deserialize<EmaBounceState>(dbStateJson, JsonOptions);
+        if (dbState == null) return false;
+
+        var longClosedExternally = state.OpenLong != null && dbState.OpenLong == null;
+        var shortClosedExternally = state.OpenShort != null && dbState.OpenShort == null;
+
+        if (!longClosedExternally && !shortClosedExternally)
+            return false;
+
+        _logger.LogInformation("Strategy {Id}: position closed externally — syncing state from DB", strategy.Id);
+        Log(strategy, "Info", "Позиция закрыта извне (ручное закрытие) — состояние синхронизировано из БД");
+
+        // Reload entity to adopt the DB state (correct martingale values from API)
+        await _db.Entry(strategy).ReloadAsync(ct);
+        await _db.SaveChangesAsync(ct); // saves log entries
+        return true;
     }
 
     private static void SaveState(Strategy strategy, EmaBounceConfig config, EmaBounceState state)

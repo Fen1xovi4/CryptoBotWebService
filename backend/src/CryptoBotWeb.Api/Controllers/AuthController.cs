@@ -104,6 +104,16 @@ public class AuthController : ControllerBase
 
         _db.Users.Add(user);
 
+        _db.Subscriptions.Add(new Subscription
+        {
+            Id = Guid.NewGuid(),
+            UserId = user.Id,
+            Plan = SubscriptionPlan.Basic,
+            Status = SubscriptionStatus.Active,
+            StartedAt = DateTime.UtcNow,
+            CreatedAt = DateTime.UtcNow
+        });
+
         var usage = new InviteCodeUsage
         {
             Id = Guid.NewGuid(),

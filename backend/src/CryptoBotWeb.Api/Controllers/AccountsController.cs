@@ -1,6 +1,8 @@
 using System.Security.Claims;
+using CryptoBotWeb.Core.Constants;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Entities;
+using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using Microsoft.AspNetCore.Authorization;
@@ -57,6 +59,16 @@ public class AccountsController : ControllerBase
     public async Task<ActionResult<ExchangeAccountDto>> Create([FromBody] CreateExchangeAccountRequest request)
     {
         var userId = GetUserId();
+
+        // Subscription limit check
+        if (!IsAdmin())
+        {
+            var sub = await _db.Subscriptions.AsNoTracking().FirstOrDefaultAsync(s => s.UserId == userId);
+            var limits = PlanLimits.GetLimits(sub?.Plan ?? SubscriptionPlan.Basic);
+            var currentCount = await _db.ExchangeAccounts.CountAsync(a => a.UserId == userId);
+            if (currentCount >= limits.MaxAccounts)
+                return StatusCode(403, new { message = $"Account limit reached ({currentCount}/{limits.MaxAccounts}). Upgrade your plan to add more." });
+        }
 
         // Non-admin users must provide a proxy
         if (!IsAdmin() && request.ProxyId == null)
