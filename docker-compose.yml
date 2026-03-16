@@ -19,7 +19,7 @@ services:
   api:
     build:
       context: ./backend
-      dockerfile: src/CryptoBotWeb.Api/Dockerfile
+      dockerfile: Dockerfile.api
     restart: unless-stopped
     depends_on:
       postgres:
@@ -39,7 +39,7 @@ services:
   worker:
     build:
       context: ./backend
-      dockerfile: src/CryptoBotWeb.Worker/Dockerfile
+      dockerfile: Dockerfile.worker
     restart: unless-stopped
     depends_on:
       postgres:
@@ -51,7 +51,9 @@ services:
       BscScan__ApiKey: ${BSCSCAN_API_KEY:-}
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
     restart: unless-stopped
     depends_on:
       - api
