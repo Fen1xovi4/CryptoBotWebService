@@ -25,6 +25,43 @@ docker compose down             # stop
 docker compose logs -f          # view logs
 ```
 
+## Production deployment (VPS)
+
+- **Domain:** `bot.cryptopizza.pl`
+- **Reverse proxy:** Traefik v3 (separate compose at `/srv/proxy/`) on external Docker network `web`
+- **SSL:** Let's Encrypt via Traefik certresolver `le`
+- **Server path:** `/srv/apps/CryptoBotWeb`
+
+### Traefik integration
+
+Frontend container has labels for Traefik auto-discovery and is connected to the external `web` network. Do NOT remove these labels or the `networks.web` section from `docker-compose.yml`.
+
+### Deploy commands (on VPS)
+
+```bash
+git pull && docker compose build --no-cache && docker compose up -d
+```
+
+### NuGet version pinning
+
+**Always pin exact NuGet package versions** (e.g. `Version="8.0.25"`), never use floating versions like `Version="8.0.*"`. Floating versions resolve differently on the VPS Docker build vs local machine, causing assembly version conflicts at compile time.
+
+### Dockerfiles
+
+The project has two sets of Dockerfiles:
+- `backend/Dockerfile.api` / `backend/Dockerfile.worker` — **multi-stage build** (restore + publish inside Docker). Used by `docker-compose.yml` for production.
+- `backend/src/*/Dockerfile` — **runtime-only** (expects pre-built artifacts). NOT used in docker-compose.
+
+Do NOT switch docker-compose to use `src/*/Dockerfile` — they will fail without pre-built publish output.
+
+Similarly for frontend:
+- `frontend/Dockerfile.prod` — multi-stage build with `npm ci && npm run build`. Used by docker-compose.
+- `frontend/Dockerfile` — runtime-only, expects pre-built `dist/`.
+
+### PostgreSQL
+
+`PGDATA` is set to `/var/lib/postgresql/data/pgdata` (a subdirectory) to avoid `initdb` failures caused by filesystem artifacts like `lost+found` in the volume root.
+
 ## Project structure
 
 - `backend/` — .NET API + Worker
