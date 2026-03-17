@@ -134,6 +134,9 @@ public class EmaBounceHandler : IStrategyHandler
             ProcessShort(strategy, config, state, lastClosed, ema);
 
         // 6. Check LONG entry (skip if OnlyShort)
+        var hadLongBefore = state.OpenLong != null;
+        var hadShortBefore = state.OpenShort != null;
+
         if (!config.OnlyShort && ShouldOpenLong(config, state, lastClosed, ema))
             await OpenLong(strategy, config, state, exchange, ema, lastClosed, ct);
 
@@ -141,8 +144,12 @@ public class EmaBounceHandler : IStrategyHandler
         if (!config.OnlyLong && ShouldOpenShort(config, state, lastClosed, ema))
             await OpenShort(strategy, config, state, exchange, ema, lastClosed, ct);
 
-        // 8. Save state — check for external close before saving
-        if (await SyncIfClosedExternally(strategy, state, ct))
+        // 8. Save state — check for external close before saving,
+        //    but skip sync if a position was just opened this cycle
+        //    (DB doesn't have it yet, so sync would falsely detect "closed externally")
+        var positionJustOpened = (!hadLongBefore && state.OpenLong != null)
+                              || (!hadShortBefore && state.OpenShort != null);
+        if (!positionJustOpened && await SyncIfClosedExternally(strategy, state, ct))
             return;
         SaveState(strategy, config, state);
         await _db.SaveChangesAsync(ct);
