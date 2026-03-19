@@ -109,6 +109,8 @@ const t = {
     pricingPremiumSupport: 'Премиум',
     pricingCta: 'Начать',
 
+    videoHeading: 'Обзор платформы',
+
     footerText: '© 2026 CryptoBot. Все права защищены.',
   },
   en: {
@@ -159,6 +161,8 @@ const t = {
     pricingPrioritySupport: 'Priority',
     pricingPremiumSupport: 'Premium',
     pricingCta: 'Get Started',
+
+    videoHeading: 'Platform Overview',
 
     footerText: '© 2026 CryptoBot. All rights reserved.',
   },
@@ -826,6 +830,27 @@ export default function LandingPage() {
                 <PricingCard key={plan.id} plan={plan} isPopular={isPopular} tr={tr} />
               );
             })}
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Video Overview */}
+      {/* ------------------------------------------------------------------ */}
+      <section className="py-20 px-4 sm:px-6 bg-bg-secondary border-y border-border">
+        <div className="max-w-4xl mx-auto">
+          <h2 className="text-2xl sm:text-3xl font-bold text-text-primary text-center mb-10">
+            {tr.videoHeading}
+          </h2>
+
+          <div className="relative w-full rounded-2xl overflow-hidden border border-border shadow-2xl shadow-black/20" style={{ paddingBottom: '56.25%' }}>
+            <iframe
+              className="absolute inset-0 w-full h-full"
+              src="https://www.youtube.com/embed/faD6VYZ1w8Q"
+              title={tr.videoHeading}
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowFullScreen
+            />
           </div>
         </div>
       </section>
