@@ -128,11 +128,13 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> GetTopBots()
     {
         var since = DateTime.UtcNow.AddDays(-90);
+        var minAge = DateTime.UtcNow.AddDays(-15);
         var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
 
         var topBots = await _db.Strategies
             .Include(s => s.Trades)
             .Include(s => s.Account)
+            .Where(s => s.CreatedAt <= minAge)
             .Where(s => s.Trades.Any(t => t.PnlDollar != null && t.ExecutedAt >= since))
             .Select(s => new
             {
