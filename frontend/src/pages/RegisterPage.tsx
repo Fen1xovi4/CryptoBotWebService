@@ -76,6 +76,12 @@ export default function RegisterPage() {
                 placeholder="ABCD1234"
                 required
               />
+              <p className="text-xs text-text-secondary mt-1.5">
+                Don't have a code?{' '}
+                <Link to="/buy" className="text-accent-blue hover:underline font-medium">
+                  Buy a subscription
+                </Link>
+              </p>
             </div>
 
             <div>

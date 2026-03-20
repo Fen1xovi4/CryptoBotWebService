@@ -360,6 +360,22 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
               <option value={2}>Bitget</option>
               <option value={3}>BingX</option>
             </select>
+            {form.exchangeType === 1 && (
+              <div className="flex items-start gap-2 mt-2 bg-accent-yellow/10 border border-accent-yellow/20 rounded-lg px-3 py-2">
+                <svg className="w-4 h-4 text-accent-yellow mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                </svg>
+                <p className="text-xs text-accent-yellow">Set <span className="font-semibold">One-Way Mode</span> in your Bybit account futures settings before connecting.</p>
+              </div>
+            )}
+            {(form.exchangeType === 2 || form.exchangeType === 3) && (
+              <div className="flex items-start gap-2 mt-2 bg-accent-yellow/10 border border-accent-yellow/20 rounded-lg px-3 py-2">
+                <svg className="w-4 h-4 text-accent-yellow mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                </svg>
+                <p className="text-xs text-accent-yellow">Set <span className="font-semibold">Hedge Mode</span> in your {form.exchangeType === 2 ? 'Bitget' : 'BingX'} account futures settings before connecting.</p>
+              </div>
+            )}
           </div>
 
           <div>
