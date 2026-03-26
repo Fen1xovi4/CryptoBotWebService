@@ -22,6 +22,8 @@ public class AppDbContext : DbContext
     public DbSet<PaymentSession> PaymentSessions => Set<PaymentSession>();
     public DbSet<SupportTicket> SupportTickets => Set<SupportTicket>();
     public DbSet<SupportMessage> SupportMessages => Set<SupportMessage>();
+    public DbSet<TelegramBot> TelegramBots => Set<TelegramBot>();
+    public DbSet<TelegramSubscriber> TelegramSubscribers => Set<TelegramSubscriber>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -92,6 +94,10 @@ public class AppDbContext : DbContext
             e.HasOne(x => x.Workspace)
                 .WithMany(w => w.Strategies)
                 .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.SetNull);
+            e.HasOne(x => x.TelegramBot)
+                .WithMany(t => t.Strategies)
+                .HasForeignKey(x => x.TelegramBotId)
                 .OnDelete(DeleteBehavior.SetNull);
         });
 
@@ -272,6 +278,34 @@ public class AppDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(x => x.SenderId)
                 .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<TelegramBot>(e =>
+        {
+            e.ToTable("telegram_bots");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.BotToken).HasMaxLength(256);
+            e.Property(x => x.Password).HasMaxLength(100);
+            e.Property(x => x.IsActive).HasDefaultValue(true);
+            e.HasOne(x => x.User)
+                .WithMany(u => u.TelegramBots)
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<TelegramSubscriber>(e =>
+        {
+            e.ToTable("telegram_subscribers");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.Username).HasMaxLength(100);
+            e.HasOne(x => x.TelegramBot)
+                .WithMany(b => b.Subscribers)
+                .HasForeignKey(x => x.TelegramBotId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.TelegramBotId, x.ChatId }).IsUnique();
         });
     }
 }

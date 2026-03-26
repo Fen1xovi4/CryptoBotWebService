@@ -6,8 +6,10 @@ interface SubscriptionState {
   status: string | null;
   maxAccounts: number;
   maxActiveBots: number;
+  maxTelegramBots: number;
   currentAccounts: number;
   currentActiveBots: number;
+  currentTelegramBots: number;
   expiresAt: string | null;
   isAdmin: boolean;
   loaded: boolean;
@@ -20,8 +22,10 @@ export const useSubscriptionStore = create<SubscriptionState>((set) => ({
   status: null,
   maxAccounts: 0,
   maxActiveBots: 0,
+  maxTelegramBots: 0,
   currentAccounts: 0,
   currentActiveBots: 0,
+  currentTelegramBots: 0,
   expiresAt: null,
   isAdmin: false,
   loaded: false,
@@ -34,8 +38,10 @@ export const useSubscriptionStore = create<SubscriptionState>((set) => ({
         status: data.status,
         maxAccounts: data.maxAccounts,
         maxActiveBots: data.maxActiveBots,
+        maxTelegramBots: data.maxTelegramBots,
         currentAccounts: data.currentAccounts,
         currentActiveBots: data.currentActiveBots,
+        currentTelegramBots: data.currentTelegramBots,
         expiresAt: data.expiresAt,
         isAdmin: data.isAdmin ?? false,
         loaded: true,
@@ -50,8 +56,10 @@ export const useSubscriptionStore = create<SubscriptionState>((set) => ({
     status: null,
     maxAccounts: 0,
     maxActiveBots: 0,
+    maxTelegramBots: 0,
     currentAccounts: 0,
     currentActiveBots: 0,
+    currentTelegramBots: 0,
     expiresAt: null,
     isAdmin: false,
     loaded: false,

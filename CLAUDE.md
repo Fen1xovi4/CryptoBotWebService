@@ -62,6 +62,14 @@ Similarly for frontend:
 
 `PGDATA` is set to `/var/lib/postgresql/data/pgdata` (a subdirectory) to avoid `initdb` failures caused by filesystem artifacts like `lost+found` in the volume root.
 
+## Git branching
+
+- `main` — production branch, deploys to VPS. **Never commit directly to main.**
+- `dev` — development branch, all daily work happens here.
+- Flow: work in `dev` → test → merge into `main` → deploy.
+
+**When the user asks to push, ALWAYS ask which branch (`dev` or `main`) before executing, to prevent accidental pushes to the wrong branch.**
+
 ## Project structure
 
 - `backend/` — .NET API + Worker

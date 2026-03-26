@@ -33,6 +33,7 @@ public class SubscriptionsController : ControllerBase
             NameEn = p.NameEn,
             MaxAccounts = p.MaxAccounts,
             MaxActiveBots = p.MaxActiveBots,
+            MaxTelegramBots = p.MaxTelegramBots,
             PriceMonthly = p.PriceMonthly,
             PriceLabel = p.PriceLabel
         });
@@ -57,6 +58,7 @@ public class SubscriptionsController : ControllerBase
         var currentAccounts = await _db.ExchangeAccounts.CountAsync(a => a.UserId == userId);
         var currentActiveBots = await _db.Strategies
             .CountAsync(s => s.Account.UserId == userId && s.Status == StrategyStatus.Running);
+        var currentTelegramBots = await _db.TelegramBots.CountAsync(t => t.UserId == userId);
 
         return Ok(new SubscriptionDto
         {
@@ -64,8 +66,10 @@ public class SubscriptionsController : ControllerBase
             Status = (subscription?.Status ?? SubscriptionStatus.Active).ToString(),
             MaxAccounts = isAdmin ? 999 : limits.MaxAccounts,
             MaxActiveBots = isAdmin ? 999 : limits.MaxActiveBots,
+            MaxTelegramBots = isAdmin ? 999 : limits.MaxTelegramBots,
             CurrentAccounts = currentAccounts,
             CurrentActiveBots = currentActiveBots,
+            CurrentTelegramBots = currentTelegramBots,
             StartedAt = subscription?.StartedAt ?? DateTime.UtcNow,
             ExpiresAt = isAdmin ? null : subscription?.ExpiresAt,
             IsAdmin = isAdmin

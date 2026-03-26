@@ -6,8 +6,10 @@ public class SubscriptionDto
     public string Status { get; set; } = string.Empty;
     public int MaxAccounts { get; set; }
     public int MaxActiveBots { get; set; }
+    public int MaxTelegramBots { get; set; }
     public int CurrentAccounts { get; set; }
     public int CurrentActiveBots { get; set; }
+    public int CurrentTelegramBots { get; set; }
     public DateTime StartedAt { get; set; }
     public DateTime? ExpiresAt { get; set; }
     public bool IsAdmin { get; set; }
@@ -20,6 +22,7 @@ public class PlanInfoDto
     public string NameEn { get; set; } = string.Empty;
     public int MaxAccounts { get; set; }
     public int MaxActiveBots { get; set; }
+    public int MaxTelegramBots { get; set; }
     public decimal PriceMonthly { get; set; }
     public string PriceLabel { get; set; } = string.Empty;
 }

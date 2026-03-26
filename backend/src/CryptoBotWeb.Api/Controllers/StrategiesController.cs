@@ -44,6 +44,7 @@ public class StrategiesController : ControllerBase
                 s.Id,
                 s.AccountId,
                 s.WorkspaceId,
+                s.TelegramBotId,
                 AccountName = s.Account.Name,
                 Exchange = s.Account.ExchangeType.ToString(),
                 s.Name,
@@ -378,6 +379,26 @@ public class StrategiesController : ControllerBase
         return Ok(new { message = "Strategy updated", strategy.Id, strategy.Name });
     }
 
+    [HttpPatch("{id:guid}/telegram-bot")]
+    public async Task<IActionResult> SetTelegramBot(Guid id, [FromBody] SetTelegramBotRequest request)
+    {
+        var strategy = await _db.Strategies
+            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
+
+        if (strategy == null) return NotFound();
+
+        if (request.TelegramBotId.HasValue)
+        {
+            var bot = await _db.TelegramBots.FirstOrDefaultAsync(b => b.Id == request.TelegramBotId.Value && b.UserId == GetUserId());
+            if (bot == null) return BadRequest(new { message = "Telegram bot not found" });
+        }
+
+        strategy.TelegramBotId = request.TelegramBotId;
+        await _db.SaveChangesAsync();
+
+        return Ok(new { message = "Telegram bot updated", telegramBotId = strategy.TelegramBotId });
+    }
+
     [HttpPost("{id:guid}/close-position")]
     public async Task<IActionResult> ClosePosition(Guid id)
     {
@@ -678,4 +699,9 @@ public class UpdateStrategyRequest
 {
     public string Name { get; set; } = string.Empty;
     public string? ConfigJson { get; set; }
+}
+
+public class SetTelegramBotRequest
+{
+    public Guid? TelegramBotId { get; set; }
 }

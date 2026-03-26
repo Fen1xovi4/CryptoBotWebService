@@ -8,6 +8,7 @@ public record PlanLimitInfo(
     string NameEn,
     int MaxAccounts,
     int MaxActiveBots,
+    int MaxTelegramBots,
     decimal PriceMonthly,
     string PriceLabel
 );
@@ -16,9 +17,9 @@ public static class PlanLimits
 {
     private static readonly Dictionary<SubscriptionPlan, PlanLimitInfo> Limits = new()
     {
-        [SubscriptionPlan.Basic] = new(SubscriptionPlan.Basic, "Базовая", "Basic", 2, 5, 9m, "$9/mo"),
-        [SubscriptionPlan.Advanced] = new(SubscriptionPlan.Advanced, "Продвинутая", "Advanced", 5, 15, 29m, "$29/mo"),
-        [SubscriptionPlan.Pro] = new(SubscriptionPlan.Pro, "Про", "Pro", 20, 50, 99m, "$99/mo"),
+        [SubscriptionPlan.Basic] = new(SubscriptionPlan.Basic, "Базовая", "Basic", 2, 5, 0, 9m, "$9/mo"),
+        [SubscriptionPlan.Advanced] = new(SubscriptionPlan.Advanced, "Продвинутая", "Advanced", 5, 15, 2, 29m, "$29/mo"),
+        [SubscriptionPlan.Pro] = new(SubscriptionPlan.Pro, "Про", "Pro", 20, 50, 5, 99m, "$99/mo"),
     };
 
     public static PlanLimitInfo GetLimits(SubscriptionPlan plan) =>

@@ -1,9 +1,18 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import Header from '../components/Layout/Header';
 import { useThemeStore } from '../stores/themeStore';
 import { useSubscriptionStore } from '../stores/subscriptionStore';
 import api from '../api/client';
+
+interface TelegramBotItem {
+  id: string;
+  name: string;
+  hasPassword: boolean;
+  isActive: boolean;
+  subscriberCount: number;
+  createdAt: string;
+}
 
 const planBadgeColors: Record<string, string> = {
   Basic: 'bg-bg-tertiary text-text-secondary',
@@ -337,6 +346,209 @@ function ChangePasswordSection() {
   );
 }
 
+function TelegramBotsSection() {
+  const { maxTelegramBots, isAdmin } = useSubscriptionStore();
+  const [bots, setBots] = useState<TelegramBotItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [formName, setFormName] = useState('');
+  const [formToken, setFormToken] = useState('');
+  const [formPassword, setFormPassword] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const fetchBots = useCallback(async () => {
+    try {
+      const { data } = await api.get('/telegram-bots');
+      setBots(data);
+    } catch { /* empty */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { fetchBots(); }, [fetchBots]);
+
+  const canAdd = isAdmin || bots.length < maxTelegramBots;
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (!formName.trim() || !formToken.trim()) {
+      setError('Name and Bot Token are required');
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.post('/telegram-bots', {
+        name: formName.trim(),
+        botToken: formToken.trim(),
+        password: formPassword.trim() || null,
+      });
+      setFormName('');
+      setFormToken('');
+      setFormPassword('');
+      setShowForm(false);
+      await fetchBots();
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } };
+      setError(e.response?.data?.message || 'Failed to create bot');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this Telegram bot?')) return;
+    try {
+      await api.delete(`/telegram-bots/${id}`);
+      await fetchBots();
+    } catch { /* empty */ }
+  };
+
+  const handleToggle = async (bot: TelegramBotItem) => {
+    try {
+      await api.put(`/telegram-bots/${bot.id}`, { isActive: !bot.isActive });
+      await fetchBots();
+    } catch { /* empty */ }
+  };
+
+  if (loading) return null;
+  if (!isAdmin && maxTelegramBots === 0) return null;
+
+  return (
+    <div className="bg-bg-secondary rounded-xl border border-border p-6 max-w-2xl mt-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-text-primary">Telegram Bots</h3>
+        <span className="text-xs text-text-secondary">
+          {bots.length} / {isAdmin ? '∞' : maxTelegramBots}
+        </span>
+      </div>
+
+      {bots.length === 0 && !showForm && (
+        <p className="text-sm text-text-secondary mb-4">
+          Add a Telegram bot to send trading signals to subscribers.
+        </p>
+      )}
+
+      {/* Bot list */}
+      {bots.length > 0 && (
+        <div className="space-y-2 mb-4">
+          {bots.map((bot) => (
+            <div key={bot.id} className="flex items-center justify-between bg-bg-tertiary rounded-lg px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-text-primary truncate">{bot.name}</span>
+                  {bot.hasPassword && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-yellow/10 text-accent-yellow">🔒</span>
+                  )}
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${bot.isActive ? 'bg-accent-green/10 text-accent-green' : 'bg-bg-primary text-text-secondary'}`}>
+                    {bot.isActive ? 'Active' : 'Off'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-text-secondary mt-0.5">
+                  {bot.subscriberCount} subscriber{bot.subscriberCount !== 1 ? 's' : ''}
+                </div>
+              </div>
+              <div className="flex items-center gap-1 ml-3">
+                <button
+                  onClick={() => handleToggle(bot)}
+                  title={bot.isActive ? 'Disable' : 'Enable'}
+                  className={`p-1.5 rounded-lg transition-colors ${bot.isActive ? 'text-accent-green hover:bg-accent-green/10' : 'text-text-secondary hover:bg-bg-primary'}`}
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => handleDelete(bot.id)}
+                  title="Delete"
+                  className="p-1.5 text-text-secondary/40 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add form */}
+      {showForm ? (
+        <form onSubmit={handleCreate} className="space-y-3 bg-bg-tertiary rounded-lg p-4">
+          {error && (
+            <div className="bg-accent-red/10 border border-accent-red/20 text-accent-red text-sm px-3 py-2 rounded-lg">
+              {error}
+            </div>
+          )}
+          <div>
+            <label className="block text-xs font-medium text-text-primary mb-1">Name</label>
+            <input
+              type="text"
+              value={formName}
+              onChange={(e) => setFormName(e.target.value)}
+              className={inputClass}
+              placeholder="My Signal Bot"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-text-primary mb-1">Bot Token</label>
+            <input
+              type="text"
+              value={formToken}
+              onChange={(e) => setFormToken(e.target.value)}
+              className={inputClass}
+              placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-text-primary mb-1">
+              Password <span className="text-text-secondary font-normal">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={formPassword}
+              onChange={(e) => setFormPassword(e.target.value)}
+              className={inputClass}
+              placeholder="Leave empty for public access"
+            />
+            <p className="text-[10px] text-text-secondary mt-1">
+              If set, users must send /start &lt;password&gt; to subscribe
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => { setShowForm(false); setError(''); }}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-text-secondary hover:text-text-primary border border-border hover:border-text-secondary transition-all"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving}
+              className="bg-accent-blue hover:bg-accent-blue/90 text-white font-medium py-2 px-4 rounded-lg text-sm transition-colors disabled:opacity-50"
+            >
+              {saving ? 'Adding...' : 'Add Bot'}
+            </button>
+          </div>
+        </form>
+      ) : (
+        canAdd && (
+          <button
+            onClick={() => setShowForm(true)}
+            className="text-sm font-medium text-accent-blue hover:text-accent-blue/80 transition-colors"
+          >
+            + Add Telegram Bot
+          </button>
+        )
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const { theme, setTheme } = useThemeStore();
   const { plan, maxAccounts, maxActiveBots, currentAccounts, currentActiveBots, expiresAt, isAdmin } = useSubscriptionStore();
@@ -486,6 +698,9 @@ export default function SettingsPage() {
           </div>
         </div>
       )}
+
+      {/* Telegram Bots */}
+      <TelegramBotsSection />
 
       {/* Two-Factor Authentication */}
       <TwoFactorSection />

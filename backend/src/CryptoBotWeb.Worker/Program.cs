@@ -15,14 +15,17 @@ builder.Services.AddSingleton<IEncryptionService>(new EncryptionService(encrypti
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
 
 builder.Services.AddScoped<IStrategyHandler, EmaBounceHandler>();
+builder.Services.AddScoped<ITelegramSignalService, TelegramSignalService>();
 
 builder.Services.AddHttpClient("TronGrid");
+builder.Services.AddHttpClient("Telegram");
 builder.Services.AddHttpClient("BscRpc");
 builder.Services.AddScoped<TronGridService>();
 builder.Services.AddScoped<BscScanService>();
 
 builder.Services.AddHostedService<TradingHostedService>();
 builder.Services.AddHostedService<PaymentVerificationService>();
+builder.Services.AddHostedService<CryptoBotWeb.Worker.TelegramBotPollingService>();
 
 var host = builder.Build();
 host.Run();

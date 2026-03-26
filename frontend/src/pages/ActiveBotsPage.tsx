@@ -11,6 +11,7 @@ interface Strategy {
   id: string;
   accountId: string;
   workspaceId: string | null;
+  telegramBotId: string | null;
   accountName: string;
   exchange: string;
   name: string;
@@ -20,6 +21,12 @@ interface Strategy {
   status: string;
   createdAt: string;
   startedAt: string | null;
+}
+
+interface TelegramBotOption {
+  id: string;
+  name: string;
+  isActive: boolean;
 }
 
 interface Account {
@@ -119,6 +126,17 @@ export default function ActiveBotsPage() {
   const { data: allStats } = useQuery<WorkspaceStats[]>({
     queryKey: ['strategy-stats'],
     queryFn: () => api.get('/strategies/stats').then((r) => r.data),
+  });
+
+  const { data: telegramBots } = useQuery<TelegramBotOption[]>({
+    queryKey: ['telegram-bots'],
+    queryFn: () => api.get('/telegram-bots').then((r) => r.data),
+  });
+
+  const setTelegramBotMutation = useMutation({
+    mutationFn: ({ strategyId, telegramBotId }: { strategyId: string; telegramBotId: string | null }) =>
+      api.patch(`/strategies/${strategyId}/telegram-bot`, { telegramBotId }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['strategies'] }),
   });
 
   // Auto-select first workspace
@@ -714,6 +732,61 @@ export default function ActiveBotsPage() {
                       <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
                     </svg>
                   </button>
+
+                  {/* TG signal toggle */}
+                  {telegramBots && telegramBots.length > 0 && (
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => {
+                          if (s.telegramBotId) {
+                            setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: null });
+                          } else if (telegramBots.filter(b => b.isActive).length === 1) {
+                            setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: telegramBots.filter(b => b.isActive)[0].id });
+                          }
+                        }}
+                        title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
+                        className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                          s.telegramBotId
+                            ? 'bg-accent-blue/15 text-accent-blue'
+                            : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
+                        }`}
+                      >
+                        TG
+                      </button>
+                      {!s.telegramBotId && telegramBots.filter(b => b.isActive).length > 1 && (
+                        <select
+                          className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                          value=""
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: e.target.value });
+                            }
+                          }}
+                        >
+                          <option value="">Select bot...</option>
+                          {telegramBots.filter(b => b.isActive).map(b => (
+                            <option key={b.id} value={b.id}>{b.name}</option>
+                          ))}
+                        </select>
+                      )}
+                      {s.telegramBotId && (
+                        <select
+                          className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                          value={s.telegramBotId}
+                          onChange={(e) => {
+                            setTelegramBotMutation.mutate({
+                              strategyId: s.id,
+                              telegramBotId: e.target.value || null,
+                            });
+                          }}
+                        >
+                          {telegramBots.filter(b => b.isActive).map(b => (
+                            <option key={b.id} value={b.id}>{b.name}</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  )}
 
                   <div className="flex-1" />
 

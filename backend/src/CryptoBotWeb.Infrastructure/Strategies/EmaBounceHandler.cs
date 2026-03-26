@@ -22,11 +22,14 @@ public class EmaBounceHandler : IStrategyHandler
 
     private readonly AppDbContext _db;
     private readonly ILogger<EmaBounceHandler> _logger;
+    private readonly ITelegramSignalService _telegramSignalService;
 
-    public EmaBounceHandler(AppDbContext db, ILogger<EmaBounceHandler> logger)
+    public EmaBounceHandler(AppDbContext db, ILogger<EmaBounceHandler> logger,
+        ITelegramSignalService telegramSignalService)
     {
         _db = db;
         _logger = logger;
+        _telegramSignalService = telegramSignalService;
     }
 
     public async Task ProcessAsync(Strategy strategy, IFuturesExchangeService exchange, CancellationToken ct)
@@ -345,6 +348,9 @@ public class EmaBounceHandler : IStrategyHandler
             $"LONG открыт: цена={entryPrice}, qty={state.OpenLong.Quantity}, TP={Math.Round(state.OpenLong.TakeProfit, 6)}, SL={Math.Round(state.OpenLong.StopLoss, 6)}");
         _logger.LogInformation("Strategy {Id}: LONG opened at {Price}, TP={TP}, SL={SL}, OrderSize={OrderSize}",
             strategy.Id, entryPrice, state.OpenLong.TakeProfit, state.OpenLong.StopLoss, orderSize);
+
+        await _telegramSignalService.SendOpenPositionSignalAsync(strategy, config.Symbol, "Long",
+            orderSize, entryPrice, state.OpenLong.TakeProfit, state.OpenLong.StopLoss, ct);
     }
 
     private async Task OpenShort(Strategy strategy, EmaBounceConfig config, EmaBounceState state,
@@ -384,6 +390,9 @@ public class EmaBounceHandler : IStrategyHandler
             $"SHORT открыт: цена={entryPrice}, qty={state.OpenShort.Quantity}, TP={Math.Round(state.OpenShort.TakeProfit, 6)}, SL={Math.Round(state.OpenShort.StopLoss, 6)}");
         _logger.LogInformation("Strategy {Id}: SHORT opened at {Price}, TP={TP}, SL={SL}, OrderSize={OrderSize}",
             strategy.Id, entryPrice, state.OpenShort.TakeProfit, state.OpenShort.StopLoss, orderSize);
+
+        await _telegramSignalService.SendOpenPositionSignalAsync(strategy, config.Symbol, "Short",
+            orderSize, entryPrice, state.OpenShort.TakeProfit, state.OpenShort.StopLoss, ct);
     }
 
     private async Task CheckTpSl(Strategy strategy, EmaBounceConfig config, EmaBounceState state,

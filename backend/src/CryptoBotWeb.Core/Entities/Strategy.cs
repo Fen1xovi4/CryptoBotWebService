@@ -7,6 +7,7 @@ public class Strategy
     public Guid Id { get; set; }
     public Guid AccountId { get; set; }
     public Guid? WorkspaceId { get; set; }
+    public Guid? TelegramBotId { get; set; }
     public string Name { get; set; } = string.Empty;
     public string Type { get; set; } = string.Empty;
     public string ConfigJson { get; set; } = "{}";
@@ -17,6 +18,7 @@ public class Strategy
 
     public ExchangeAccount Account { get; set; } = null!;
     public Workspace? Workspace { get; set; }
+    public TelegramBot? TelegramBot { get; set; }
     public ICollection<Trade> Trades { get; set; } = new List<Trade>();
     public ICollection<StrategyLog> Logs { get; set; } = new List<StrategyLog>();
 }
