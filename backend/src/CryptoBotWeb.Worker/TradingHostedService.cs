@@ -35,26 +35,36 @@ public class TradingHostedService : BackgroundService
                     .Where(s => s.Status == StrategyStatus.Running)
                     .ToListAsync(stoppingToken);
 
-                foreach (var strategy in runningStrategies)
-                {
-                    try
+                await Parallel.ForEachAsync(runningStrategies,
+                    new ParallelOptions
                     {
-                        var handler = handlers.FirstOrDefault(h => h.StrategyType == strategy.Type);
-                        if (handler == null)
+                        MaxDegreeOfParallelism = 20,
+                        CancellationToken = stoppingToken
+                    },
+                    async (strategy, ct) =>
+                    {
+                        try
                         {
-                            _logger.LogWarning("No handler for strategy type {Type}", strategy.Type);
-                            continue;
-                        }
+                            using var innerScope = _serviceProvider.CreateScope();
+                            var innerFactory = innerScope.ServiceProvider.GetRequiredService<IExchangeServiceFactory>();
+                            var innerHandlers = innerScope.ServiceProvider.GetServices<IStrategyHandler>();
 
-                        using var exchange = factory.CreateFutures(strategy.Account);
-                        await handler.ProcessAsync(strategy, exchange, stoppingToken);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error processing strategy {Id} ({Name})",
-                            strategy.Id, strategy.Name);
-                    }
-                }
+                            var handler = innerHandlers.FirstOrDefault(h => h.StrategyType == strategy.Type);
+                            if (handler == null)
+                            {
+                                _logger.LogWarning("No handler for strategy type {Type}", strategy.Type);
+                                return;
+                            }
+
+                            using var exchange = innerFactory.CreateFutures(strategy.Account);
+                            await handler.ProcessAsync(strategy, exchange, ct);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error processing strategy {Id} ({Name})",
+                                strategy.Id, strategy.Name);
+                        }
+                    });
             }
             catch (Exception ex)
             {
