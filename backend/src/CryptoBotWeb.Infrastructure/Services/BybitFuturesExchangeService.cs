@@ -135,8 +135,11 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
     public async Task<OrderResultDto> CloseLongAsync(string symbol, decimal quantity)
     {
         var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        var (qtyStep, _) = await GetSymbolInfoAsync(bybitSymbol);
+        var qty = FloorToStep(quantity, qtyStep);
+
         var result = await _client.V5Api.Trading.PlaceOrderAsync(
-            Category.Linear, bybitSymbol, OrderSide.Sell, NewOrderType.Market, quantity,
+            Category.Linear, bybitSymbol, OrderSide.Sell, NewOrderType.Market, qty,
             reduceOnly: true);
 
         return new OrderResultDto
@@ -150,8 +153,11 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
     public async Task<OrderResultDto> CloseShortAsync(string symbol, decimal quantity)
     {
         var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        var (qtyStep, _) = await GetSymbolInfoAsync(bybitSymbol);
+        var qty = FloorToStep(quantity, qtyStep);
+
         var result = await _client.V5Api.Trading.PlaceOrderAsync(
-            Category.Linear, bybitSymbol, OrderSide.Buy, NewOrderType.Market, quantity,
+            Category.Linear, bybitSymbol, OrderSide.Buy, NewOrderType.Market, qty,
             reduceOnly: true);
 
         return new OrderResultDto
@@ -160,6 +166,110 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             OrderId = result.Data?.OrderId,
             ErrorMessage = result.Error?.Message
         };
+    }
+
+    public async Task<FundingRateDto?> GetFundingRateAsync(string symbol)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var result = await _client.V5Api.ExchangeData.GetLinearInverseTickersAsync(Category.Linear, bybitSymbol);
+
+            if (!result.Success || result.Data?.List == null)
+                return null;
+
+            var ticker = result.Data.List.FirstOrDefault();
+            if (ticker == null)
+                return null;
+
+            return new FundingRateDto
+            {
+                Rate = ticker.FundingRate ?? 0m,
+                NextFundingTime = ticker.NextFundingTime ?? DateTime.UtcNow
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    public async Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var orderSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? OrderSide.Buy : OrderSide.Sell;
+
+            var (qtyStep, minQty, priceStep) = await GetSymbolInfoWithPriceAsync(bybitSymbol);
+            var roundedQty = FloorToStep(quantity, qtyStep);
+            var roundedPrice = FloorToStep(price, priceStep);
+
+            if (roundedQty < minQty)
+                return new OrderResultDto { Success = false, ErrorMessage = $"Qty {roundedQty} < min {minQty} for {symbol}" };
+
+            var result = await _client.V5Api.Trading.PlaceOrderAsync(
+                Category.Linear, bybitSymbol, orderSide, NewOrderType.Limit, roundedQty,
+                price: roundedPrice, timeInForce: TimeInForce.GoodTillCanceled);
+
+            return new OrderResultDto
+            {
+                Success = result.Success,
+                OrderId = result.Data?.OrderId,
+                FilledPrice = roundedPrice,
+                FilledQuantity = roundedQty,
+                ErrorMessage = result.Error?.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
+        }
+    }
+
+    public async Task<bool> CancelAllOrdersAsync(string symbol)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var result = await _client.V5Api.Trading.CancelAllOrderAsync(Category.Linear, symbol: bybitSymbol);
+            return result.Success;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public async Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var result = await _client.V5Api.Trading.GetOrdersAsync(Category.Linear, symbol: bybitSymbol);
+
+            if (!result.Success || result.Data?.List == null)
+                return new List<LimitOrderDto>();
+
+            return result.Data.List
+                .Where(o => o.Status == OrderStatus.New
+                         || o.Status == OrderStatus.PartiallyFilled)
+                .Select(o => new LimitOrderDto
+                {
+                    OrderId = o.OrderId,
+                    Symbol = o.Symbol,
+                    Side = o.Side.ToString(),
+                    Price = o.Price ?? 0m,
+                    Quantity = o.Quantity,
+                    FilledQuantity = o.QuantityFilled ?? 0m,
+                    Status = o.Status.ToString()
+                })
+                .ToList();
+        }
+        catch (Exception)
+        {
+            return new List<LimitOrderDto>();
+        }
     }
 
     private static KlineInterval MapInterval(string timeframe) => timeframe.ToLowerInvariant() switch
@@ -207,10 +317,57 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         return (0.001m, 0m);
     }
 
+    private async Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolInfoWithPriceAsync(string bybitSymbol)
+    {
+        var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(Category.Linear, bybitSymbol);
+        if (result.Success && result.Data?.List?.Any() == true)
+        {
+            var info = result.Data.List.First();
+            return (
+                info.LotSizeFilter?.QuantityStep ?? 0.001m,
+                info.LotSizeFilter?.MinOrderQuantity ?? 0m,
+                info.PriceFilter?.TickSize ?? 0.01m);
+        }
+        return (0.001m, 0m, 0.01m);
+    }
+
     private static decimal FloorToStep(decimal value, decimal step)
     {
         if (step <= 0) return value;
         return Math.Floor(value / step) * step;
+    }
+
+    public async Task<PositionDto?> GetPositionAsync(string symbol, string side)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var result = await _client.V5Api.Trading.GetPositionsAsync(Category.Linear, bybitSymbol);
+
+            if (!result.Success || result.Data?.List == null)
+                return null;
+
+            var pos = result.Data.List.FirstOrDefault(p =>
+                p.Symbol == bybitSymbol &&
+                p.Side.ToString().Equals(side, StringComparison.OrdinalIgnoreCase) &&
+                p.Quantity != 0);
+
+            if (pos == null)
+                return null;
+
+            return new PositionDto
+            {
+                Symbol = symbol,
+                Side = side,
+                Quantity = Math.Abs(pos.Quantity),
+                EntryPrice = pos.AveragePrice ?? 0m,
+                UnrealizedPnl = pos.UnrealizedPnl ?? 0m
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     public void Dispose() => _client.Dispose();

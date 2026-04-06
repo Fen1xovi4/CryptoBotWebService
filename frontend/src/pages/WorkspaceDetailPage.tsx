@@ -56,14 +56,16 @@ export default function WorkspaceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
-  const { data: ws, isLoading } = useQuery<WorkspaceDetail>({
+  const { data: ws, isLoading, error } = useQuery<WorkspaceDetail>({
     queryKey: ['workspace-detail', id],
     queryFn: () => api.get(`/dashboard/workspaces/${id}`).then((r) => r.data),
     refetchInterval: 15000,
     enabled: !!id,
+    retry: 1,
   });
 
-  if (isLoading) return <div className="text-text-secondary text-sm p-4">Загрузка...</div>;
+  if (isLoading) return <div className="text-text-secondary text-sm p-4">Загрузка воркспейса...</div>;
+  if (error) return <div className="text-accent-red text-sm p-4">Ошибка: {String((error as any)?.response?.data || (error as Error).message)}</div>;
   if (!ws) return <div className="text-text-secondary text-sm p-4">Воркспейс не найден</div>;
 
   const totalPnl = ws.realizedPnl + ws.unrealizedPnl;

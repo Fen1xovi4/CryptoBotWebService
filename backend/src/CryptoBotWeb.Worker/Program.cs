@@ -15,6 +15,7 @@ builder.Services.AddSingleton<IEncryptionService>(new EncryptionService(encrypti
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
 
 builder.Services.AddScoped<IStrategyHandler, EmaBounceHandler>();
+builder.Services.AddScoped<IStrategyHandler, HuntingFundingHandler>();
 builder.Services.AddScoped<ITelegramSignalService, TelegramSignalService>();
 
 builder.Services.AddHttpClient("TronGrid");

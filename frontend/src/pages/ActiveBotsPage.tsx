@@ -321,9 +321,16 @@ export default function ActiveBotsPage() {
             className="bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
           >
             <option value="MaratG">MaratG</option>
+            <option value="HuntingFunding">HuntingFunding</option>
           </select>
         </div>
 
+        {activeWorkspace?.strategyType === 'HuntingFunding' ? (
+          <p className="text-sm text-text-secondary italic">
+            Все настройки задаются индивидуально в каждом боте через уровни ордеров.
+          </p>
+        ) : (
+          <>
         <div className="h-6 w-px bg-border" />
 
         <div className="flex items-center gap-2">
@@ -485,6 +492,8 @@ export default function ActiveBotsPage() {
             )}
           </div>
         )}
+          </>
+        )}
 
         {/* PNL */}
         <div className="w-full border-t border-border/50 mt-1 pt-3 flex flex-wrap items-center gap-4">
@@ -529,8 +538,30 @@ export default function ActiveBotsPage() {
           {filteredStrategies.map((s) => {
             const cfg = parseJson(s.configJson);
             const state = parseJson(s.stateJson);
-            const consecutiveLosses = state?.consecutiveLosses ?? 0;
             const isRunning = s.status === 'Running';
+
+            if (s.type === 'HuntingFunding') {
+              return (
+                <HuntingFundingCard
+                  key={s.id}
+                  s={s}
+                  cfg={cfg}
+                  state={state}
+                  isRunning={isRunning}
+                  onStart={() => startMutation.mutate(s.id)}
+                  onStop={() => stopMutation.mutate(s.id)}
+                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
+                  onEdit={() => setEditingStrategy(s)}
+                  onLogs={() => setLogStrategy(s)}
+                  onClosePosition={() => closePositionMutation.mutate(s.id)}
+                  closePositionPending={closePositionMutation.isPending}
+                  telegramBots={telegramBots}
+                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                />
+              );
+            }
+
+            const consecutiveLosses = state?.consecutiveLosses ?? 0;
             const pos = state?.openLong || state?.openShort;
             const coinName = cfg?.symbol?.replace(/USDT$/i, '') || '';
             const borderAccent = isRunning
@@ -977,6 +1008,372 @@ function WorkspaceTab({
   );
 }
 
+/* ── HuntingFunding Card ───────────────────────────────── */
+
+interface HFConfig {
+  symbol: string;
+  levels: { offsetPercent: number; sizeUsdt: number }[];
+  takeProfitPercent: number;
+  stopLossPercent: number;
+  secondsBeforeFunding: number;
+  closeAfterMinutes: number;
+  maxCycles: number;
+  enableLong: boolean;
+  minFundingLong: number;
+  enableShort: boolean;
+  minFundingShort: number;
+}
+
+interface HFStateData {
+  phase: number;
+  direction: string | null;
+  currentFundingRate: number | null;
+  nextFundingTime: string | null;
+  placedOrders: { orderId: string; levelIndex: number; side: string; price: number; quantity: number; isFilled: boolean }[];
+  avgEntryPrice: number | null;
+  totalFilledQuantity: number | null;
+  totalFilledUsdt: number | null;
+  takeProfit: number | null;
+  stopLoss: number | null;
+  positionOpenedAt: string | null;
+  cycleCount: number;
+  cycleTotalPnl: number;
+  lastPrice: number | null;
+}
+
+function useCountdown(targetIso: string | null | undefined): string {
+  const [display, setDisplay] = useState('--:--:--');
+
+  useEffect(() => {
+    if (!targetIso) return;
+    const update = () => {
+      const diff = new Date(targetIso).getTime() - Date.now();
+      if (diff <= 0) { setDisplay('00:00:00'); return; }
+      const h = Math.floor(diff / 3600000);
+      const m = Math.floor((diff % 3600000) / 60000);
+      const s = Math.floor((diff % 60000) / 1000);
+      setDisplay(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`);
+    };
+    update();
+    const id = setInterval(update, 1000);
+    return () => clearInterval(id);
+  }, [targetIso]);
+
+  return display;
+}
+
+function HuntingFundingCard({
+  s,
+  cfg,
+  state,
+  isRunning,
+  onStart,
+  onStop,
+  onDelete,
+  onEdit,
+  onLogs,
+  onClosePosition,
+  closePositionPending,
+  telegramBots,
+  onSetTelegramBot,
+}: {
+  s: Strategy;
+  cfg: HFConfig | null;
+  state: HFStateData | null;
+  isRunning: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onLogs: () => void;
+  onClosePosition: () => void;
+  closePositionPending: boolean;
+  telegramBots: TelegramBotOption[] | undefined;
+  onSetTelegramBot: (botId: string | null) => void;
+}) {
+  const phase = state?.phase ?? 0;
+  const levels = cfg?.levels ?? [];
+
+  // Compute close-position countdown: positionOpenedAt + closeAfterMinutes
+  const closeTarget = state?.positionOpenedAt && cfg?.closeAfterMinutes
+    ? new Date(new Date(state.positionOpenedAt).getTime() + cfg.closeAfterMinutes * 60000).toISOString()
+    : null;
+  const fundingCountdown = useCountdown(state?.nextFundingTime);
+  const closeCountdown = useCountdown(closeTarget);
+
+  const borderAccent = isRunning
+    ? phase === 2 ? 'border-l-accent-yellow' : 'border-l-accent-green'
+    : 'border-l-border';
+
+  const phaseLabels = ['Ожидание', 'Ордера', 'В позиции', 'Кулдаун'];
+
+  // PnL calculation for phase 2
+  let pnlUsd = 0;
+  let pnlPct = 0;
+  if (phase === 2 && state?.avgEntryPrice && state?.lastPrice && state?.totalFilledUsdt) {
+    const isLong = state.direction === 'Long';
+    pnlPct = isLong
+      ? (state.lastPrice - state.avgEntryPrice) / state.avgEntryPrice * 100
+      : (state.avgEntryPrice - state.lastPrice) / state.avgEntryPrice * 100;
+    pnlUsd = (pnlPct / 100) * state.totalFilledUsdt;
+  }
+
+  const filledCount = state?.placedOrders?.filter((o) => o.isFilled).length ?? 0;
+  const totalOrderCount = state?.placedOrders?.length ?? 0;
+
+  return (
+    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
+      {/* Header */}
+      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-mono font-semibold text-text-primary truncate">
+              {cfg?.symbol || '—'}
+            </span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400">
+              HF
+            </span>
+          </div>
+          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
+            {s.name} · {s.accountName}
+          </div>
+        </div>
+        <StatusBadge status={s.status} />
+      </div>
+
+      {/* Config chips */}
+      {cfg && (
+        <div className="px-4 pb-2 flex flex-wrap gap-1">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            {levels.length} уровней
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-green/10 text-accent-green">
+            TP {cfg.takeProfitPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-red/10 text-accent-red">
+            SL {cfg.stopLossPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            {cfg.secondsBeforeFunding}s
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            {cfg.closeAfterMinutes}min
+          </span>
+        </div>
+      )}
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Phase content */}
+      <div className="px-4 py-2.5 min-h-[52px] flex items-center">
+        {!isRunning ? (
+          <span className="text-text-secondary text-xs">{phaseLabels[phase] ?? '—'}</span>
+        ) : phase === 0 ? (
+          <div className="w-full space-y-1">
+            <div className="flex items-center gap-2">
+              {state?.currentFundingRate != null && (
+                <span className={`text-xs font-semibold ${state.currentFundingRate >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  Funding: {state.currentFundingRate >= 0 ? '+' : ''}{(state.currentFundingRate * 100).toFixed(4)}%
+                </span>
+              )}
+            </div>
+            {state?.nextFundingTime && (
+              <div className="text-[11px] text-text-secondary">
+                До фандинга: <span className="font-mono text-text-primary">{fundingCountdown}</span>
+              </div>
+            )}
+          </div>
+        ) : phase === 1 ? (
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-accent-blue/10 text-accent-blue">
+              Ордера выставлены
+            </span>
+            {totalOrderCount > 0 && (
+              <span className="text-[10px] text-text-secondary">
+                Filled: {filledCount}/{totalOrderCount}
+              </span>
+            )}
+            {state?.direction && (
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${state.direction === 'Long' ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'}`}>
+                {state.direction.toUpperCase()}
+              </span>
+            )}
+          </div>
+        ) : phase === 2 ? (
+          <div className="w-full space-y-1">
+            <div className="flex items-center gap-2">
+              {state?.direction && (
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${state.direction === 'Long' ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'}`}>
+                  {state.direction.toUpperCase()}
+                </span>
+              )}
+              {state?.avgEntryPrice != null && (
+                <span className="text-[10px] text-text-secondary">
+                  Avg: <span className="text-text-primary">${state.avgEntryPrice.toFixed(2)}</span>
+                </span>
+              )}
+              {state?.lastPrice != null && state?.totalFilledUsdt != null && (
+                <span className={`text-[10px] font-semibold ${pnlUsd >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  {pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(2)} ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
+                </span>
+              )}
+            </div>
+            {(state?.takeProfit != null || state?.stopLoss != null) && (
+              <div className="text-[10px] text-text-secondary">
+                {state?.takeProfit != null && <span>TP: ${state.takeProfit.toFixed(2)}</span>}
+                {state?.takeProfit != null && state?.stopLoss != null && <span> | </span>}
+                {state?.stopLoss != null && <span>SL: ${state.stopLoss.toFixed(2)}</span>}
+              </div>
+            )}
+            {closeTarget && (
+              <div className="text-[10px] text-text-secondary">
+                Закрытие через: <span className="font-mono text-text-primary">{closeCountdown}</span>
+              </div>
+            )}
+          </div>
+        ) : phase === 3 ? (
+          <div className="w-full space-y-1">
+            <span className="text-[10px] text-text-secondary">Ожидание следующего фандинга</span>
+            {state?.nextFundingTime && (
+              <div className="text-[11px] text-text-secondary">
+                До фандинга: <span className="font-mono text-text-primary">{fundingCountdown}</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <span className="text-text-secondary text-xs">{phaseLabels[phase] ?? '—'}</span>
+        )}
+      </div>
+
+      {/* Bottom stats row */}
+      <div className="px-4 pb-2 flex items-center gap-3">
+        {cfg && (
+          <span className="text-[10px] text-text-secondary">
+            Цикл: <span className="text-text-primary font-medium">{state?.cycleCount ?? 0}/{cfg.maxCycles || '∞'}</span>
+          </span>
+        )}
+        {state != null && state.cycleTotalPnl != null && (
+          <span className={`text-[10px] font-medium ${state.cycleTotalPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+            PnL: {state.cycleTotalPnl >= 0 ? '+' : ''}${state.cycleTotalPnl.toFixed(2)}
+          </span>
+        )}
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Actions */}
+      <div className="px-3 py-2 flex items-center gap-1">
+        <button
+          onClick={onLogs}
+          title="Логи"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+        </button>
+
+        {/* TG signal toggle */}
+        {telegramBots && telegramBots.length > 0 && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                if (s.telegramBotId) {
+                  onSetTelegramBot(null);
+                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
+                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
+                }
+              }}
+              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
+              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                s.telegramBotId
+                  ? 'bg-accent-blue/15 text-accent-blue'
+                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
+              }`}
+            >
+              TG
+            </button>
+            {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                value=""
+                onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
+              >
+                <option value="">Select bot...</option>
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+            {s.telegramBotId && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                value={s.telegramBotId}
+                onChange={(e) => onSetTelegramBot(e.target.value || null)}
+              >
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {phase === 2 && isRunning && (
+          <button
+            onClick={() => { if (confirm('Закрыть позицию по рынку?')) onClosePosition(); }}
+            disabled={closePositionPending}
+            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
+          >
+            {closePositionPending ? '...' : 'Закрыть'}
+          </button>
+        )}
+
+        {isRunning ? (
+          <button
+            onClick={onStop}
+            className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+          >
+            Стоп
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={onStart}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+            >
+              Старт
+            </button>
+            <button
+              onClick={onEdit}
+              title="Редактировать"
+              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        <button
+          onClick={onDelete}
+          title="Удалить"
+          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── Stat Card ─────────────────────────────────────────── */
 
 function StatCard({
@@ -1005,6 +1402,13 @@ function StatCard({
   );
 }
 
+/* ── Hunting Funding Level row type ───────────────────── */
+
+interface HFLevel {
+  offsetPercent: number;
+  sizeUsdt: number;
+}
+
 /* ── Add Bot Modal ─────────────────────────────────────── */
 
 function AddStrategyModal({
@@ -1023,10 +1427,13 @@ function AddStrategyModal({
     queryFn: () => api.get('/accounts').then((r) => r.data),
   });
 
-  const [form, setForm] = useState({
-    accountId: '',
-    name: '',
-    symbol: '',
+  // Common fields
+  const [accountId, setAccountId] = useState('');
+  const [name, setName] = useState('');
+  const [symbol, setSymbol] = useState('');
+
+  // MaratG fields
+  const [mgForm, setMgForm] = useState({
     timeframe: '1h',
     indicatorType: 'EMA',
     indicatorLength: '50',
@@ -1036,10 +1443,24 @@ function AddStrategyModal({
     stopLossPercent: '3',
   });
 
+  // HuntingFunding fields
+  const [hfLevels, setHfLevels] = useState<HFLevel[]>([{ offsetPercent: 1.5, sizeUsdt: 50 }]);
+  const [hfForm, setHfForm] = useState({
+    takeProfitPercent: '1.0',
+    stopLossPercent: '0.5',
+    secondsBeforeFunding: '10',
+    closeAfterMinutes: '10',
+    maxCycles: '0',
+    enableLong: true,
+    minFundingLong: '1.0',
+    enableShort: true,
+    minFundingShort: '1.0',
+  });
+
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
-    queryKey: ['symbols', form.accountId],
-    queryFn: () => api.get(`/exchange/${form.accountId}/symbols`).then((r) => r.data),
-    enabled: !!form.accountId,
+    queryKey: ['symbols', accountId],
+    queryFn: () => api.get(`/exchange/${accountId}/symbols`).then((r) => r.data),
+    enabled: !!accountId,
     staleTime: 5 * 60 * 1000,
   });
 
@@ -1064,35 +1485,57 @@ function AddStrategyModal({
   });
 
   const handleSubmit = () => {
-    if (!form.accountId || !form.name || !form.symbol) {
+    if (!accountId || !name || !symbol) {
       setError('Заполните все обязательные поля');
       return;
     }
 
-    const configJson = JSON.stringify({
-      indicatorType: form.indicatorType,
-      indicatorLength: Number(form.indicatorLength),
-      candleCount: Number(form.candleCount),
-      offsetPercent: Number(form.offsetPercent),
-      takeProfitPercent: Number(form.takeProfitPercent),
-      stopLossPercent: Number(form.stopLossPercent),
-      symbol: form.symbol.replace(/\s+/g, '').toUpperCase(),
-      timeframe: form.timeframe,
-    });
+    let configJson: string;
+    if (strategyType === 'HuntingFunding') {
+      if (hfLevels.length === 0) {
+        setError('Добавьте хотя бы один уровень');
+        return;
+      }
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        levels: hfLevels,
+        takeProfitPercent: Number(hfForm.takeProfitPercent),
+        stopLossPercent: Number(hfForm.stopLossPercent),
+        secondsBeforeFunding: Number(hfForm.secondsBeforeFunding),
+        closeAfterMinutes: Number(hfForm.closeAfterMinutes),
+        maxCycles: Number(hfForm.maxCycles),
+        enableLong: hfForm.enableLong,
+        minFundingLong: Number(hfForm.minFundingLong),
+        enableShort: hfForm.enableShort,
+        minFundingShort: Number(hfForm.minFundingShort),
+      });
+    } else {
+      configJson = JSON.stringify({
+        indicatorType: mgForm.indicatorType,
+        indicatorLength: Number(mgForm.indicatorLength),
+        candleCount: Number(mgForm.candleCount),
+        offsetPercent: Number(mgForm.offsetPercent),
+        takeProfitPercent: Number(mgForm.takeProfitPercent),
+        stopLossPercent: Number(mgForm.stopLossPercent),
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        timeframe: mgForm.timeframe,
+      });
+    }
 
-    mutation.mutate({
-      accountId: form.accountId,
-      workspaceId,
-      name: form.name,
-      type: strategyType,
-      configJson,
-    });
+    mutation.mutate({ accountId, workspaceId, name, type: strategyType, configJson });
   };
 
   const activeAccounts = accounts?.filter((a) => a.isActive) || [];
   const inputCls =
     'w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors';
   const labelCls = 'block text-xs font-medium text-text-secondary mb-1';
+
+  const addHfLevel = () =>
+    setHfLevels((prev) => [...prev, { offsetPercent: 1.5, sizeUsdt: 50 }]);
+  const removeHfLevel = (i: number) =>
+    setHfLevels((prev) => prev.filter((_, idx) => idx !== i));
+  const updateHfLevel = (i: number, field: keyof HFLevel, value: number) =>
+    setHfLevels((prev) => prev.map((l, idx) => idx === i ? { ...l, [field]: value } : l));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -1106,13 +1549,7 @@ function AddStrategyModal({
             onClick={onClose}
             className="text-text-secondary hover:text-text-primary transition-colors"
           >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
@@ -1129,8 +1566,8 @@ function AddStrategyModal({
           <div>
             <label className={labelCls}>Аккаунт *</label>
             <select
-              value={form.accountId}
-              onChange={(e) => setForm({ ...form, accountId: e.target.value, symbol: '' })}
+              value={accountId}
+              onChange={(e) => { setAccountId(e.target.value); setSymbol(''); }}
               className={inputCls}
             >
               <option value="">Выберите аккаунт...</option>
@@ -1147,8 +1584,8 @@ function AddStrategyModal({
             <label className={labelCls}>Название бота *</label>
             <input
               type="text"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
               placeholder={`Мой ${strategyType} бот`}
               className={inputCls}
             />
@@ -1160,106 +1597,279 @@ function AddStrategyModal({
             </p>
           </div>
 
-          {/* Symbol + Timeframe */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Символ *</label>
-              <SearchableSelect
-                value={form.symbol}
-                onChange={(val) => setForm({ ...form, symbol: val })}
-                options={symbolOptions}
-                placeholder="Выберите символ"
-                isLoading={symbolsLoading}
-                disabled={!form.accountId}
-                className={inputCls}
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Таймфрейм</label>
-              <select
-                value={form.timeframe}
-                onChange={(e) => setForm({ ...form, timeframe: e.target.value })}
-                className={inputCls}
-              >
-                <option value="1m">1m</option>
-                <option value="5m">5m</option>
-                <option value="15m">15m</option>
-                <option value="30m">30m</option>
-                <option value="1h">1h</option>
-                <option value="4h">4h</option>
-                <option value="1d">1D</option>
-              </select>
-            </div>
+          {/* Symbol */}
+          <div>
+            <label className={labelCls}>Символ *</label>
+            <SearchableSelect
+              value={symbol}
+              onChange={(val) => setSymbol(val)}
+              options={symbolOptions}
+              placeholder="Выберите символ"
+              isLoading={symbolsLoading}
+              disabled={!accountId}
+              className={inputCls}
+            />
           </div>
 
-          {/* Indicator Type + Length */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Индикатор</label>
-              <select
-                value={form.indicatorType}
-                onChange={(e) => setForm({ ...form, indicatorType: e.target.value })}
-                className={inputCls}
-              >
-                <option value="EMA">EMA</option>
-                <option value="SMA">SMA</option>
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>Период</label>
-              <input
-                type="number"
-                value={form.indicatorLength}
-                onChange={(e) => setForm({ ...form, indicatorLength: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-          </div>
+          {strategyType === 'HuntingFunding' ? (
+            <>
+              {/* Levels table */}
+              <div>
+                <label className={labelCls}>Уровни ордеров</label>
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
+                        <th className="px-3 py-2 text-left font-medium">Offset %</th>
+                        <th className="px-3 py-2 text-left font-medium">Size USDT</th>
+                        <th className="px-3 py-2 w-8" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hfLevels.map((lvl, i) => (
+                        <tr key={i} className="border-t border-border/50">
+                          <td className="px-3 py-1.5">
+                            <input
+                              type="number"
+                              step="0.1"
+                              value={lvl.offsetPercent}
+                              onChange={(e) => updateHfLevel(i, 'offsetPercent', Number(e.target.value))}
+                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
+                            />
+                          </td>
+                          <td className="px-3 py-1.5">
+                            <input
+                              type="number"
+                              step="1"
+                              value={lvl.sizeUsdt}
+                              onChange={(e) => updateHfLevel(i, 'sizeUsdt', Number(e.target.value))}
+                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5 text-center">
+                            <button
+                              onClick={() => removeHfLevel(i)}
+                              className="text-text-secondary/40 hover:text-accent-red transition-colors"
+                              title="Удалить уровень"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  onClick={addHfLevel}
+                  className="mt-2 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors"
+                >
+                  + Добавить уровень
+                </button>
+              </div>
 
-          {/* Candle Count + Offset */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Кол-во свечей</label>
-              <input
-                type="number"
-                value={form.candleCount}
-                onChange={(e) => setForm({ ...form, candleCount: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Offset %</label>
-              <input
-                type="number"
-                value={form.offsetPercent}
-                onChange={(e) => setForm({ ...form, offsetPercent: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-          </div>
+              {/* TP / SL */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Take Profit %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={hfForm.takeProfitPercent}
+                    onChange={(e) => setHfForm({ ...hfForm, takeProfitPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Stop Loss %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={hfForm.stopLossPercent}
+                    onChange={(e) => setHfForm({ ...hfForm, stopLossPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
 
-          {/* TP / SL */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Take Profit %</label>
-              <input
-                type="number"
-                value={form.takeProfitPercent}
-                onChange={(e) => setForm({ ...form, takeProfitPercent: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Stop Loss %</label>
-              <input
-                type="number"
-                value={form.stopLossPercent}
-                onChange={(e) => setForm({ ...form, stopLossPercent: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-          </div>
+              {/* Timing */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Секунд до фандинга</label>
+                  <input
+                    type="number"
+                    value={hfForm.secondsBeforeFunding}
+                    onChange={(e) => setHfForm({ ...hfForm, secondsBeforeFunding: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Закрыть через (мин)</label>
+                  <input
+                    type="number"
+                    value={hfForm.closeAfterMinutes}
+                    onChange={(e) => setHfForm({ ...hfForm, closeAfterMinutes: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
 
+              {/* Cycles */}
+              <div>
+                <label className={labelCls}>Макс. циклов <span className="font-normal">(0 = бесконечно)</span></label>
+                <input
+                  type="number"
+                  min="0"
+                  value={hfForm.maxCycles}
+                  onChange={(e) => setHfForm({ ...hfForm, maxCycles: e.target.value })}
+                  className={inputCls}
+                />
+              </div>
+
+              {/* Direction thresholds */}
+              <div className="col-span-2 border border-dark-border rounded-lg p-3 space-y-3">
+                <p className="text-xs text-text-secondary font-medium uppercase tracking-wide">Направления торговли</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="flex items-center gap-2 mb-1">
+                      <input
+                        type="checkbox"
+                        checked={hfForm.enableLong}
+                        onChange={(e) => setHfForm({ ...hfForm, enableLong: e.target.checked })}
+                        className="rounded border-dark-border"
+                      />
+                      <span className="text-sm text-text-primary font-medium">Long</span>
+                      <span className="text-xs text-text-secondary">(фандинг &lt; 0)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      placeholder="Мин. фандинг %"
+                      value={hfForm.minFundingLong}
+                      onChange={(e) => setHfForm({ ...hfForm, minFundingLong: e.target.value })}
+                      disabled={!hfForm.enableLong}
+                      className={inputCls + (!hfForm.enableLong ? ' opacity-50' : '')}
+                    />
+                    <p className="text-xs text-text-secondary mt-0.5">Торгуем если фандинг ≤ −{hfForm.minFundingLong}%</p>
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-2 mb-1">
+                      <input
+                        type="checkbox"
+                        checked={hfForm.enableShort}
+                        onChange={(e) => setHfForm({ ...hfForm, enableShort: e.target.checked })}
+                        className="rounded border-dark-border"
+                      />
+                      <span className="text-sm text-text-primary font-medium">Short</span>
+                      <span className="text-xs text-text-secondary">(фандинг &gt; 0)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      placeholder="Мин. фандинг %"
+                      value={hfForm.minFundingShort}
+                      onChange={(e) => setHfForm({ ...hfForm, minFundingShort: e.target.value })}
+                      disabled={!hfForm.enableShort}
+                      className={inputCls + (!hfForm.enableShort ? ' opacity-50' : '')}
+                    />
+                    <p className="text-xs text-text-secondary mt-0.5">Торгуем если фандинг ≥ +{hfForm.minFundingShort}%</p>
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Timeframe */}
+              <div>
+                <label className={labelCls}>Таймфрейм</label>
+                <select
+                  value={mgForm.timeframe}
+                  onChange={(e) => setMgForm({ ...mgForm, timeframe: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="30m">30m</option>
+                  <option value="1h">1h</option>
+                  <option value="4h">4h</option>
+                  <option value="1d">1D</option>
+                </select>
+              </div>
+
+              {/* Indicator Type + Length */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Индикатор</label>
+                  <select
+                    value={mgForm.indicatorType}
+                    onChange={(e) => setMgForm({ ...mgForm, indicatorType: e.target.value })}
+                    className={inputCls}
+                  >
+                    <option value="EMA">EMA</option>
+                    <option value="SMA">SMA</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Период</label>
+                  <input
+                    type="number"
+                    value={mgForm.indicatorLength}
+                    onChange={(e) => setMgForm({ ...mgForm, indicatorLength: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* Candle Count + Offset */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Кол-во свечей</label>
+                  <input
+                    type="number"
+                    value={mgForm.candleCount}
+                    onChange={(e) => setMgForm({ ...mgForm, candleCount: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Offset %</label>
+                  <input
+                    type="number"
+                    value={mgForm.offsetPercent}
+                    onChange={(e) => setMgForm({ ...mgForm, offsetPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* TP / SL */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Take Profit %</label>
+                  <input
+                    type="number"
+                    value={mgForm.takeProfitPercent}
+                    onChange={(e) => setMgForm({ ...mgForm, takeProfitPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Stop Loss %</label>
+                  <input
+                    type="number"
+                    value={mgForm.stopLossPercent}
+                    onChange={(e) => setMgForm({ ...mgForm, stopLossPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="flex justify-end gap-3 px-6 py-4 border-t border-border">
@@ -1293,10 +1903,13 @@ function EditStrategyModal({
 }) {
   const queryClient = useQueryClient();
   const cfg = parseJson(strategy.configJson) || {};
+  const isHF = strategy.type === 'HuntingFunding';
 
-  const [form, setForm] = useState({
-    name: strategy.name,
-    symbol: cfg.symbol || 'BTCUSDT',
+  const [name, setName] = useState(strategy.name);
+  const [symbol, setSymbol] = useState(cfg.symbol || 'BTCUSDT');
+
+  // MaratG form state
+  const [mgForm, setMgForm] = useState({
     timeframe: cfg.timeframe || '1h',
     indicatorType: cfg.indicatorType || 'EMA',
     indicatorLength: String(cfg.indicatorLength ?? 50),
@@ -1306,6 +1919,24 @@ function EditStrategyModal({
     stopLossPercent: String(cfg.stopLossPercent ?? 3),
     onlyLong: cfg.onlyLong ?? false,
     onlyShort: cfg.onlyShort ?? false,
+  });
+
+  // HuntingFunding form state
+  const [hfLevels, setHfLevels] = useState<HFLevel[]>(
+    Array.isArray(cfg.levels) && cfg.levels.length > 0
+      ? cfg.levels
+      : [{ offsetPercent: 1.5, sizeUsdt: 50 }],
+  );
+  const [hfForm, setHfForm] = useState({
+    takeProfitPercent: String(cfg.takeProfitPercent ?? 1.0),
+    stopLossPercent: String(cfg.stopLossPercent ?? 0.5),
+    secondsBeforeFunding: String(cfg.secondsBeforeFunding ?? 10),
+    closeAfterMinutes: String(cfg.closeAfterMinutes ?? 10),
+    maxCycles: String(cfg.maxCycles ?? 0),
+    enableLong: cfg.enableLong ?? true,
+    minFundingLong: String(cfg.minFundingLong ?? 1.0),
+    enableShort: cfg.enableShort ?? true,
+    minFundingShort: String(cfg.minFundingShort ?? 1.0),
   });
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
@@ -1335,30 +1966,58 @@ function EditStrategyModal({
   });
 
   const handleSubmit = () => {
-    if (!form.name || !form.symbol) {
+    if (!name || !symbol) {
       setError('Заполните все обязательные поля');
       return;
     }
 
-    const configJson = JSON.stringify({
-      indicatorType: form.indicatorType,
-      indicatorLength: Number(form.indicatorLength),
-      candleCount: Number(form.candleCount),
-      offsetPercent: Number(form.offsetPercent),
-      takeProfitPercent: Number(form.takeProfitPercent),
-      stopLossPercent: Number(form.stopLossPercent),
-      symbol: form.symbol.replace(/\s+/g, '').toUpperCase(),
-      timeframe: form.timeframe,
-      onlyLong: form.onlyLong,
-      onlyShort: form.onlyShort,
-    });
+    let configJson: string;
+    if (isHF) {
+      if (hfLevels.length === 0) {
+        setError('Добавьте хотя бы один уровень');
+        return;
+      }
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        levels: hfLevels,
+        takeProfitPercent: Number(hfForm.takeProfitPercent),
+        stopLossPercent: Number(hfForm.stopLossPercent),
+        secondsBeforeFunding: Number(hfForm.secondsBeforeFunding),
+        closeAfterMinutes: Number(hfForm.closeAfterMinutes),
+        maxCycles: Number(hfForm.maxCycles),
+        enableLong: hfForm.enableLong,
+        minFundingLong: Number(hfForm.minFundingLong),
+        enableShort: hfForm.enableShort,
+        minFundingShort: Number(hfForm.minFundingShort),
+      });
+    } else {
+      configJson = JSON.stringify({
+        indicatorType: mgForm.indicatorType,
+        indicatorLength: Number(mgForm.indicatorLength),
+        candleCount: Number(mgForm.candleCount),
+        offsetPercent: Number(mgForm.offsetPercent),
+        takeProfitPercent: Number(mgForm.takeProfitPercent),
+        stopLossPercent: Number(mgForm.stopLossPercent),
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        timeframe: mgForm.timeframe,
+        onlyLong: mgForm.onlyLong,
+        onlyShort: mgForm.onlyShort,
+      });
+    }
 
-    mutation.mutate({ name: form.name, configJson });
+    mutation.mutate({ name, configJson });
   };
 
   const inputCls =
     'w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors';
   const labelCls = 'block text-xs font-medium text-text-secondary mb-1';
+
+  const addHfLevel = () =>
+    setHfLevels((prev) => [...prev, { offsetPercent: 1.5, sizeUsdt: 50 }]);
+  const removeHfLevel = (i: number) =>
+    setHfLevels((prev) => prev.filter((_, idx) => idx !== i));
+  const updateHfLevel = (i: number, field: keyof HFLevel, value: number) =>
+    setHfLevels((prev) => prev.map((l, idx) => idx === i ? { ...l, [field]: value } : l));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -1367,7 +2026,7 @@ function EditStrategyModal({
           <div>
             <h2 className="text-base font-semibold text-text-primary">Редактировать бота</h2>
             <p className="text-xs text-text-secondary mt-0.5">
-              {strategy.accountName} ({strategy.exchange})
+              {strategy.accountName} ({strategy.exchange}) · {strategy.type}
             </p>
           </div>
           <button
@@ -1392,8 +2051,8 @@ function EditStrategyModal({
             <label className={labelCls}>Название бота *</label>
             <input
               type="text"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
               className={inputCls}
             />
           </div>
@@ -1404,126 +2063,300 @@ function EditStrategyModal({
             </p>
           </div>
 
-          {/* Symbol + Timeframe */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Символ *</label>
-              <SearchableSelect
-                value={form.symbol}
-                onChange={(val) => setForm({ ...form, symbol: val })}
-                options={symbolOptions}
-                placeholder="Выберите символ"
-                isLoading={symbolsLoading}
-                className={inputCls}
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Таймфрейм</label>
-              <select
-                value={form.timeframe}
-                onChange={(e) => setForm({ ...form, timeframe: e.target.value })}
-                className={inputCls}
-              >
-                <option value="1m">1m</option>
-                <option value="5m">5m</option>
-                <option value="15m">15m</option>
-                <option value="30m">30m</option>
-                <option value="1h">1h</option>
-                <option value="4h">4h</option>
-                <option value="1d">1D</option>
-              </select>
-            </div>
+          {/* Symbol */}
+          <div>
+            <label className={labelCls}>Символ *</label>
+            <SearchableSelect
+              value={symbol}
+              onChange={(val) => setSymbol(val)}
+              options={symbolOptions}
+              placeholder="Выберите символ"
+              isLoading={symbolsLoading}
+              className={inputCls}
+            />
           </div>
 
-          {/* Indicator Type + Length */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Индикатор</label>
-              <select
-                value={form.indicatorType}
-                onChange={(e) => setForm({ ...form, indicatorType: e.target.value })}
-                className={inputCls}
-              >
-                <option value="EMA">EMA</option>
-                <option value="SMA">SMA</option>
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>Период</label>
-              <input
-                type="number"
-                value={form.indicatorLength}
-                onChange={(e) => setForm({ ...form, indicatorLength: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-          </div>
+          {isHF ? (
+            <>
+              {/* Levels table */}
+              <div>
+                <label className={labelCls}>Уровни ордеров</label>
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
+                        <th className="px-3 py-2 text-left font-medium">Offset %</th>
+                        <th className="px-3 py-2 text-left font-medium">Size USDT</th>
+                        <th className="px-3 py-2 w-8" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hfLevels.map((lvl, i) => (
+                        <tr key={i} className="border-t border-border/50">
+                          <td className="px-3 py-1.5">
+                            <input
+                              type="number"
+                              step="0.1"
+                              value={lvl.offsetPercent}
+                              onChange={(e) => updateHfLevel(i, 'offsetPercent', Number(e.target.value))}
+                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
+                            />
+                          </td>
+                          <td className="px-3 py-1.5">
+                            <input
+                              type="number"
+                              step="1"
+                              value={lvl.sizeUsdt}
+                              onChange={(e) => updateHfLevel(i, 'sizeUsdt', Number(e.target.value))}
+                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
+                            />
+                          </td>
+                          <td className="px-2 py-1.5 text-center">
+                            <button
+                              onClick={() => removeHfLevel(i)}
+                              className="text-text-secondary/40 hover:text-accent-red transition-colors"
+                              title="Удалить уровень"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  onClick={addHfLevel}
+                  className="mt-2 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors"
+                >
+                  + Добавить уровень
+                </button>
+              </div>
 
-          {/* Candle Count + Offset */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Кол-во свечей</label>
-              <input
-                type="number"
-                value={form.candleCount}
-                onChange={(e) => setForm({ ...form, candleCount: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Offset %</label>
-              <input
-                type="number"
-                value={form.offsetPercent}
-                onChange={(e) => setForm({ ...form, offsetPercent: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-          </div>
+              {/* TP / SL */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Take Profit %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={hfForm.takeProfitPercent}
+                    onChange={(e) => setHfForm({ ...hfForm, takeProfitPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Stop Loss %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={hfForm.stopLossPercent}
+                    onChange={(e) => setHfForm({ ...hfForm, stopLossPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
 
-          {/* TP / SL */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Take Profit %</label>
-              <input
-                type="number"
-                value={form.takeProfitPercent}
-                onChange={(e) => setForm({ ...form, takeProfitPercent: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-            <div>
-              <label className={labelCls}>Stop Loss %</label>
-              <input
-                type="number"
-                value={form.stopLossPercent}
-                onChange={(e) => setForm({ ...form, stopLossPercent: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-          </div>
+              {/* Timing */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Секунд до фандинга</label>
+                  <input
+                    type="number"
+                    value={hfForm.secondsBeforeFunding}
+                    onChange={(e) => setHfForm({ ...hfForm, secondsBeforeFunding: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Закрыть через (мин)</label>
+                  <input
+                    type="number"
+                    value={hfForm.closeAfterMinutes}
+                    onChange={(e) => setHfForm({ ...hfForm, closeAfterMinutes: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
 
-          {/* Direction filter */}
-          <div className="flex items-center gap-4">
-            <label className="flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={form.onlyLong}
-                onChange={(e) => setForm({ ...form, onlyLong: e.target.checked, onlyShort: e.target.checked ? false : form.onlyShort })}
-                className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-green focus:ring-accent-green/50 cursor-pointer"
-              />
-              <span className="text-sm font-medium text-accent-green">Только Long</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={form.onlyShort}
-                onChange={(e) => setForm({ ...form, onlyShort: e.target.checked, onlyLong: e.target.checked ? false : form.onlyLong })}
-                className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-red focus:ring-accent-red/50 cursor-pointer"
-              />
-              <span className="text-sm font-medium text-accent-red">Только Short</span>
-            </label>
-          </div>
+              {/* Cycles */}
+              <div>
+                <label className={labelCls}>Макс. циклов <span className="font-normal">(0 = бесконечно)</span></label>
+                <input
+                  type="number"
+                  min="0"
+                  value={hfForm.maxCycles}
+                  onChange={(e) => setHfForm({ ...hfForm, maxCycles: e.target.value })}
+                  className={inputCls}
+                />
+              </div>
+
+              {/* Direction thresholds */}
+              <div className="col-span-2 border border-dark-border rounded-lg p-3 space-y-3">
+                <p className="text-xs text-text-secondary font-medium uppercase tracking-wide">Направления торговли</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="flex items-center gap-2 mb-1">
+                      <input
+                        type="checkbox"
+                        checked={hfForm.enableLong}
+                        onChange={(e) => setHfForm({ ...hfForm, enableLong: e.target.checked })}
+                        className="rounded border-dark-border"
+                      />
+                      <span className="text-sm text-text-primary font-medium">Long</span>
+                      <span className="text-xs text-text-secondary">(фандинг &lt; 0)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      placeholder="Мин. фандинг %"
+                      value={hfForm.minFundingLong}
+                      onChange={(e) => setHfForm({ ...hfForm, minFundingLong: e.target.value })}
+                      disabled={!hfForm.enableLong}
+                      className={inputCls + (!hfForm.enableLong ? ' opacity-50' : '')}
+                    />
+                    <p className="text-xs text-text-secondary mt-0.5">Торгуем если фандинг ≤ −{hfForm.minFundingLong}%</p>
+                  </div>
+                  <div>
+                    <label className="flex items-center gap-2 mb-1">
+                      <input
+                        type="checkbox"
+                        checked={hfForm.enableShort}
+                        onChange={(e) => setHfForm({ ...hfForm, enableShort: e.target.checked })}
+                        className="rounded border-dark-border"
+                      />
+                      <span className="text-sm text-text-primary font-medium">Short</span>
+                      <span className="text-xs text-text-secondary">(фандинг &gt; 0)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      placeholder="Мин. фандинг %"
+                      value={hfForm.minFundingShort}
+                      onChange={(e) => setHfForm({ ...hfForm, minFundingShort: e.target.value })}
+                      disabled={!hfForm.enableShort}
+                      className={inputCls + (!hfForm.enableShort ? ' opacity-50' : '')}
+                    />
+                    <p className="text-xs text-text-secondary mt-0.5">Торгуем если фандинг ≥ +{hfForm.minFundingShort}%</p>
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Timeframe */}
+              <div>
+                <label className={labelCls}>Таймфрейм</label>
+                <select
+                  value={mgForm.timeframe}
+                  onChange={(e) => setMgForm({ ...mgForm, timeframe: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="30m">30m</option>
+                  <option value="1h">1h</option>
+                  <option value="4h">4h</option>
+                  <option value="1d">1D</option>
+                </select>
+              </div>
+
+              {/* Indicator Type + Length */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Индикатор</label>
+                  <select
+                    value={mgForm.indicatorType}
+                    onChange={(e) => setMgForm({ ...mgForm, indicatorType: e.target.value })}
+                    className={inputCls}
+                  >
+                    <option value="EMA">EMA</option>
+                    <option value="SMA">SMA</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Период</label>
+                  <input
+                    type="number"
+                    value={mgForm.indicatorLength}
+                    onChange={(e) => setMgForm({ ...mgForm, indicatorLength: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* Candle Count + Offset */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Кол-во свечей</label>
+                  <input
+                    type="number"
+                    value={mgForm.candleCount}
+                    onChange={(e) => setMgForm({ ...mgForm, candleCount: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Offset %</label>
+                  <input
+                    type="number"
+                    value={mgForm.offsetPercent}
+                    onChange={(e) => setMgForm({ ...mgForm, offsetPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* TP / SL */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Take Profit %</label>
+                  <input
+                    type="number"
+                    value={mgForm.takeProfitPercent}
+                    onChange={(e) => setMgForm({ ...mgForm, takeProfitPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Stop Loss %</label>
+                  <input
+                    type="number"
+                    value={mgForm.stopLossPercent}
+                    onChange={(e) => setMgForm({ ...mgForm, stopLossPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* Direction filter */}
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={mgForm.onlyLong}
+                    onChange={(e) => setMgForm({ ...mgForm, onlyLong: e.target.checked, onlyShort: e.target.checked ? false : mgForm.onlyShort })}
+                    className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-green focus:ring-accent-green/50 cursor-pointer"
+                  />
+                  <span className="text-sm font-medium text-accent-green">Только Long</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={mgForm.onlyShort}
+                    onChange={(e) => setMgForm({ ...mgForm, onlyShort: e.target.checked, onlyLong: e.target.checked ? false : mgForm.onlyLong })}
+                    className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-red focus:ring-accent-red/50 cursor-pointer"
+                  />
+                  <span className="text-sm font-medium text-accent-red">Только Short</span>
+                </label>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="flex justify-end gap-3 px-6 py-4 border-t border-border">

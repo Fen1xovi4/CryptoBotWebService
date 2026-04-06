@@ -92,18 +92,37 @@ public class StrategiesController : ControllerBase
                     if (string.IsNullOrEmpty(s.StateJson) || s.StateJson == "{}") continue;
                     try
                     {
-                        var state = JsonSerializer.Deserialize<EmaBounceState>(s.StateJson, jsonOpts);
-                        if (state == null) continue;
+                        if (s.Type == StrategyTypes.HuntingFunding)
+                        {
+                            var hfState = JsonSerializer.Deserialize<HuntingFundingState>(s.StateJson, jsonOpts);
+                            if (hfState == null) continue;
 
-                        if (state.OpenLong != null && state.LastPrice.HasValue && state.OpenLong.EntryPrice > 0)
-                        {
-                            var pnlPct = (state.LastPrice.Value - state.OpenLong.EntryPrice) / state.OpenLong.EntryPrice * 100m;
-                            unrealizedPnl += state.OpenLong.OrderSize * pnlPct / 100m;
+                            if (hfState.Phase == HuntingFundingPhase.InPosition
+                                && hfState.AvgEntryPrice.HasValue && hfState.AvgEntryPrice.Value > 0
+                                && hfState.TotalFilledUsdt.HasValue
+                                && hfState.LastPrice.HasValue)
+                            {
+                                var pnlPct = hfState.Direction == "Long"
+                                    ? (hfState.LastPrice.Value - hfState.AvgEntryPrice.Value) / hfState.AvgEntryPrice.Value * 100m
+                                    : (hfState.AvgEntryPrice.Value - hfState.LastPrice.Value) / hfState.AvgEntryPrice.Value * 100m;
+                                unrealizedPnl += hfState.TotalFilledUsdt.Value * pnlPct / 100m;
+                            }
                         }
-                        if (state.OpenShort != null && state.LastPrice.HasValue && state.OpenShort.EntryPrice > 0)
+                        else
                         {
-                            var pnlPct = (state.OpenShort.EntryPrice - state.LastPrice.Value) / state.OpenShort.EntryPrice * 100m;
-                            unrealizedPnl += state.OpenShort.OrderSize * pnlPct / 100m;
+                            var state = JsonSerializer.Deserialize<EmaBounceState>(s.StateJson, jsonOpts);
+                            if (state == null) continue;
+
+                            if (state.OpenLong != null && state.LastPrice.HasValue && state.OpenLong.EntryPrice > 0)
+                            {
+                                var pnlPct = (state.LastPrice.Value - state.OpenLong.EntryPrice) / state.OpenLong.EntryPrice * 100m;
+                                unrealizedPnl += state.OpenLong.OrderSize * pnlPct / 100m;
+                            }
+                            if (state.OpenShort != null && state.LastPrice.HasValue && state.OpenShort.EntryPrice > 0)
+                            {
+                                var pnlPct = (state.OpenShort.EntryPrice - state.LastPrice.Value) / state.OpenShort.EntryPrice * 100m;
+                                unrealizedPnl += state.OpenShort.OrderSize * pnlPct / 100m;
+                            }
                         }
                     }
                     catch { /* skip invalid state */ }
@@ -152,9 +171,45 @@ public class StrategiesController : ControllerBase
                 var winning = x.Trades90d.Count(t => t.PnlDollar > 0);
                 var total = x.Trades90d.Count;
 
-                EmaBounceConfig? config = null;
-                try { config = JsonSerializer.Deserialize<EmaBounceConfig>(x.Strategy.ConfigJson, jsonOpts); }
-                catch { }
+                string symbol;
+                string timeframe;
+                TopBotConfigDto? configDto;
+
+                if (x.Strategy.Type == StrategyTypes.HuntingFunding)
+                {
+                    HuntingFundingConfig? hfConfig = null;
+                    try { hfConfig = JsonSerializer.Deserialize<HuntingFundingConfig>(x.Strategy.ConfigJson, jsonOpts); }
+                    catch { }
+
+                    symbol = hfConfig?.Symbol ?? "";
+                    timeframe = "";
+                    configDto = hfConfig != null ? new TopBotConfigDto
+                    {
+                        TakeProfitPercent = hfConfig.TakeProfitPercent,
+                        StopLossPercent = hfConfig.StopLossPercent
+                    } : null;
+                }
+                else
+                {
+                    EmaBounceConfig? emaConfig = null;
+                    try { emaConfig = JsonSerializer.Deserialize<EmaBounceConfig>(x.Strategy.ConfigJson, jsonOpts); }
+                    catch { }
+
+                    symbol = emaConfig?.Symbol ?? "";
+                    timeframe = emaConfig?.Timeframe ?? "";
+                    configDto = emaConfig != null ? new TopBotConfigDto
+                    {
+                        IndicatorType = emaConfig.IndicatorType,
+                        IndicatorLength = emaConfig.IndicatorLength,
+                        TakeProfitPercent = emaConfig.TakeProfitPercent,
+                        StopLossPercent = emaConfig.StopLossPercent,
+                        OrderSize = emaConfig.OrderSize,
+                        UseMartingale = emaConfig.UseMartingale,
+                        MartingaleCoeff = emaConfig.MartingaleCoeff,
+                        OnlyLong = emaConfig.OnlyLong,
+                        OnlyShort = emaConfig.OnlyShort
+                    } : null;
+                }
 
                 var totalVolume = x.Trades90d.Sum(t => t.Quantity * t.Price);
                 var pnlPercent = totalVolume > 0 ? pnl / totalVolume * 100m : 0m;
@@ -165,27 +220,16 @@ public class StrategiesController : ControllerBase
                 {
                     Id = x.Strategy.Id,
                     Name = x.Strategy.Name,
-                    Symbol = config?.Symbol ?? "",
+                    Symbol = symbol,
                     Exchange = x.Exchange,
                     StrategyType = x.Strategy.Type,
-                    Timeframe = config?.Timeframe ?? "",
+                    Timeframe = timeframe,
                     RealizedPnlPercent = Math.Round(pnlPercent, 2),
                     RunningDays = runningDays,
                     TotalTrades = total,
                     WinningTrades = winning,
                     WinRate = total > 0 ? Math.Round((decimal)winning / total * 100, 1) : 0,
-                    Config = config != null ? new TopBotConfigDto
-                    {
-                        IndicatorType = config.IndicatorType,
-                        IndicatorLength = config.IndicatorLength,
-                        TakeProfitPercent = config.TakeProfitPercent,
-                        StopLossPercent = config.StopLossPercent,
-                        OrderSize = config.OrderSize,
-                        UseMartingale = config.UseMartingale,
-                        MartingaleCoeff = config.MartingaleCoeff,
-                        OnlyLong = config.OnlyLong,
-                        OnlyShort = config.OnlyShort
-                    } : null
+                    Config = configDto
                 };
             })
             .Where(b => b.RealizedPnlPercent > 0)
@@ -281,24 +325,44 @@ public class StrategiesController : ControllerBase
         }
 
         // Merge workspace config into strategy config at start time
-        if (strategy.Workspace != null)
+        // HuntingFunding has no workspace-level config — all config is per-bot, skip merge
+        if (strategy.Workspace != null && strategy.Type != StrategyTypes.HuntingFunding)
         {
             var merged = MergeWorkspaceConfig(strategy.ConfigJson, strategy.Workspace.ConfigJson);
             strategy.ConfigJson = merged;
         }
 
-        // Preserve martingale state across restarts; clear counters so handler recalculates from history
         var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-        var prevState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
-            ? new EmaBounceState()
-            : JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, jsonOpts) ?? new EmaBounceState();
 
-        var freshState = new EmaBounceState
+        if (strategy.Type == StrategyTypes.HuntingFunding)
         {
-            ConsecutiveLosses = prevState.ConsecutiveLosses,
-            RunningPnlDollar = prevState.RunningPnlDollar
-        };
-        strategy.StateJson = JsonSerializer.Serialize(freshState, jsonOpts);
+            // HuntingFunding: preserve cycle stats across restarts, reset phase to waiting
+            var prevHfState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
+                ? new HuntingFundingState()
+                : JsonSerializer.Deserialize<HuntingFundingState>(strategy.StateJson, jsonOpts) ?? new HuntingFundingState();
+
+            var freshHfState = new HuntingFundingState
+            {
+                Phase = HuntingFundingPhase.WaitingForFunding,
+                CycleCount = prevHfState.CycleCount,
+                CycleTotalPnl = prevHfState.CycleTotalPnl
+            };
+            strategy.StateJson = JsonSerializer.Serialize(freshHfState, jsonOpts);
+        }
+        else
+        {
+            // Preserve martingale state across restarts; clear counters so handler recalculates from history
+            var prevState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
+                ? new EmaBounceState()
+                : JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, jsonOpts) ?? new EmaBounceState();
+
+            var freshState = new EmaBounceState
+            {
+                ConsecutiveLosses = prevState.ConsecutiveLosses,
+                RunningPnlDollar = prevState.RunningPnlDollar
+            };
+            strategy.StateJson = JsonSerializer.Serialize(freshState, jsonOpts);
+        }
 
         strategy.Status = StrategyStatus.Running;
         strategy.StartedAt = DateTime.UtcNow;
@@ -413,6 +477,129 @@ public class StrategiesController : ControllerBase
             return BadRequest(new { message = "Нет открытой позиции" });
 
         var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var saveOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+        if (strategy.Type == StrategyTypes.HuntingFunding)
+        {
+            var hfState = JsonSerializer.Deserialize<HuntingFundingState>(strategy.StateJson, jsonOpts);
+
+            if (hfState == null ||
+                (hfState.Phase != HuntingFundingPhase.InPosition && hfState.Phase != HuntingFundingPhase.OrdersPlaced))
+                return BadRequest(new { message = "Нет открытой позиции" });
+
+            var hfConfig = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, jsonOpts);
+            var symbol = hfConfig?.Symbol ?? JsonSerializer.Deserialize<JsonElement>(strategy.ConfigJson).GetProperty("symbol").GetString()!;
+
+            using var exchange = _exchangeFactory.CreateFutures(strategy.Account);
+
+            // Cancel all open orders first
+            await exchange.CancelAllOrdersAsync(symbol);
+
+            // Get real position from exchange
+            var side = hfState.Direction ?? "Long";
+            var exchangePos = await exchange.GetPositionAsync(symbol, side);
+
+            decimal quantity;
+            decimal avgEntry;
+            decimal totalUsdt;
+
+            if (exchangePos != null && exchangePos.Quantity > 0)
+            {
+                quantity = exchangePos.Quantity;
+                avgEntry = exchangePos.EntryPrice;
+                totalUsdt = quantity * avgEntry;
+            }
+            else if (hfState.TotalFilledQuantity > 0)
+            {
+                // Fallback to tracked data
+                quantity = hfState.TotalFilledQuantity!.Value;
+                avgEntry = hfState.AvgEntryPrice ?? 0m;
+                totalUsdt = hfState.TotalFilledUsdt ?? 0m;
+            }
+            else
+            {
+                // No position found anywhere — just reset state
+                hfState.Phase = HuntingFundingPhase.Cooldown;
+                hfState.PlacedOrders = new List<PlacedOrderInfo>();
+                hfState.RemainingOrdersCancelled = true;
+                strategy.StateJson = JsonSerializer.Serialize(hfState, saveOpts);
+                await _db.SaveChangesAsync();
+                return Ok(new { message = "Позиция не найдена на бирже, ордера отменены, состояние сброшено" });
+            }
+
+            var currentPrice = await exchange.GetTickerPriceAsync(symbol);
+
+            OrderResultDto closeResult;
+            string closeSide;
+            if (hfState.Direction == "Long")
+            {
+                closeResult = await exchange.CloseLongAsync(symbol, quantity);
+                closeSide = "Sell";
+            }
+            else
+            {
+                closeResult = await exchange.CloseShortAsync(symbol, quantity);
+                closeSide = "Buy";
+            }
+
+            var closePrice = currentPrice ?? avgEntry;
+            decimal pnlPercent = 0m;
+            if (avgEntry > 0)
+            {
+                pnlPercent = hfState.Direction == "Long"
+                    ? (closePrice - avgEntry) / avgEntry * 100m
+                    : (avgEntry - closePrice) / avgEntry * 100m;
+            }
+            var pnlDollar = totalUsdt * pnlPercent / 100m;
+            var commission = totalUsdt * 2m * 0.0005m;
+            var netPnl = pnlDollar - commission;
+
+            _db.Trades.Add(new Trade
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                AccountId = strategy.AccountId,
+                ExchangeOrderId = closeResult.OrderId ?? "",
+                Symbol = symbol,
+                Side = closeSide,
+                Quantity = quantity,
+                Price = closePrice,
+                Status = "ManualClose",
+                ExecutedAt = DateTime.UtcNow,
+                PnlDollar = netPnl,
+                Commission = commission
+            });
+
+            _db.StrategyLogs.Add(new StrategyLog
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                Level = "Info",
+                Message = $"{hfState.Direction?.ToUpper()} закрыт вручную (HuntingFunding): цена={Math.Round(closePrice, 6)}, вход={Math.Round(avgEntry, 6)}, qty={Math.Round(quantity, 6)}, PnL={Math.Round(pnlPercent, 4)}% (${Math.Round(netPnl, 2)})",
+                CreatedAt = DateTime.UtcNow
+            });
+
+            // Reset position data, enter cooldown
+            var closedDirection = hfState.Direction;
+            hfState.Phase = HuntingFundingPhase.Cooldown;
+            hfState.AvgEntryPrice = null;
+            hfState.TotalFilledQuantity = null;
+            hfState.TotalFilledUsdt = null;
+            hfState.TakeProfit = null;
+            hfState.StopLoss = null;
+            hfState.PositionOpenedAt = null;
+            hfState.PlacedOrders = new List<PlacedOrderInfo>();
+            hfState.RemainingOrdersCancelled = true;
+            hfState.LastPrice = null;
+            hfState.CycleTotalPnl += netPnl;
+
+            strategy.StateJson = JsonSerializer.Serialize(hfState, saveOpts);
+            await _db.SaveChangesAsync();
+
+            return Ok(new { message = "Позиция закрыта по рынку", details = new[] { $"{closedDirection} closed: qty={Math.Round(quantity, 6)}, price={Math.Round(closePrice, 6)}, PnL=${Math.Round(netPnl, 2)}" } });
+        }
+
+        // --- EmaBounce / MaratG path ---
         var state = JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, jsonOpts);
 
         if (state == null || (state.OpenLong == null && state.OpenShort == null))
@@ -420,20 +607,20 @@ public class StrategiesController : ControllerBase
 
         var emaConfig = JsonSerializer.Deserialize<EmaBounceConfig>(strategy.ConfigJson, jsonOpts);
         var configEl = JsonSerializer.Deserialize<JsonElement>(strategy.ConfigJson);
-        var symbol = configEl.GetProperty("symbol").GetString()!;
+        var symbol2 = configEl.GetProperty("symbol").GetString()!;
 
-        using var exchange = _exchangeFactory.CreateFutures(strategy.Account);
+        using var exchange2 = _exchangeFactory.CreateFutures(strategy.Account);
 
         // Get current price for PnL calculation
-        var currentPrice = await exchange.GetTickerPriceAsync(symbol);
+        var currentPrice2 = await exchange2.GetTickerPriceAsync(symbol2);
 
         var results = new List<string>();
 
         if (state.OpenLong != null)
         {
             var position = state.OpenLong;
-            var result = await exchange.CloseLongAsync(symbol, position.Quantity);
-            var closePrice = currentPrice ?? position.EntryPrice;
+            var result = await exchange2.CloseLongAsync(symbol2, position.Quantity);
+            var closePrice = currentPrice2 ?? position.EntryPrice;
             var pnlPercent = (closePrice - position.EntryPrice) / position.EntryPrice * 100m;
             var pnlDollar = position.OrderSize * pnlPercent / 100m;
             var commission = position.OrderSize * 2m * 0.0005m;
@@ -456,7 +643,7 @@ public class StrategiesController : ControllerBase
                 StrategyId = strategy.Id,
                 AccountId = strategy.AccountId,
                 ExchangeOrderId = result.OrderId ?? "",
-                Symbol = symbol,
+                Symbol = symbol2,
                 Side = "Sell",
                 Quantity = position.Quantity,
                 Price = closePrice,
@@ -486,8 +673,8 @@ public class StrategiesController : ControllerBase
         if (state.OpenShort != null)
         {
             var position = state.OpenShort;
-            var result = await exchange.CloseShortAsync(symbol, position.Quantity);
-            var closePrice = currentPrice ?? position.EntryPrice;
+            var result = await exchange2.CloseShortAsync(symbol2, position.Quantity);
+            var closePrice = currentPrice2 ?? position.EntryPrice;
             var pnlPercent = (position.EntryPrice - closePrice) / position.EntryPrice * 100m;
             var pnlDollar = position.OrderSize * pnlPercent / 100m;
             var commission = position.OrderSize * 2m * 0.0005m;
@@ -510,7 +697,7 @@ public class StrategiesController : ControllerBase
                 StrategyId = strategy.Id,
                 AccountId = strategy.AccountId,
                 ExchangeOrderId = result.OrderId ?? "",
-                Symbol = symbol,
+                Symbol = symbol2,
                 Side = "Buy",
                 Quantity = position.Quantity,
                 Price = closePrice,
@@ -541,10 +728,7 @@ public class StrategiesController : ControllerBase
         if (emaConfig != null)
             state.NextOrderSize = EmaBounceHandler.GetCurrentOrderSize(emaConfig, state).orderSize;
 
-        strategy.StateJson = JsonSerializer.Serialize(state, new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-        });
+        strategy.StateJson = JsonSerializer.Serialize(state, saveOpts);
         await _db.SaveChangesAsync();
 
         return Ok(new { message = "Позиция закрыта по рынку", details = results });

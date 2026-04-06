@@ -139,16 +139,32 @@ public class DashboardController : ControllerBase
         // Per-bot breakdown
         var bots = wsStrategies.Select(s =>
         {
-            var config = TryParseConfig(s.ConfigJson);
-            var state = TryParseState(s.StateJson);
-            var hasPos = state?.OpenLong != null || state?.OpenShort != null;
-            var posDir = state?.OpenLong != null ? "Long" : state?.OpenShort != null ? "Short" : null;
+            string symbol;
+            bool hasPos;
+            string? posDir;
+
+            if (s.Type == Core.Constants.StrategyTypes.HuntingFunding)
+            {
+                var hfCfg = TryParseHfConfig(s.ConfigJson);
+                var hfState = TryParseHfState(s.StateJson);
+                symbol = hfCfg?.Symbol ?? "";
+                hasPos = hfState?.Phase == HuntingFundingPhase.InPosition;
+                posDir = hasPos ? hfState?.Direction : null;
+            }
+            else
+            {
+                var config = TryParseConfig(s.ConfigJson);
+                var state = TryParseState(s.StateJson);
+                symbol = config?.Symbol ?? "";
+                hasPos = state?.OpenLong != null || state?.OpenShort != null;
+                posDir = state?.OpenLong != null ? "Long" : state?.OpenShort != null ? "Short" : null;
+            }
 
             return new BotSummaryDto
             {
                 StrategyId = s.Id,
                 Name = s.Name,
-                Symbol = config?.Symbol ?? "",
+                Symbol = symbol,
                 Status = s.Status.ToString(),
                 HasPosition = hasPos,
                 PositionDirection = posDir,
@@ -185,21 +201,41 @@ public class DashboardController : ControllerBase
 
         foreach (var s in wsStrategies)
         {
-            var state = TryParseState(s.StateJson);
-            if (state == null) continue;
-
-            var hasPos = state.OpenLong != null || state.OpenShort != null;
-            if (hasPos) botsInPosition++;
-
-            if (state.OpenLong != null && state.LastPrice.HasValue && state.OpenLong.EntryPrice > 0)
+            if (s.Type == Core.Constants.StrategyTypes.HuntingFunding)
             {
-                var pct = (state.LastPrice.Value - state.OpenLong.EntryPrice) / state.OpenLong.EntryPrice * 100m;
-                unrealizedPnl += state.OpenLong.OrderSize * pct / 100m;
+                var hfState = TryParseHfState(s.StateJson);
+                if (hfState == null) continue;
+
+                if (hfState.Phase == HuntingFundingPhase.InPosition)
+                {
+                    botsInPosition++;
+                    if (hfState.AvgEntryPrice > 0 && hfState.LastPrice.HasValue && hfState.TotalFilledUsdt.HasValue)
+                    {
+                        var pct = hfState.Direction == "Long"
+                            ? (hfState.LastPrice.Value - hfState.AvgEntryPrice.Value) / hfState.AvgEntryPrice.Value
+                            : (hfState.AvgEntryPrice.Value - hfState.LastPrice.Value) / hfState.AvgEntryPrice.Value;
+                        unrealizedPnl += hfState.TotalFilledUsdt.Value * pct;
+                    }
+                }
             }
-            if (state.OpenShort != null && state.LastPrice.HasValue && state.OpenShort.EntryPrice > 0)
+            else
             {
-                var pct = (state.OpenShort.EntryPrice - state.LastPrice.Value) / state.OpenShort.EntryPrice * 100m;
-                unrealizedPnl += state.OpenShort.OrderSize * pct / 100m;
+                var state = TryParseState(s.StateJson);
+                if (state == null) continue;
+
+                var hasPos = state.OpenLong != null || state.OpenShort != null;
+                if (hasPos) botsInPosition++;
+
+                if (state.OpenLong != null && state.LastPrice.HasValue && state.OpenLong.EntryPrice > 0)
+                {
+                    var pct = (state.LastPrice.Value - state.OpenLong.EntryPrice) / state.OpenLong.EntryPrice * 100m;
+                    unrealizedPnl += state.OpenLong.OrderSize * pct / 100m;
+                }
+                if (state.OpenShort != null && state.LastPrice.HasValue && state.OpenShort.EntryPrice > 0)
+                {
+                    var pct = (state.OpenShort.EntryPrice - state.LastPrice.Value) / state.OpenShort.EntryPrice * 100m;
+                    unrealizedPnl += state.OpenShort.OrderSize * pct / 100m;
+                }
             }
         }
 
@@ -251,6 +287,20 @@ public class DashboardController : ControllerBase
     {
         if (string.IsNullOrEmpty(json) || json == "{}") return null;
         try { return JsonSerializer.Deserialize<EmaBounceConfig>(json, JsonOpts); }
+        catch { return null; }
+    }
+
+    private static HuntingFundingState? TryParseHfState(string? json)
+    {
+        if (string.IsNullOrEmpty(json) || json == "{}") return null;
+        try { return JsonSerializer.Deserialize<HuntingFundingState>(json, JsonOpts); }
+        catch { return null; }
+    }
+
+    private static HuntingFundingConfig? TryParseHfConfig(string? json)
+    {
+        if (string.IsNullOrEmpty(json) || json == "{}") return null;
+        try { return JsonSerializer.Deserialize<HuntingFundingConfig>(json, JsonOpts); }
         catch { return null; }
     }
 }

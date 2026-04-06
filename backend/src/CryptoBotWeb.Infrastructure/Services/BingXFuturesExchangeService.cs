@@ -129,9 +129,12 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
     public async Task<OrderResultDto> CloseLongAsync(string symbol, decimal quantity)
     {
         var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+        var (qtyStep, _) = await GetSymbolInfoAsync(bingxSymbol);
+        var qty = FloorToStep(quantity, qtyStep);
+
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Sell, FuturesOrderType.Market,
-            PositionSide.Long, quantity);
+            PositionSide.Long, qty);
 
         return new OrderResultDto
         {
@@ -144,9 +147,12 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
     public async Task<OrderResultDto> CloseShortAsync(string symbol, decimal quantity)
     {
         var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+        var (qtyStep, _) = await GetSymbolInfoAsync(bingxSymbol);
+        var qty = FloorToStep(quantity, qtyStep);
+
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Buy, FuturesOrderType.Market,
-            PositionSide.Short, quantity);
+            PositionSide.Short, qty);
 
         return new OrderResultDto
         {
@@ -154,6 +160,139 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
             OrderId = result.Data?.OrderId.ToString(),
             ErrorMessage = result.Error?.Message
         };
+    }
+
+    public async Task<FundingRateDto?> GetFundingRateAsync(string symbol)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.ExchangeData.GetFundingRateAsync(bingxSymbol);
+
+            if (!result.Success || result.Data == null)
+                return null;
+
+            return new FundingRateDto
+            {
+                Rate = result.Data.LastFundingRate,
+                NextFundingTime = result.Data.NextFundingTime
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    public async Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            // BingX HEDGE mode: Buy → Long position side, Sell → Short position side
+            var orderSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? OrderSide.Buy : OrderSide.Sell;
+            var positionSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? PositionSide.Long : PositionSide.Short;
+
+            var (qtyStep, minQty, priceStep) = await GetSymbolInfoWithPriceAsync(bingxSymbol);
+            var roundedQty = FloorToStep(quantity, qtyStep);
+            var roundedPrice = FloorToStep(price, priceStep);
+
+            if (roundedQty < minQty)
+                return new OrderResultDto { Success = false, ErrorMessage = $"Qty {roundedQty} < min {minQty} for {symbol}" };
+
+            var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
+                bingxSymbol, orderSide, FuturesOrderType.Limit,
+                positionSide, roundedQty, price: roundedPrice);
+
+            return new OrderResultDto
+            {
+                Success = result.Success,
+                OrderId = result.Data?.OrderId.ToString(),
+                FilledPrice = roundedPrice,
+                FilledQuantity = roundedQty,
+                ErrorMessage = result.Error?.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
+        }
+    }
+
+    public async Task<bool> CancelAllOrdersAsync(string symbol)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.Trading.CancelAllOrderAsync(bingxSymbol);
+            return result.Success;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public async Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.Trading.GetOpenOrdersAsync(bingxSymbol);
+
+            if (!result.Success || result.Data == null)
+                return new List<LimitOrderDto>();
+
+            return result.Data
+                .Select(o => new LimitOrderDto
+                {
+                    OrderId = o.OrderId.ToString(),
+                    Symbol = o.Symbol?.Replace("-", "") ?? symbol,
+                    Side = o.Side.ToString(),
+                    Price = o.Price ?? 0m,
+                    Quantity = o.Quantity ?? 0m,
+                    FilledQuantity = o.QuantityFilled ?? 0m,
+                    Status = o.Status.ToString()
+                })
+                .ToList();
+        }
+        catch (Exception)
+        {
+            return new List<LimitOrderDto>();
+        }
+    }
+
+    public async Task<PositionDto?> GetPositionAsync(string symbol, string side)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.Trading.GetPositionsAsync(bingxSymbol);
+
+            if (!result.Success || result.Data == null)
+                return null;
+
+            var pos = result.Data.FirstOrDefault(p =>
+                p.Symbol == bingxSymbol &&
+                p.Side.ToString().Equals(side, StringComparison.OrdinalIgnoreCase) &&
+                p.Size != 0);
+
+            if (pos == null)
+                return null;
+
+            return new PositionDto
+            {
+                Symbol = symbol,
+                Side = side,
+                Quantity = Math.Abs(pos.Size),
+                EntryPrice = pos.AveragePrice,
+                UnrealizedPnl = pos.UnrealizedProfit
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private static KlineInterval MapInterval(string timeframe) => timeframe.ToLowerInvariant() switch
@@ -201,6 +340,22 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
             }
         }
         return (0.001m, 0m);
+    }
+
+    private async Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolInfoWithPriceAsync(string bingxSymbol)
+    {
+        var result = await _client.PerpetualFuturesApi.ExchangeData.GetContractsAsync();
+        if (result.Success && result.Data != null)
+        {
+            var contract = result.Data.FirstOrDefault(c => c.Symbol == bingxSymbol);
+            if (contract != null)
+            {
+                var qtyStep = (decimal)Math.Pow(10, -contract.QuantityPrecision);
+                var priceStep = (decimal)Math.Pow(10, -contract.PricePrecision);
+                return (qtyStep, contract.MinOrderQuantity, priceStep);
+            }
+        }
+        return (0.001m, 0m, 0.01m);
     }
 
     private static decimal FloorToStep(decimal value, decimal step)
