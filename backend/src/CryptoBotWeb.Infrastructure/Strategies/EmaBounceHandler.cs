@@ -84,7 +84,10 @@ public class EmaBounceHandler : IStrategyHandler
 
         if (state.LastProcessedCandleTime.HasValue && lastClosed.CloseTime <= state.LastProcessedCandleTime.Value)
         {
-            // No new candle — check for external close before saving
+            // No new closed candle — but do intrabar entry check on the currently forming candle
+            await CheckIntrabarEntry(strategy, config, state, exchange, candles, ct);
+
+            // Check for external close before saving
             if (await SyncIfClosedExternally(strategy, state, ct))
                 return;
             SaveState(strategy, config, state);
@@ -658,6 +661,120 @@ public class EmaBounceHandler : IStrategyHandler
             $"Инициализация счётчиков из истории: Long={longCounter}/{config.CandleCount}, Short={shortCounter}/{config.CandleCount}");
         _logger.LogInformation("Strategy {Id}: Initialized counters from history — Long={LC}, Short={SC}",
             strategy.Id, longCounter, shortCounter);
+    }
+
+    // Minimum seconds between intrabar entry attempts, to prevent cascade retries on failed orders.
+    private const int IntrabarCooldownSeconds = 30;
+
+    /// <summary>
+    /// Checks the currently forming (unclosed) candle for an entry trigger when the counter is already armed.
+    /// Counter logic itself stays bar-close based — this only fires entries intrabar so we don't wait
+    /// up to a full timeframe after the price touches the offset line.
+    /// </summary>
+    private async Task CheckIntrabarEntry(Strategy strategy, EmaBounceConfig config, EmaBounceState state,
+        IFuturesExchangeService exchange, List<CandleDto> candles, CancellationToken ct)
+    {
+        // Nothing to do if no side is armed
+        var longArmed = !config.OnlyShort && state.LongCounter >= config.CandleCount
+                        && !state.WaitNextCandleAfterLongClose;
+        var shortArmed = !config.OnlyLong && state.ShortCounter >= config.CandleCount
+                         && !state.WaitNextCandleAfterShortClose;
+        if (!longArmed && !shortArmed) return;
+
+        // Skip if any position already open (in-memory state)
+        if (state.OpenLong != null || state.OpenShort != null) return;
+
+        // Cooldown between attempts
+        if (state.LastIntrabarAttemptAt.HasValue)
+        {
+            var elapsed = (DateTime.UtcNow - state.LastIntrabarAttemptAt.Value).TotalSeconds;
+            if (elapsed < IntrabarCooldownSeconds) return;
+        }
+
+        // Find the currently forming (unclosed) candle — should be the last item in the list
+        var now = DateTime.UtcNow;
+        CandleDto? forming = null;
+        if (candles.Count > 0 && candles[^1].CloseTime > now)
+            forming = candles[^1];
+        if (forming == null) return; // no intrabar data available
+
+        // Compute EMA from closed candles only (identical to main flow semantics)
+        var closedCloses = new List<decimal>(candles.Count);
+        foreach (var c in candles)
+        {
+            if (c.CloseTime <= now) closedCloses.Add(c.Close);
+        }
+        if (closedCloses.Count < config.IndicatorLength) return;
+
+        var closeArr = closedCloses.ToArray();
+        var maValues = config.IndicatorType.Equals("SMA", StringComparison.OrdinalIgnoreCase)
+            ? IndicatorCalculator.CalculateSma(closeArr, config.IndicatorLength)
+            : IndicatorCalculator.CalculateEma(closeArr, config.IndicatorLength);
+        var ema = maValues[^1];
+        if (ema == 0) return;
+
+        var offsetLong = ema + ema * config.OffsetPercent / 100m;
+        var offsetShort = ema - ema * config.OffsetPercent / 100m;
+
+        // Update LastPrice for UI progress (cheap — we already have it)
+        state.LastPrice = forming.Close;
+
+        var longTouched = longArmed && forming.Low <= offsetLong;
+        var shortTouched = shortArmed && forming.High >= offsetShort;
+        if (!longTouched && !shortTouched) return;
+
+        // Before firing the order, make sure there is no open position on the exchange for this symbol.
+        // Guards against the edge case where a previous failed order actually went through.
+        if (await HasExchangePositionAsync(exchange, config.Symbol, ct))
+        {
+            Log(strategy, "Warning",
+                $"Интрабар вход отменён: на бирже уже есть открытая позиция по {config.Symbol}. Пропускаем до синхронизации.");
+            state.LastIntrabarAttemptAt = DateTime.UtcNow; // enforce cooldown before re-checking
+            return;
+        }
+
+        state.LastIntrabarAttemptAt = DateTime.UtcNow;
+
+        if (longTouched)
+        {
+            Log(strategy, "Info",
+                $"Long ИНТРАБАР ВХОД: Low={forming.Low} <= Offset={Math.Round(offsetLong, 6)} при счётчике {state.LongCounter}/{config.CandleCount} (свеча не закрыта)");
+            await OpenLong(strategy, config, state, exchange, ema, forming, ct);
+            return;
+        }
+
+        if (shortTouched)
+        {
+            Log(strategy, "Info",
+                $"Short ИНТРАБАР ВХОД: High={forming.High} >= Offset={Math.Round(offsetShort, 6)} при счётчике {state.ShortCounter}/{config.CandleCount} (свеча не закрыта)");
+            await OpenShort(strategy, config, state, exchange, ema, forming, ct);
+        }
+    }
+
+    /// <summary>
+    /// Returns true if the exchange reports any open futures position for the symbol (either side).
+    /// Falls back to false (proceed) if the exchange doesn't implement GetPositionAsync.
+    /// </summary>
+    private async Task<bool> HasExchangePositionAsync(IFuturesExchangeService exchange, string symbol, CancellationToken ct)
+    {
+        try
+        {
+            var longPos = await exchange.GetPositionAsync(symbol, "Long");
+            if (longPos != null && longPos.Quantity > 0) return true;
+            var shortPos = await exchange.GetPositionAsync(symbol, "Short");
+            if (shortPos != null && shortPos.Quantity > 0) return true;
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            // Exchange doesn't implement position query — proceed without verification
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GetPositionAsync failed for {Symbol} — assuming no position", symbol);
+            return false;
+        }
     }
 
     private static CandleDto? GetLastClosedCandle(List<CandleDto> candles, string timeframe)
