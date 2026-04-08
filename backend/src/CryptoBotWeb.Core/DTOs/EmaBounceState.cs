@@ -19,6 +19,10 @@ public class EmaBounceState
 
     // Computed next order size (for frontend display)
     public decimal NextOrderSize { get; set; }
+
+    // Intrabar entry cooldown — timestamp of last intrabar entry attempt (success or fail).
+    // Used to throttle retries so failed orders don't cascade every 5s poll.
+    public DateTime? LastIntrabarAttemptAt { get; set; }
 }
 
 public class OpenPositionInfo
