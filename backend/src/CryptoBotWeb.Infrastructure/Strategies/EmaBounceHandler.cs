@@ -85,10 +85,17 @@ public class EmaBounceHandler : IStrategyHandler
         if (state.LastProcessedCandleTime.HasValue && lastClosed.CloseTime <= state.LastProcessedCandleTime.Value)
         {
             // No new closed candle — but do intrabar entry check on the currently forming candle
+            var hadLongBeforeIntrabar = state.OpenLong != null;
+            var hadShortBeforeIntrabar = state.OpenShort != null;
+
             await CheckIntrabarEntry(strategy, config, state, exchange, candles, ct);
 
-            // Check for external close before saving
-            if (await SyncIfClosedExternally(strategy, state, ct))
+            // Skip external-close sync if intrabar just opened a position — DB doesn't have it yet,
+            // so sync would falsely detect "closed externally" and wipe our freshly-opened state,
+            // causing a cascade of repeated entries on every 5s poll.
+            var intrabarJustOpened = (!hadLongBeforeIntrabar && state.OpenLong != null)
+                                  || (!hadShortBeforeIntrabar && state.OpenShort != null);
+            if (!intrabarJustOpened && await SyncIfClosedExternally(strategy, state, ct))
                 return;
             SaveState(strategy, config, state);
             await _db.SaveChangesAsync(ct);
