@@ -89,8 +89,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
             BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
-            OrderSide.Buy, OrderType.Market, MarginMode.CrossMargin, quantity,
-            tradeSide: TradeSide.Open);
+            OrderSide.Buy, OrderType.Market, MarginMode.CrossMargin, quantity);
 
         return new OrderResultDto
         {
@@ -117,8 +116,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
         var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
             BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
-            OrderSide.Sell, OrderType.Market, MarginMode.CrossMargin, quantity,
-            tradeSide: TradeSide.Open);
+            OrderSide.Sell, OrderType.Market, MarginMode.CrossMargin, quantity);
 
         return new OrderResultDto
         {
@@ -133,46 +131,40 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
     public async Task<OrderResultDto> CloseLongAsync(string symbol, decimal quantity)
     {
         var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
-        var result = await _client.FuturesApiV2.Trading.ClosePositionsAsync(
-            BitgetProductTypeV2.UsdtFutures,
-            symbol: bitgetSymbol,
-            side: PositionSide.Long);
+        var (qtyStep, _) = await GetSymbolInfoAsync(bitgetSymbol);
+        var roundedQty = FloorToStep(quantity, qtyStep);
 
-        if (!result.Success)
-            return new OrderResultDto { Success = false, ErrorMessage = result.Error?.Message };
+        var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
+            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
+            OrderSide.Sell, OrderType.Market, MarginMode.CrossMargin, roundedQty,
+            reduceOnly: true);
 
-        var fail = result.Data?.Failed?.FirstOrDefault();
-        if (fail != null)
-            return new OrderResultDto { Success = false, ErrorMessage = fail.ErrorMessage };
-
-        var success = result.Data?.Success?.FirstOrDefault();
         return new OrderResultDto
         {
-            Success = true,
-            OrderId = success?.OrderId,
+            Success = result.Success,
+            OrderId = result.Data?.OrderId,
+            FilledQuantity = roundedQty,
+            ErrorMessage = result.Error?.Message
         };
     }
 
     public async Task<OrderResultDto> CloseShortAsync(string symbol, decimal quantity)
     {
         var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
-        var result = await _client.FuturesApiV2.Trading.ClosePositionsAsync(
-            BitgetProductTypeV2.UsdtFutures,
-            symbol: bitgetSymbol,
-            side: PositionSide.Short);
+        var (qtyStep, _) = await GetSymbolInfoAsync(bitgetSymbol);
+        var roundedQty = FloorToStep(quantity, qtyStep);
 
-        if (!result.Success)
-            return new OrderResultDto { Success = false, ErrorMessage = result.Error?.Message };
+        var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
+            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
+            OrderSide.Buy, OrderType.Market, MarginMode.CrossMargin, roundedQty,
+            reduceOnly: true);
 
-        var fail = result.Data?.Failed?.FirstOrDefault();
-        if (fail != null)
-            return new OrderResultDto { Success = false, ErrorMessage = fail.ErrorMessage };
-
-        var success = result.Data?.Success?.FirstOrDefault();
         return new OrderResultDto
         {
-            Success = true,
-            OrderId = success?.OrderId,
+            Success = result.Success,
+            OrderId = result.Data?.OrderId,
+            FilledQuantity = roundedQty,
+            ErrorMessage = result.Error?.Message
         };
     }
 
@@ -206,16 +198,35 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         }
     }
 
-    public async Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity)
+    public async Task<List<FundingRateDto>> GetAllFundingRatesAsync()
+    {
+        var result = await _client.FuturesApiV2.ExchangeData.GetFundingRatesAsync(BitgetProductTypeV2.UsdtFutures);
+        if (!result.Success || result.Data == null)
+            throw new Exception($"Bitget GetAllFundingRates failed: {result.Error?.Message}");
+
+        var list = new List<FundingRateDto>();
+        foreach (var f in result.Data)
+        {
+            if (string.IsNullOrEmpty(f.Symbol))
+                continue;
+
+            list.Add(new FundingRateDto
+            {
+                Symbol = f.Symbol,
+                Rate = f.FundingRate,
+                NextFundingTime = DateTime.UtcNow // Bitget bulk endpoint doesn't return NextFundingTime
+            });
+        }
+        return list;
+    }
+
+    public async Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity, bool reduceOnly = false)
     {
         try
         {
             var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
             var isBuy = side.Equals("Buy", StringComparison.OrdinalIgnoreCase);
-
-            // Bitget hedge mode: Buy → Long/Open, Sell → Short/Open
             var orderSide = isBuy ? OrderSide.Buy : OrderSide.Sell;
-            var tradeSide = TradeSide.Open;
 
             var (qtyStep, minQty, priceStep) = await GetSymbolInfoWithPriceAsync(bitgetSymbol);
             var roundedQty = FloorToStep(quantity, qtyStep);
@@ -227,7 +238,8 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
             var result = await _client.FuturesApiV2.Trading.PlaceOrderAsync(
                 BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
                 orderSide, OrderType.Limit, MarginMode.CrossMargin, roundedQty,
-                price: roundedPrice, tradeSide: tradeSide);
+                price: roundedPrice,
+                reduceOnly: reduceOnly ? true : null);
 
             return new OrderResultDto
             {
@@ -243,6 +255,61 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
             return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
         }
     }
+
+    public async Task<bool> CancelOrderAsync(string symbol, string orderId)
+    {
+        try
+        {
+            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+            var result = await _client.FuturesApiV2.Trading.CancelOrderAsync(
+                BitgetProductTypeV2.UsdtFutures, bitgetSymbol,
+                orderId, clientOrderId: null, marginAsset: "USDT");
+            return result.Success;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public async Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId)
+    {
+        try
+        {
+            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+            var result = await _client.FuturesApiV2.Trading.GetOrderAsync(
+                BitgetProductTypeV2.UsdtFutures, bitgetSymbol,
+                orderId, clientOrderId: null);
+
+            if (!result.Success || result.Data == null)
+                return null;
+
+            var o = result.Data;
+            return new OrderStatusDto
+            {
+                OrderId = o.OrderId ?? orderId,
+                Status = MapOrderStatus(o.Status),
+                FilledQuantity = o.QuantityFilled,
+                AverageFilledPrice = o.AveragePrice ?? 0m
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static OrderLifecycleStatus MapOrderStatus(Bitget.Net.Enums.V2.OrderStatus s) => s switch
+    {
+        Bitget.Net.Enums.V2.OrderStatus.Filled => OrderLifecycleStatus.Filled,
+        Bitget.Net.Enums.V2.OrderStatus.PartiallyFilled => OrderLifecycleStatus.PartiallyFilled,
+        Bitget.Net.Enums.V2.OrderStatus.Canceled => OrderLifecycleStatus.Cancelled,
+        Bitget.Net.Enums.V2.OrderStatus.Rejected => OrderLifecycleStatus.Rejected,
+        Bitget.Net.Enums.V2.OrderStatus.New => OrderLifecycleStatus.Open,
+        Bitget.Net.Enums.V2.OrderStatus.Live => OrderLifecycleStatus.Open,
+        Bitget.Net.Enums.V2.OrderStatus.Initial => OrderLifecycleStatus.Open,
+        _ => OrderLifecycleStatus.Unknown
+    };
 
     public async Task<bool> CancelAllOrdersAsync(string symbol)
     {

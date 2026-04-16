@@ -194,6 +194,32 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    public async Task<List<FundingRateDto>> GetAllFundingRatesAsync()
+    {
+        var result = await _client.V5Api.ExchangeData.GetLinearInverseTickersAsync(Category.Linear);
+        if (!result.Success || result.Data?.List == null)
+            throw new Exception($"Bybit GetAllFundingRates failed: {result.Error?.Message}");
+
+        var list = new List<FundingRateDto>();
+        foreach (var ticker in result.Data.List)
+        {
+            if (string.IsNullOrEmpty(ticker.Symbol))
+                continue;
+            if (!ticker.Symbol.EndsWith("USDT", StringComparison.Ordinal))
+                continue;
+            if (ticker.FundingRate == null)
+                continue;
+
+            list.Add(new FundingRateDto
+            {
+                Symbol = ticker.Symbol,
+                Rate = ticker.FundingRate.Value,
+                NextFundingTime = ticker.NextFundingTime ?? DateTime.UtcNow
+            });
+        }
+        return list;
+    }
+
     public async Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity)
     {
         try

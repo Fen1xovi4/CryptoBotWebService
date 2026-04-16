@@ -13,6 +13,16 @@ public class HuntingFundingConfig
     public decimal MinFundingLong { get; set; } = 1.0m; // abs %, trade Long only if rate ≤ -this
     public bool EnableShort { get; set; } = true;
     public decimal MinFundingShort { get; set; } = 1.0m; // abs %, trade Short only if rate ≥ +this
+    public bool AutoRotateTicker { get; set; } = true;
+}
+
+// Stored inside Workspace.ConfigJson (shared across all HuntingFunding bots in the workspace).
+// Inclusive bounds of |funding*100| used by the ticker rotator and by the
+// WaitingForFunding phase to skip cycles where funding drifts outside the range.
+public class WorkspaceHuntingFundingConfig
+{
+    public decimal FundingRateMin { get; set; } = 1.0m;
+    public decimal FundingRateMax { get; set; } = 2.0m;
 }
 
 public class OrderLevel

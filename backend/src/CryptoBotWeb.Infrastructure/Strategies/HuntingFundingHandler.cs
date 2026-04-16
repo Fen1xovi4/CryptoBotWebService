@@ -83,11 +83,17 @@ public class HuntingFundingHandler : IStrategyHandler
 
         // Determine direction based on funding rate and enabled directions
         var ratePercent = Math.Abs(funding.Rate * 100m); // e.g. -0.012 → 1.2%
+        var (rangeMin, rangeMax) = await GetWorkspaceFundingRangeAsync(strategy, ct);
+        var inRange = ratePercent >= rangeMin && ratePercent <= rangeMax;
+
         string? direction = null;
-        if (funding.Rate < 0 && config.EnableLong && ratePercent >= config.MinFundingLong)
-            direction = "Long";
-        else if (funding.Rate > 0 && config.EnableShort && ratePercent >= config.MinFundingShort)
-            direction = "Short";
+        if (inRange)
+        {
+            if (funding.Rate < 0 && config.EnableLong && ratePercent >= config.MinFundingLong)
+                direction = "Long";
+            else if (funding.Rate > 0 && config.EnableShort && ratePercent >= config.MinFundingShort)
+                direction = "Short";
+        }
 
         state.Direction = direction;
 
@@ -97,8 +103,16 @@ public class HuntingFundingHandler : IStrategyHandler
 
         if (direction == null)
         {
-            _logger.LogDebug("Strategy {Id}: Funding rate {Rate:P4} below threshold or direction disabled, skipping",
-                strategy.Id, funding.Rate);
+            if (!inRange)
+            {
+                _logger.LogDebug("Strategy {Id}: Funding {Rate:P4} outside range [{Min}%, {Max}%], skipping",
+                    strategy.Id, funding.Rate, rangeMin, rangeMax);
+            }
+            else
+            {
+                _logger.LogDebug("Strategy {Id}: Funding rate {Rate:P4} below threshold or direction disabled, skipping",
+                    strategy.Id, funding.Rate);
+            }
             return;
         }
 
@@ -122,6 +136,7 @@ public class HuntingFundingHandler : IStrategyHandler
             $"Funding rate={funding.Rate}, direction={state.Direction}, placing {config.Levels.Count} limit orders at price={price}");
 
         int placedCount = 0;
+        bool settlementInProgress = false;
         for (int i = 0; i < config.Levels.Count; i++)
         {
             var level = config.Levels[i];
@@ -170,6 +185,18 @@ public class HuntingFundingHandler : IStrategyHandler
             else
             {
                 Log(strategy, "Error", $"Level {i}: Failed to place {side} order at {Math.Round(limitPrice, 6)}: {result.ErrorMessage}");
+
+                // BingX blocks trading ~60s before funding (settlement window).
+                // No point retrying remaining levels — they will all fail too.
+                if (result.ErrorMessage != null &&
+                    result.ErrorMessage.Contains("settlement", StringComparison.OrdinalIgnoreCase))
+                {
+                    settlementInProgress = true;
+                    Log(strategy, "Warning",
+                        $"Funding settlement in progress — skipping remaining {config.Levels.Count - i - 1} levels. " +
+                        $"Consider increasing SecondsBeforeFunding (current={config.SecondsBeforeFunding}) to ≥65 for BingX");
+                    break;
+                }
             }
         }
 
@@ -180,6 +207,12 @@ public class HuntingFundingHandler : IStrategyHandler
             Log(strategy, "Info", $"Phase → OrdersPlaced: {placedCount}/{config.Levels.Count} orders placed");
             _logger.LogInformation("Strategy {Id}: Placed {Count} limit orders for {Symbol}, direction={Dir}",
                 strategy.Id, placedCount, config.Symbol, state.Direction);
+        }
+        else if (settlementInProgress)
+        {
+            // Missed this funding window — skip to cooldown to wait for the next one
+            Log(strategy, "Warning", "Missed funding window (settlement) — skipping to Cooldown");
+            state.Phase = HuntingFundingPhase.Cooldown;
         }
         else
         {
@@ -477,6 +510,32 @@ public class HuntingFundingHandler : IStrategyHandler
     }
 
     // ───────────────────── Helpers ─────────────────────
+
+    private async Task<(decimal min, decimal max)> GetWorkspaceFundingRangeAsync(Strategy strategy, CancellationToken ct)
+    {
+        if (!strategy.WorkspaceId.HasValue)
+            return (1.0m, 2.0m);
+
+        var workspace = await _db.Workspaces.FindAsync(new object[] { strategy.WorkspaceId.Value }, ct);
+        if (workspace == null || string.IsNullOrEmpty(workspace.ConfigJson))
+            return (1.0m, 2.0m);
+
+        try
+        {
+            var cfg = JsonSerializer.Deserialize<WorkspaceHuntingFundingConfig>(workspace.ConfigJson, JsonOptions);
+            if (cfg == null)
+                return (1.0m, 2.0m);
+
+            var min = cfg.FundingRateMin;
+            var max = cfg.FundingRateMax;
+            if (max < min) (min, max) = (max, min);
+            return (min, max);
+        }
+        catch
+        {
+            return (1.0m, 2.0m);
+        }
+    }
 
     private static void SaveState(Strategy strategy, HuntingFundingState state)
     {

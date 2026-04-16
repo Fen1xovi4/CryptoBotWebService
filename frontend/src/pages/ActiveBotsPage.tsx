@@ -57,6 +57,12 @@ interface WorkspaceConfig {
   drawdownBalance: number;
   drawdownPercent: number;
   drawdownTarget: number;
+  // HuntingFunding workspace settings
+  fundingRateMin: number;
+  fundingRateMax: number;
+  // SmaDca workspace settings
+  timerEnabled: boolean;
+  timerExpiresAt: string | null; // ISO UTC
 }
 
 interface WorkspaceStats {
@@ -80,6 +86,10 @@ const defaultConfig: WorkspaceConfig = {
   drawdownBalance: 0,
   drawdownPercent: 10,
   drawdownTarget: 5,
+  fundingRateMin: 1.0,
+  fundingRateMax: 2.0,
+  timerEnabled: false,
+  timerExpiresAt: null,
 };
 
 const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
@@ -91,6 +101,17 @@ function parseJson(json: string | null) {
   } catch {
     return null;
   }
+}
+
+function formatRemaining(iso: string | null, nowMs: number): { text: string; expired: boolean } {
+  if (!iso) return { text: 'не установлен', expired: true };
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return { text: 'не установлен', expired: true };
+  let diff = Math.floor((t - nowMs) / 1000);
+  if (diff <= 0) return { text: 'истёк — новые позиции не открываются', expired: true };
+  const h = Math.floor(diff / 3600); diff -= h * 3600;
+  const m = Math.floor(diff / 60); const s = diff - m * 60;
+  return { text: `осталось ${h}ч ${m}м ${s}с`, expired: false };
 }
 
 const invalidateAll = (qc: ReturnType<typeof useQueryClient>) => {
@@ -110,6 +131,16 @@ export default function ActiveBotsPage() {
   // Local config state for instant UI response
   const [localConfig, setLocalConfig] = useState<WorkspaceConfig>(defaultConfig);
   const configSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Timer UI (SmaDca): duration inputs + live countdown
+  const [timerHours, setTimerHours] = useState(24);
+  const [timerMinutes, setTimerMinutes] = useState(0);
+  const [timerSeconds, setTimerSeconds] = useState(0);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // ── Queries ──
   const { data: workspaces } = useQuery<Workspace[]>({
@@ -322,13 +353,105 @@ export default function ActiveBotsPage() {
           >
             <option value="MaratG">MaratG</option>
             <option value="HuntingFunding">HuntingFunding</option>
+            <option value="SmaDca">SMA DCA</option>
           </select>
         </div>
 
-        {activeWorkspace?.strategyType === 'HuntingFunding' ? (
-          <p className="text-sm text-text-secondary italic">
-            Все настройки задаются индивидуально в каждом боте через уровни ордеров.
-          </p>
+        {activeWorkspace?.strategyType === 'SmaDca' ? (
+          <>
+            <div className="h-6 w-px bg-border" />
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={localConfig.timerEnabled}
+                onChange={(e) => updateConfig({ timerEnabled: e.target.checked })}
+                className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+              />
+              <span className="text-sm font-medium text-text-secondary">Таймер</span>
+            </label>
+            {localConfig.timerEnabled && (() => {
+              const { text, expired } = formatRemaining(localConfig.timerExpiresAt, nowMs);
+              return (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="0"
+                    value={timerHours}
+                    onChange={(e) => setTimerHours(Math.max(0, Number(e.target.value)))}
+                    className="w-16 bg-bg-tertiary border border-border rounded-lg px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+                  />
+                  <span className="text-xs text-text-secondary">ч</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="59"
+                    value={timerMinutes}
+                    onChange={(e) => setTimerMinutes(Math.max(0, Math.min(59, Number(e.target.value))))}
+                    className="w-16 bg-bg-tertiary border border-border rounded-lg px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+                  />
+                  <span className="text-xs text-text-secondary">м</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="59"
+                    value={timerSeconds}
+                    onChange={(e) => setTimerSeconds(Math.max(0, Math.min(59, Number(e.target.value))))}
+                    className="w-16 bg-bg-tertiary border border-border rounded-lg px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+                  />
+                  <span className="text-xs text-text-secondary">с</span>
+                  <button
+                    onClick={() => {
+                      const totalSec = timerHours * 3600 + timerMinutes * 60 + timerSeconds;
+                      if (totalSec <= 0) return;
+                      const iso = new Date(Date.now() + totalSec * 1000).toISOString();
+                      updateConfig({ timerExpiresAt: iso });
+                    }}
+                    className="px-3 py-1.5 text-xs font-medium bg-accent-blue hover:bg-accent-blue/90 text-white rounded-lg transition-colors"
+                  >
+                    Установить
+                  </button>
+                  <span className={`text-xs italic ${expired ? 'text-accent-red' : 'text-text-secondary'}`}>
+                    {text}
+                  </span>
+                </div>
+              );
+            })()}
+            <div className="h-6 w-px bg-border" />
+            <p className="text-sm text-text-secondary italic">
+              Параметры SMA, DCA-шаг, множитель и размер входа задаются индивидуально в каждом боте.
+            </p>
+          </>
+        ) : activeWorkspace?.strategyType === 'HuntingFunding' ? (
+          <>
+            <div className="h-6 w-px bg-border" />
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text-secondary">Диапазон фандинга %:</span>
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                value={localConfig.fundingRateMin}
+                onChange={(e) => updateConfig({ fundingRateMin: Number(e.target.value) })}
+                className="w-20 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+              />
+              <span className="text-sm text-text-secondary">—</span>
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                value={localConfig.fundingRateMax}
+                onChange={(e) => updateConfig({ fundingRateMax: Number(e.target.value) })}
+                className="w-20 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+              />
+              <span className="text-xs text-text-secondary italic">
+                включительно. Тикеры с |funding| вне диапазона игнорируются.
+              </span>
+            </div>
+            <div className="h-6 w-px bg-border" />
+            <p className="text-sm text-text-secondary italic">
+              Остальные настройки задаются индивидуально в каждом боте через уровни ордеров.
+            </p>
+          </>
         ) : (
           <>
         <div className="h-6 w-px bg-border" />
@@ -539,6 +662,27 @@ export default function ActiveBotsPage() {
             const cfg = parseJson(s.configJson);
             const state = parseJson(s.stateJson);
             const isRunning = s.status === 'Running';
+
+            if (s.type === 'SmaDca') {
+              return (
+                <SmaDcaCard
+                  key={s.id}
+                  s={s}
+                  cfg={cfg}
+                  state={state}
+                  isRunning={isRunning}
+                  onStart={() => startMutation.mutate(s.id)}
+                  onStop={() => stopMutation.mutate(s.id)}
+                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
+                  onEdit={() => setEditingStrategy(s)}
+                  onLogs={() => setLogStrategy(s)}
+                  onClosePosition={() => closePositionMutation.mutate(s.id)}
+                  closePositionPending={closePositionMutation.isPending}
+                  telegramBots={telegramBots}
+                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                />
+              );
+            }
 
             if (s.type === 'HuntingFunding') {
               return (
@@ -1022,6 +1166,7 @@ interface HFConfig {
   minFundingLong: number;
   enableShort: boolean;
   minFundingShort: number;
+  autoRotateTicker?: boolean;
 }
 
 interface HFStateData {
@@ -1133,6 +1278,11 @@ function HuntingFundingCard({
             <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400">
               HF
             </span>
+            {(cfg?.autoRotateTicker !== false) && (
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">
+                AUTO
+              </span>
+            )}
           </div>
           <div className="text-[11px] text-text-secondary mt-0.5 truncate">
             {s.name} · {s.accountName}
@@ -1374,6 +1524,325 @@ function HuntingFundingCard({
   );
 }
 
+/* ── SMA DCA Card ──────────────────────────────────────── */
+
+interface SmaDcaCfg {
+  symbol: string;
+  timeframe: string;
+  direction: string;
+  smaPeriod: number;
+  takeProfitPercent: number;
+  dcaStepPercent: number;
+  dcaMultiplier: number;
+  maxDcaLevels: number;
+  positionSizeUsd: number;
+}
+
+interface SmaDcaStateData {
+  inPosition: boolean;
+  isLong: boolean;
+  totalQuantity: number;
+  totalCost: number;
+  averageEntryPrice: number;
+  currentTakeProfit: number;
+  dcaLevel: number;
+  lastDcaPrice: number;
+  skipNextCandle: boolean;
+  lastPrice: number | null;
+  positionOpenedAt: string | null;
+  realizedPnlDollar: number;
+  dcaCooldownUntil: string | null;
+}
+
+function SmaDcaCard({
+  s,
+  cfg,
+  state,
+  isRunning,
+  onStart,
+  onStop,
+  onDelete,
+  onEdit,
+  onLogs,
+  onClosePosition,
+  closePositionPending,
+  telegramBots,
+  onSetTelegramBot,
+}: {
+  s: Strategy;
+  cfg: SmaDcaCfg | null;
+  state: SmaDcaStateData | null;
+  isRunning: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onLogs: () => void;
+  onClosePosition: () => void;
+  closePositionPending: boolean;
+  telegramBots: TelegramBotOption[] | undefined;
+  onSetTelegramBot: (botId: string | null) => void;
+}) {
+  const inPos = state?.inPosition === true;
+  const isLong = state?.isLong === true;
+  const borderAccent = isRunning
+    ? inPos ? 'border-l-accent-yellow' : 'border-l-accent-green'
+    : 'border-l-border';
+
+  // PnL vs avg entry, using lastPrice
+  let pnlPct = 0;
+  let pnlUsd = 0;
+  let progress = 0;
+  if (inPos && state?.averageEntryPrice && state?.lastPrice) {
+    pnlPct = isLong
+      ? (state.lastPrice - state.averageEntryPrice) / state.averageEntryPrice * 100
+      : (state.averageEntryPrice - state.lastPrice) / state.averageEntryPrice * 100;
+    pnlUsd = (state.totalCost ?? 0) * pnlPct / 100;
+    const tp = cfg?.takeProfitPercent ?? 1;
+    progress = pnlPct >= 0
+      ? Math.min((pnlPct / tp) * 100, 100)
+      : Math.max((pnlPct / tp) * 100, -100);
+  }
+
+  const barColor = progress >= 0 ? 'bg-accent-green' : 'bg-accent-red';
+  const barWidth = Math.min(Math.abs(progress), 100);
+
+  return (
+    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
+      {/* Header */}
+      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-mono font-semibold text-text-primary truncate">
+              {cfg?.symbol || '—'}
+            </span>
+            {cfg?.timeframe && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+                {cfg.timeframe}
+              </span>
+            )}
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400">
+              DCA
+            </span>
+            {cfg?.direction && (
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${cfg.direction === 'Long' ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'}`}>
+                {cfg.direction.toUpperCase()}
+              </span>
+            )}
+          </div>
+          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
+            {s.name} · {s.accountName}
+          </div>
+        </div>
+        <StatusBadge status={s.status} />
+      </div>
+
+      {/* Config chips */}
+      {cfg && (
+        <div className="px-4 pb-2 flex flex-wrap gap-1">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            SMA{cfg.smaPeriod}
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-green/10 text-accent-green">
+            TP {cfg.takeProfitPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            Step {cfg.dcaStepPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            ×{cfg.dcaMultiplier}
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            Max {cfg.maxDcaLevels}
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            ${cfg.positionSizeUsd}
+          </span>
+        </div>
+      )}
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Signal / Position */}
+      <div className="px-4 py-2.5 min-h-[52px] flex items-center">
+        {!isRunning ? (
+          <span className="text-text-secondary text-xs">—</span>
+        ) : inPos ? (
+          <div className="w-full space-y-1.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'}`}>
+                  {isLong ? 'LONG' : 'SHORT'}
+                </span>
+                <span className="text-xs font-semibold text-text-primary">
+                  ${state?.totalCost?.toFixed(2) ?? '—'}
+                </span>
+                <span className="text-[10px] text-text-secondary">
+                  avg {state?.averageEntryPrice?.toFixed(6) ?? '—'}
+                </span>
+              </div>
+              <span className={`text-[10px] font-medium ${(state?.dcaLevel ?? 0) > 0 ? 'text-accent-yellow' : 'text-text-secondary'}`}>
+                DCA {state?.dcaLevel ?? 0}/{cfg?.maxDcaLevels ?? 0}
+              </span>
+            </div>
+            {state?.lastPrice ? (
+              <div>
+                <div className="relative w-full h-1.5 bg-bg-tertiary rounded-full overflow-hidden">
+                  {progress >= 0 ? (
+                    <div
+                      className={`absolute left-0 top-0 h-full rounded-full ${barColor} transition-all`}
+                      style={{ width: `${barWidth}%` }}
+                    />
+                  ) : (
+                    <div
+                      className={`absolute right-0 top-0 h-full rounded-full ${barColor} transition-all`}
+                      style={{ width: `${barWidth}%` }}
+                    />
+                  )}
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className={`text-[10px] font-semibold mt-0.5 ${pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                    {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}% ({pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(2)})
+                  </div>
+                  <div className="text-[10px] text-text-secondary mt-0.5">
+                    TP {state?.currentTakeProfit?.toFixed(6) ?? '—'}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <span className="text-[10px] text-text-secondary">загрузка цены...</span>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 w-full">
+            <span className="text-xs text-text-secondary">
+              Ожидание сигнала SMA{cfg?.smaPeriod}
+            </span>
+            {state?.lastPrice != null && (
+              <span className="text-[10px] text-text-secondary ml-auto">
+                {state.lastPrice}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Bottom stats row */}
+      <div className="px-4 pb-2 flex items-center gap-3">
+        {state != null && state.realizedPnlDollar != null && (
+          <span className={`text-[10px] font-medium ${state.realizedPnlDollar >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+            PnL: {state.realizedPnlDollar >= 0 ? '+' : ''}${state.realizedPnlDollar.toFixed(2)}
+          </span>
+        )}
+        {state?.dcaCooldownUntil && new Date(state.dcaCooldownUntil).getTime() > Date.now() && (
+          <span className="text-[10px] text-accent-yellow">
+            DCA cooldown
+          </span>
+        )}
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Actions */}
+      <div className="px-3 py-2 flex items-center gap-1">
+        <button
+          onClick={onLogs}
+          title="Логи"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+        </button>
+
+        {telegramBots && telegramBots.length > 0 && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                if (s.telegramBotId) {
+                  onSetTelegramBot(null);
+                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
+                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
+                }
+              }}
+              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
+              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                s.telegramBotId
+                  ? 'bg-accent-blue/15 text-accent-blue'
+                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
+              }`}
+            >
+              TG
+            </button>
+            {s.telegramBotId && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                value={s.telegramBotId}
+                onChange={(e) => onSetTelegramBot(e.target.value || null)}
+              >
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {inPos && isRunning && (
+          <button
+            onClick={() => { if (confirm('Закрыть позицию по рынку?')) onClosePosition(); }}
+            disabled={closePositionPending}
+            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
+          >
+            {closePositionPending ? '...' : 'Закрыть'}
+          </button>
+        )}
+
+        {isRunning ? (
+          <button
+            onClick={onStop}
+            className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+          >
+            Стоп
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={onStart}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+            >
+              Старт
+            </button>
+            <button
+              onClick={onEdit}
+              title="Редактировать"
+              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        <button
+          onClick={onDelete}
+          title="Удалить"
+          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── Stat Card ─────────────────────────────────────────── */
 
 function StatCard({
@@ -1445,6 +1914,7 @@ function AddStrategyModal({
 
   // HuntingFunding fields
   const [hfLevels, setHfLevels] = useState<HFLevel[]>([{ offsetPercent: 1.5, sizeUsdt: 50 }]);
+  const [autoRotateTicker, setAutoRotateTicker] = useState(true);
   const [hfForm, setHfForm] = useState({
     takeProfitPercent: '1.0',
     stopLossPercent: '0.5',
@@ -1455,6 +1925,22 @@ function AddStrategyModal({
     minFundingLong: '1.0',
     enableShort: true,
     minFundingShort: '1.0',
+  });
+
+  // SMA DCA fields
+  const [sdForm, setSdForm] = useState({
+    timeframe: '1h',
+    direction: 'Long',
+    smaPeriod: '50',
+    takeProfitPercent: '1.0',
+    dcaStepPercent: '3.0',
+    dcaMultiplier: '3.0',
+    maxDcaLevels: '5',
+    positionSizeUsd: '100',
+    dcaTriggerBase: 'Average',
+    orderType: 'Market',
+    entryLimitOffsetPercent: '0.05',
+    entryLimitTimeoutBars: '3',
   });
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
@@ -1508,6 +1994,23 @@ function AddStrategyModal({
         minFundingLong: Number(hfForm.minFundingLong),
         enableShort: hfForm.enableShort,
         minFundingShort: Number(hfForm.minFundingShort),
+        autoRotateTicker,
+      });
+    } else if (strategyType === 'SmaDca') {
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        timeframe: sdForm.timeframe,
+        direction: sdForm.direction,
+        smaPeriod: Number(sdForm.smaPeriod),
+        takeProfitPercent: Number(sdForm.takeProfitPercent),
+        dcaStepPercent: Number(sdForm.dcaStepPercent),
+        dcaMultiplier: Number(sdForm.dcaMultiplier),
+        maxDcaLevels: Number(sdForm.maxDcaLevels),
+        positionSizeUsd: Number(sdForm.positionSizeUsd),
+        dcaTriggerBase: sdForm.dcaTriggerBase,
+        orderType: sdForm.orderType,
+        entryLimitOffsetPercent: Number(sdForm.entryLimitOffsetPercent),
+        entryLimitTimeoutBars: Number(sdForm.entryLimitTimeoutBars),
       });
     } else {
       configJson = JSON.stringify({
@@ -1577,6 +2080,14 @@ function AddStrategyModal({
                 </option>
               ))}
             </select>
+            {strategyType === 'HuntingFunding' && activeAccounts.find((a) => a.id === accountId)?.exchangeType === 3 && (
+              <div className="flex items-start gap-2 mt-2 bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2">
+                <svg className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
+                </svg>
+                <p className="text-xs text-blue-400">BingX блокирует выставление ордеров за <span className="font-semibold">60 секунд до фандинга</span> (settlement). Установите <span className="font-semibold">SecondsBeforeFunding ≥ 65</span>.</p>
+              </div>
+            )}
           </div>
 
           {/* Name */}
@@ -1611,8 +2122,194 @@ function AddStrategyModal({
             />
           </div>
 
-          {strategyType === 'HuntingFunding' ? (
+          {strategyType === 'SmaDca' ? (
             <>
+              {/* Timeframe */}
+              <div>
+                <label className={labelCls}>Таймфрейм</label>
+                <select
+                  value={sdForm.timeframe}
+                  onChange={(e) => setSdForm({ ...sdForm, timeframe: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="30m">30m</option>
+                  <option value="1h">1h</option>
+                  <option value="4h">4h</option>
+                  <option value="1d">1D</option>
+                </select>
+              </div>
+
+              {/* Direction + SMA period */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Направление</label>
+                  <select
+                    value={sdForm.direction}
+                    onChange={(e) => setSdForm({ ...sdForm, direction: e.target.value })}
+                    className={inputCls}
+                  >
+                    <option value="Long">Long</option>
+                    <option value="Short">Short</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Период SMA</label>
+                  <input
+                    type="number"
+                    min="2"
+                    value={sdForm.smaPeriod}
+                    onChange={(e) => setSdForm({ ...sdForm, smaPeriod: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* Position size + TP */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Размер входа (USD)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    value={sdForm.positionSizeUsd}
+                    onChange={(e) => setSdForm({ ...sdForm, positionSizeUsd: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Take Profit %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.01"
+                    value={sdForm.takeProfitPercent}
+                    onChange={(e) => setSdForm({ ...sdForm, takeProfitPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* DCA step + multiplier + max */}
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className={labelCls}>DCA шаг %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.01"
+                    value={sdForm.dcaStepPercent}
+                    onChange={(e) => setSdForm({ ...sdForm, dcaStepPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Множитель</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.1"
+                    value={sdForm.dcaMultiplier}
+                    onChange={(e) => setSdForm({ ...sdForm, dcaMultiplier: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Макс. DCA</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={sdForm.maxDcaLevels}
+                    onChange={(e) => setSdForm({ ...sdForm, maxDcaLevels: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* DCA trigger base */}
+              <div>
+                <label className={labelCls}>База расчёта шага DCA</label>
+                <select
+                  value={sdForm.dcaTriggerBase}
+                  onChange={(e) => setSdForm({ ...sdForm, dcaTriggerBase: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="Average">От средней цены входа (сетка сжимается)</option>
+                  <option value="LastFill">От последней докупки (сетка равномерная)</option>
+                </select>
+              </div>
+
+              {/* Order type: market vs limit (DCA only — first entry is always market) */}
+              <div>
+                <label className={labelCls}>Тип ордеров для DCA (докупок)</label>
+                <select
+                  value={sdForm.orderType}
+                  onChange={(e) => setSdForm({ ...sdForm, orderType: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="Market">Market — рыночные (taker, гарантированный фил)</option>
+                  <option value="Limit">Limit — лимитные maker (экономия комиссии)</option>
+                </select>
+                <p className="text-xs text-text-secondary mt-1 italic">
+                  Первый вход в позицию всегда выполняется рыночным ордером.
+                </p>
+              </div>
+
+              {sdForm.orderType === 'Limit' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelCls}>Оффсет лимитки, %</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      value={sdForm.entryLimitOffsetPercent}
+                      onChange={(e) => setSdForm({ ...sdForm, entryLimitOffsetPercent: e.target.value })}
+                      className={inputCls}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Таймаут entry, свечей</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={sdForm.entryLimitTimeoutBars}
+                      onChange={(e) => setSdForm({ ...sdForm, entryLimitTimeoutBars: e.target.value })}
+                      className={inputCls}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <p className="text-xs text-text-secondary italic">
+                {sdForm.dcaTriggerBase === 'LastFill'
+                  ? `Усреднение: при движении на ${sdForm.dcaStepPercent}% от цены последней докупки — докупка qty × ${sdForm.dcaMultiplier}. TP считается от средней и пересчитывается после каждой докупки.`
+                  : `Усреднение: при движении против позиции на ${sdForm.dcaStepPercent}% от текущей средней — докупка qty × ${sdForm.dcaMultiplier}. TP и порог следующего DCA пересчитываются после каждой докупки.`}
+                {sdForm.orderType === 'Limit' && (
+                  <>
+                    <br />
+                    Лимитки ставятся на {sdForm.entryLimitOffsetPercent}% {sdForm.direction === 'Long' ? 'ниже' : 'выше'} цены закрытия свечи (всегда maker). Entry-лимит отменяется через {sdForm.entryLimitTimeoutBars} свечей если не исполнился; DCA-лимит висит до исполнения или пока TP не закроет позицию.
+                  </>
+                )}
+              </p>
+            </>
+          ) : strategyType === 'HuntingFunding' ? (
+            <>
+              {/* Auto-rotate ticker */}
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoRotateTicker}
+                  onChange={(e) => setAutoRotateTicker(e.target.checked)}
+                  className="rounded border-dark-border"
+                />
+                <span className="text-sm text-text-primary">Автообновление тикера</span>
+                <span className="text-xs text-text-secondary">(по макс. фандингу)</span>
+              </label>
+
               {/* Levels table */}
               <div>
                 <label className={labelCls}>Уровни ордеров</label>
@@ -1904,6 +2601,7 @@ function EditStrategyModal({
   const queryClient = useQueryClient();
   const cfg = parseJson(strategy.configJson) || {};
   const isHF = strategy.type === 'HuntingFunding';
+  const isSD = strategy.type === 'SmaDca';
 
   const [name, setName] = useState(strategy.name);
   const [symbol, setSymbol] = useState(cfg.symbol || 'BTCUSDT');
@@ -1921,12 +2619,28 @@ function EditStrategyModal({
     onlyShort: cfg.onlyShort ?? false,
   });
 
+  // SMA DCA form state
+  const [sdForm, setSdForm] = useState({
+    timeframe: cfg.timeframe || '1h',
+    direction: cfg.direction || 'Long',
+    smaPeriod: String(cfg.smaPeriod ?? 50),
+    takeProfitPercent: String(cfg.takeProfitPercent ?? 1.0),
+    dcaStepPercent: String(cfg.dcaStepPercent ?? 3.0),
+    dcaMultiplier: String(cfg.dcaMultiplier ?? 3.0),
+    maxDcaLevels: String(cfg.maxDcaLevels ?? 5),
+    positionSizeUsd: String(cfg.positionSizeUsd ?? 100),
+    dcaTriggerBase: cfg.dcaTriggerBase || 'Average',
+    orderType: cfg.orderType || 'Market',
+    entryLimitOffsetPercent: String(cfg.entryLimitOffsetPercent ?? 0.05),
+  });
+
   // HuntingFunding form state
   const [hfLevels, setHfLevels] = useState<HFLevel[]>(
     Array.isArray(cfg.levels) && cfg.levels.length > 0
       ? cfg.levels
       : [{ offsetPercent: 1.5, sizeUsdt: 50 }],
   );
+  const [autoRotateTicker, setAutoRotateTicker] = useState(cfg.autoRotateTicker !== false);
   const [hfForm, setHfForm] = useState({
     takeProfitPercent: String(cfg.takeProfitPercent ?? 1.0),
     stopLossPercent: String(cfg.stopLossPercent ?? 0.5),
@@ -1989,6 +2703,22 @@ function EditStrategyModal({
         minFundingLong: Number(hfForm.minFundingLong),
         enableShort: hfForm.enableShort,
         minFundingShort: Number(hfForm.minFundingShort),
+        autoRotateTicker,
+      });
+    } else if (isSD) {
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        timeframe: sdForm.timeframe,
+        direction: sdForm.direction,
+        smaPeriod: Number(sdForm.smaPeriod),
+        takeProfitPercent: Number(sdForm.takeProfitPercent),
+        dcaStepPercent: Number(sdForm.dcaStepPercent),
+        dcaMultiplier: Number(sdForm.dcaMultiplier),
+        maxDcaLevels: Number(sdForm.maxDcaLevels),
+        positionSizeUsd: Number(sdForm.positionSizeUsd),
+        dcaTriggerBase: sdForm.dcaTriggerBase,
+        orderType: sdForm.orderType,
+        entryLimitOffsetPercent: Number(sdForm.entryLimitOffsetPercent),
       });
     } else {
       configJson = JSON.stringify({
@@ -2076,8 +2806,165 @@ function EditStrategyModal({
             />
           </div>
 
-          {isHF ? (
+          {isSD ? (
             <>
+              <div>
+                <label className={labelCls}>Таймфрейм</label>
+                <select
+                  value={sdForm.timeframe}
+                  onChange={(e) => setSdForm({ ...sdForm, timeframe: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="30m">30m</option>
+                  <option value="1h">1h</option>
+                  <option value="4h">4h</option>
+                  <option value="1d">1D</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Направление</label>
+                  <select
+                    value={sdForm.direction}
+                    onChange={(e) => setSdForm({ ...sdForm, direction: e.target.value })}
+                    className={inputCls}
+                  >
+                    <option value="Long">Long</option>
+                    <option value="Short">Short</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Период SMA</label>
+                  <input
+                    type="number"
+                    min="2"
+                    value={sdForm.smaPeriod}
+                    onChange={(e) => setSdForm({ ...sdForm, smaPeriod: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Размер входа (USD)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    value={sdForm.positionSizeUsd}
+                    onChange={(e) => setSdForm({ ...sdForm, positionSizeUsd: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Take Profit %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.01"
+                    value={sdForm.takeProfitPercent}
+                    onChange={(e) => setSdForm({ ...sdForm, takeProfitPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className={labelCls}>DCA шаг %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.01"
+                    value={sdForm.dcaStepPercent}
+                    onChange={(e) => setSdForm({ ...sdForm, dcaStepPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Множитель</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.1"
+                    value={sdForm.dcaMultiplier}
+                    onChange={(e) => setSdForm({ ...sdForm, dcaMultiplier: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Макс. DCA</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={sdForm.maxDcaLevels}
+                    onChange={(e) => setSdForm({ ...sdForm, maxDcaLevels: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className={labelCls}>База расчёта шага DCA</label>
+                <select
+                  value={sdForm.dcaTriggerBase}
+                  onChange={(e) => setSdForm({ ...sdForm, dcaTriggerBase: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="Average">От средней цены входа (сетка сжимается)</option>
+                  <option value="LastFill">От последней докупки (сетка равномерная)</option>
+                </select>
+              </div>
+
+              {/* Order type: market vs limit (DCA only — first entry is always market) */}
+              <div>
+                <label className={labelCls}>Тип ордеров для DCA (докупок)</label>
+                <select
+                  value={sdForm.orderType}
+                  onChange={(e) => setSdForm({ ...sdForm, orderType: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="Market">Market — рыночные (taker, гарантированный фил)</option>
+                  <option value="Limit">Limit — лимитные maker (экономия комиссии)</option>
+                </select>
+                <p className="text-xs text-text-secondary mt-1 italic">
+                  Первый вход в позицию всегда выполняется рыночным ордером.
+                </p>
+              </div>
+
+              {sdForm.orderType === 'Limit' && (
+                <div>
+                  <label className={labelCls}>Оффсет лимитки DCA, %</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    value={sdForm.entryLimitOffsetPercent}
+                    onChange={(e) => setSdForm({ ...sdForm, entryLimitOffsetPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              )}
+            </>
+          ) : isHF ? (
+            <>
+              {/* Auto-rotate ticker */}
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoRotateTicker}
+                  onChange={(e) => setAutoRotateTicker(e.target.checked)}
+                  className="rounded border-dark-border"
+                />
+                <span className="text-sm text-text-primary">Автообновление тикера</span>
+                <span className="text-xs text-text-secondary">(по макс. фандингу)</span>
+              </label>
+
               {/* Levels table */}
               <div>
                 <label className={labelCls}>Уровни ордеров</label>
