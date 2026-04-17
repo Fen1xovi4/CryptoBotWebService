@@ -1533,6 +1533,7 @@ interface SmaDcaCfg {
   smaPeriod: number;
   takeProfitPercent: number;
   dcaStepPercent: number;
+  dcaTriggerBase?: string;
   dcaMultiplier: number;
   maxDcaLevels: number;
   positionSizeUsd: number;
@@ -1593,15 +1594,38 @@ function SmaDcaCard({
   let pnlPct = 0;
   let pnlUsd = 0;
   let progress = 0;
+  let nextDcaPrice: number | null = null;
   if (inPos && state?.averageEntryPrice && state?.lastPrice) {
+    const avg = state.averageEntryPrice;
     pnlPct = isLong
-      ? (state.lastPrice - state.averageEntryPrice) / state.averageEntryPrice * 100
-      : (state.averageEntryPrice - state.lastPrice) / state.averageEntryPrice * 100;
+      ? (state.lastPrice - avg) / avg * 100
+      : (avg - state.lastPrice) / avg * 100;
     pnlUsd = (state.totalCost ?? 0) * pnlPct / 100;
-    const tp = cfg?.takeProfitPercent ?? 1;
-    progress = pnlPct >= 0
-      ? Math.min((pnlPct / tp) * 100, 100)
-      : Math.max((pnlPct / tp) * 100, -100);
+
+    // Next DCA trigger (mirrors SmaDcaHandler.cs trigger logic)
+    const dcaLevel = state.dcaLevel ?? 0;
+    const maxDca = cfg?.maxDcaLevels ?? 0;
+    const step = cfg?.dcaStepPercent ?? 0;
+    if (dcaLevel < maxDca && step > 0) {
+      const triggerBase = (cfg?.dcaTriggerBase === 'LastFill' && (state.lastDcaPrice ?? 0) > 0)
+        ? state.lastDcaPrice
+        : avg;
+      nextDcaPrice = isLong
+        ? triggerBase * (1 - step / 100)
+        : triggerBase * (1 + step / 100);
+    }
+
+    if (pnlPct >= 0) {
+      // Green: progress from avg to TP
+      const tp = cfg?.takeProfitPercent ?? 1;
+      progress = Math.min((pnlPct / tp) * 100, 100);
+    } else if (nextDcaPrice !== null) {
+      // Red: progress from avg to next DCA trigger
+      const dist = Math.abs(avg - nextDcaPrice);
+      const moved = Math.abs(avg - state.lastPrice);
+      progress = dist > 0 ? -Math.min((moved / dist) * 100, 100) : 0;
+    }
+    // else: max DCA reached and we're in drawdown — leave progress at 0 (no red bar)
   }
 
   const barColor = progress >= 0 ? 'bg-accent-green' : 'bg-accent-red';
@@ -1706,7 +1730,9 @@ function SmaDcaCard({
                     {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}% ({pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(2)})
                   </div>
                   <div className="text-[10px] text-text-secondary mt-0.5">
-                    TP {state?.currentTakeProfit?.toFixed(6) ?? '—'}
+                    {pnlPct >= 0 || nextDcaPrice === null
+                      ? <>TP {state?.currentTakeProfit?.toFixed(6) ?? '—'}</>
+                      : <>DCA @ {nextDcaPrice.toFixed(6)}</>}
                   </div>
                 </div>
               </div>
