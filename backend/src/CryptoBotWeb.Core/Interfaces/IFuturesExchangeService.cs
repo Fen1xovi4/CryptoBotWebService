@@ -36,4 +36,10 @@ public interface IFuturesExchangeService : IDisposable
 
     Task<List<FundingRateDto>> GetAllFundingRatesAsync() =>
         throw new NotSupportedException("GetAllFundingRatesAsync not implemented");
+
+    Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null) =>
+        throw new NotSupportedException("GetFundingPaymentsAsync not implemented");
+
+    Task<bool> SetLeverageAsync(string symbol, int leverage) =>
+        throw new NotSupportedException("SetLeverageAsync not implemented");
 }

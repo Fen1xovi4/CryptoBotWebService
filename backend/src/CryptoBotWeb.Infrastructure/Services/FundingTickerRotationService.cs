@@ -34,11 +34,12 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
     public async Task RotateTickersAsync(CancellationToken ct)
     {
-        // 1. Load all HuntingFunding strategies with workspace + account
+        // 1. Load all funding-based strategies with workspace + account
+        var fundingTypes = new[] { StrategyTypes.HuntingFunding, StrategyTypes.FundingClaim };
         var allStrategies = await _db.Strategies
             .Include(s => s.Account).ThenInclude(a => a.Proxy)
             .Include(s => s.Workspace)
-            .Where(s => s.Type == StrategyTypes.HuntingFunding && s.WorkspaceId != null)
+            .Where(s => fundingTypes.Contains(s.Type) && s.WorkspaceId != null)
             .ToListAsync(ct);
 
         if (allStrategies.Count == 0)
@@ -60,12 +61,20 @@ public class FundingTickerRotationService : IFundingTickerRotationService
             {
                 using var exchange = _factory.CreateFutures(account);
                 var rates = await exchange.GetAllFundingRatesAsync();
+
+                // Filter out non-tradeable symbols by cross-referencing with active symbols list
+                var activeSymbols = await exchange.GetSymbolsAsync();
+                var activeSet = new HashSet<string>(
+                    activeSymbols.Select(s => s.Symbol.ToUpperInvariant()),
+                    StringComparer.OrdinalIgnoreCase);
+                rates.RemoveAll(r => !activeSet.Contains(r.Symbol.ToUpperInvariant()));
+
                 // Sort by absolute rate descending
                 rates.Sort((a, b) => Math.Abs(b.Rate).CompareTo(Math.Abs(a.Rate)));
                 fundingByExchangeType[account.ExchangeType] = rates;
                 _logger.LogInformation(
-                    "Fetched {Count} funding rates for {Exchange}, top rate: {TopSymbol} = {TopRate:P4}",
-                    rates.Count, account.ExchangeType,
+                    "Fetched {Count} funding rates for {Exchange} ({ActiveCount} active symbols), top rate: {TopSymbol} = {TopRate:P4}",
+                    rates.Count, account.ExchangeType, activeSet.Count,
                     rates.FirstOrDefault()?.Symbol ?? "N/A",
                     rates.FirstOrDefault()?.Rate ?? 0m);
             }
@@ -144,8 +153,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
                 if (strategy.Status == StrategyStatus.Running)
                 {
-                    var phase = GetPhase(strategy);
-                    if (phase == HuntingFundingPhase.WaitingForFunding)
+                    if (IsInIdlePhase(strategy))
                         eligible.Add(strategy);
                     else
                         locked.Add(strategy);
@@ -230,12 +238,20 @@ public class FundingTickerRotationService : IFundingTickerRotationService
     private static bool IsAutoRotateEnabled(Strategy strategy)
     {
         if (string.IsNullOrEmpty(strategy.ConfigJson))
-            return true; // default is true
+            return true;
 
         try
         {
-            var config = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, JsonOptions);
-            return config?.AutoRotateTicker ?? true;
+            if (strategy.Type == StrategyTypes.FundingClaim)
+            {
+                var cfg = JsonSerializer.Deserialize<FundingClaimConfig>(strategy.ConfigJson, JsonOptions);
+                return cfg?.AutoRotateTicker ?? true;
+            }
+            else
+            {
+                var cfg = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, JsonOptions);
+                return cfg?.AutoRotateTicker ?? true;
+            }
         }
         catch
         {
@@ -243,24 +259,52 @@ public class FundingTickerRotationService : IFundingTickerRotationService
         }
     }
 
-    private static HuntingFundingPhase GetPhase(Strategy strategy)
+    private static bool IsInIdlePhase(Strategy strategy)
     {
         if (string.IsNullOrEmpty(strategy.StateJson))
-            return HuntingFundingPhase.WaitingForFunding;
+            return true;
 
         try
         {
-            var state = JsonSerializer.Deserialize<HuntingFundingState>(strategy.StateJson, JsonOptions);
-            return state?.Phase ?? HuntingFundingPhase.WaitingForFunding;
+            if (strategy.Type == StrategyTypes.FundingClaim)
+            {
+                var state = JsonSerializer.Deserialize<FundingClaimState>(strategy.StateJson, JsonOptions);
+                return state?.Phase == FundingClaimPhase.Idle;
+            }
+            else
+            {
+                var state = JsonSerializer.Deserialize<HuntingFundingState>(strategy.StateJson, JsonOptions);
+                return state?.Phase == HuntingFundingPhase.WaitingForFunding;
+            }
         }
         catch
         {
-            return HuntingFundingPhase.WaitingForFunding;
+            return true;
         }
     }
 
     private static (decimal minPct, decimal maxPct) GetFundingRange(Strategy strategy)
     {
+        // FundingClaim uses workspace-level threshold, no max
+        if (strategy.Type == StrategyTypes.FundingClaim)
+        {
+            var wsJson = strategy.Workspace?.ConfigJson;
+            if (string.IsNullOrEmpty(wsJson))
+                return (0.3m, decimal.MaxValue);
+
+            try
+            {
+                var cfg = JsonSerializer.Deserialize<WorkspaceFundingClaimConfig>(wsJson, JsonOptions);
+                var min = cfg?.FcMinFundingRatePercent ?? 0.3m;
+                return (min, decimal.MaxValue);
+            }
+            catch
+            {
+                return (0.3m, decimal.MaxValue);
+            }
+        }
+
+        // HuntingFunding uses workspace-level range
         var workspaceJson = strategy.Workspace?.ConfigJson;
         if (string.IsNullOrEmpty(workspaceJson))
             return (1.0m, 2.0m);
@@ -289,8 +333,11 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
         try
         {
-            var config = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, JsonOptions);
-            return config?.Symbol ?? string.Empty;
+            // Both configs have Symbol as the first field — use a shared approach
+            using var doc = JsonDocument.Parse(strategy.ConfigJson);
+            if (doc.RootElement.TryGetProperty("symbol", out var symbolProp))
+                return symbolProp.GetString() ?? string.Empty;
+            return string.Empty;
         }
         catch
         {
@@ -305,11 +352,20 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
         try
         {
-            var config = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, JsonOptions);
-            if (config == null) return;
-
-            config.Symbol = newSymbol;
-            strategy.ConfigJson = JsonSerializer.Serialize(config, JsonOptions);
+            if (strategy.Type == StrategyTypes.FundingClaim)
+            {
+                var cfg = JsonSerializer.Deserialize<FundingClaimConfig>(strategy.ConfigJson, JsonOptions);
+                if (cfg == null) return;
+                cfg.Symbol = newSymbol;
+                strategy.ConfigJson = JsonSerializer.Serialize(cfg, JsonOptions);
+            }
+            else
+            {
+                var cfg = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, JsonOptions);
+                if (cfg == null) return;
+                cfg.Symbol = newSymbol;
+                strategy.ConfigJson = JsonSerializer.Serialize(cfg, JsonOptions);
+            }
         }
         catch
         {

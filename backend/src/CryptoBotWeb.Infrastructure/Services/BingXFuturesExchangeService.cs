@@ -390,5 +390,52 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         return Math.Floor(value / step) * step;
     }
 
+    public async Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.Account.GetIncomesAsync(
+                symbol: bingxSymbol,
+                incomeType: IncomeType.FundingFee,
+                startTime: startTime,
+                limit: 100);
+
+            if (!result.Success || result.Data == null)
+                return new List<FundingPaymentDto>();
+
+            return result.Data
+                .Select(i => new FundingPaymentDto
+                {
+                    Symbol = (i.Symbol ?? bingxSymbol).Replace("-", ""),
+                    Amount = i.Income,
+                    FundingRate = 0m, // BingX income endpoint does not return the funding rate
+                    PositionSize = 0m, // BingX income endpoint does not return position size
+                    Timestamp = i.Timestamp
+                })
+                .OrderByDescending(p => p.Timestamp)
+                .ToList();
+        }
+        catch (Exception)
+        {
+            return new List<FundingPaymentDto>();
+        }
+    }
+
+    public async Task<bool> SetLeverageAsync(string symbol, int leverage)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.Account.SetLeverageAsync(
+                bingxSymbol, BingX.Net.Enums.PositionSide.Both, leverage);
+            return result.Success;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public void Dispose() => _client.Dispose();
 }

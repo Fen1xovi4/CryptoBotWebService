@@ -457,5 +457,73 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    /// <summary>
+    /// Fetches funding fee payment history from Bitget ledger (businessType = "funding_fee").
+    /// The ledger entry contains the funding amount but not the funding rate or position size directly,
+    /// so those fields are set to 0.
+    /// </summary>
+    public async Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null)
+    {
+        try
+        {
+            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+            var payments = new List<FundingPaymentDto>();
+            long? lastId = null;
+
+            do
+            {
+                var result = await _client.FuturesApiV2.Account.GetLedgerAsync(
+                    BitgetProductTypeV2.UsdtFutures,
+                    businessType: "funding_fee",
+                    startTime: startTime,
+                    idLessThan: lastId,
+                    limit: 100);
+
+                if (!result.Success || result.Data?.Entries == null || result.Data.Entries.Length == 0)
+                    break;
+
+                foreach (var entry in result.Data.Entries)
+                {
+                    // Filter by exact symbol
+                    if (!entry.Symbol.Equals(bitgetSymbol, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    payments.Add(new FundingPaymentDto
+                    {
+                        Symbol = symbol,
+                        Amount = entry.Quantity,
+                        FundingRate = 0m, // Bitget ledger does not include funding rate
+                        PositionSize = 0m, // Bitget ledger does not include position size
+                        Timestamp = entry.Timestamp
+                    });
+                }
+
+                lastId = result.Data.EndId;
+            }
+            while (lastId.HasValue);
+
+            return payments.OrderByDescending(p => p.Timestamp).ToList();
+        }
+        catch (Exception)
+        {
+            return new List<FundingPaymentDto>();
+        }
+    }
+
+    public async Task<bool> SetLeverageAsync(string symbol, int leverage)
+    {
+        try
+        {
+            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+            var result = await _client.FuturesApiV2.Account.SetLeverageAsync(
+                BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT", leverage);
+            return result.Success;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public void Dispose() => _client.Dispose();
 }

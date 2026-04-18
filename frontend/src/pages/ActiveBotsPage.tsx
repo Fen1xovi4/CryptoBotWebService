@@ -63,6 +63,9 @@ interface WorkspaceConfig {
   // SmaDca workspace settings
   timerEnabled: boolean;
   timerExpiresAt: string | null; // ISO UTC
+  // FundingClaim workspace settings
+  fcSizeUsdt: number;
+  fcMinFundingRatePercent: number;
 }
 
 interface WorkspaceStats {
@@ -90,6 +93,8 @@ const defaultConfig: WorkspaceConfig = {
   fundingRateMax: 2.0,
   timerEnabled: false,
   timerExpiresAt: null,
+  fcSizeUsdt: 100,
+  fcMinFundingRatePercent: 0.3,
 };
 
 const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
@@ -354,6 +359,7 @@ export default function ActiveBotsPage() {
             <option value="MaratG">MaratG</option>
             <option value="HuntingFunding">HuntingFunding</option>
             <option value="SmaDca">SMA DCA</option>
+            <option value="FundingClaim">FundingClaim</option>
           </select>
         </div>
 
@@ -450,6 +456,42 @@ export default function ActiveBotsPage() {
             <div className="h-6 w-px bg-border" />
             <p className="text-sm text-text-secondary italic">
               Остальные настройки задаются индивидуально в каждом боте через уровни ордеров.
+            </p>
+          </>
+        ) : activeWorkspace?.strategyType === 'FundingClaim' ? (
+          <>
+            <div className="h-6 w-px bg-border" />
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text-secondary">Размер позиции:</span>
+              <input
+                type="number"
+                step="1"
+                min="1"
+                value={localConfig.fcSizeUsdt}
+                onChange={(e) => updateConfig({ fcSizeUsdt: Number(e.target.value) })}
+                className="w-24 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+              />
+              <span className="text-xs text-text-secondary">USDT</span>
+            </div>
+            <div className="h-6 w-px bg-border" />
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text-secondary">Мин. фандинг:</span>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                value={localConfig.fcMinFundingRatePercent}
+                onChange={(e) => updateConfig({ fcMinFundingRatePercent: Number(e.target.value) })}
+                className="w-20 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+              />
+              <span className="text-xs text-text-secondary">%</span>
+              <span className="text-xs text-text-secondary italic">
+                Открывать позицию если |funding| ≥ этого значения.
+              </span>
+            </div>
+            <div className="h-6 w-px bg-border" />
+            <p className="text-sm text-text-secondary italic">
+              Остальные настройки (авторотация, макс. циклов, проверка перед фандингом) задаются в каждом боте.
             </p>
           </>
         ) : (
@@ -687,6 +729,27 @@ export default function ActiveBotsPage() {
             if (s.type === 'HuntingFunding') {
               return (
                 <HuntingFundingCard
+                  key={s.id}
+                  s={s}
+                  cfg={cfg}
+                  state={state}
+                  isRunning={isRunning}
+                  onStart={() => startMutation.mutate(s.id)}
+                  onStop={() => stopMutation.mutate(s.id)}
+                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
+                  onEdit={() => setEditingStrategy(s)}
+                  onLogs={() => setLogStrategy(s)}
+                  onClosePosition={() => closePositionMutation.mutate(s.id)}
+                  closePositionPending={closePositionMutation.isPending}
+                  telegramBots={telegramBots}
+                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                />
+              );
+            }
+
+            if (s.type === 'FundingClaim') {
+              return (
+                <FundingClaimCard
                   key={s.id}
                   s={s}
                   cfg={cfg}
@@ -1186,6 +1249,31 @@ interface HFStateData {
   lastPrice: number | null;
 }
 
+/* ── FundingClaim types ──────────────────────────────────── */
+
+interface FCConfig {
+  symbol: string;
+  maxCycles: number;
+  autoRotateTicker: boolean;
+  checkBeforeFundingMinutes: number;
+}
+
+interface FCStateData {
+  phase: number; // 0=Idle, 1=InPosition
+  direction: string | null;
+  symbol: string | null;
+  currentFundingRate: number | null;
+  nextFundingTime: string | null;
+  entryPrice: number | null;
+  entryQuantity: number | null;
+  entrySizeUsdt: number | null;
+  positionOpenedAt: string | null;
+  cycleCount: number;
+  cycleTotalPnl: number;
+  cycleTotalFundingPnl: number;
+  lastPrice: number | null;
+}
+
 function useCountdown(targetIso: string | null | undefined): string {
   const [display, setDisplay] = useState('--:--:--');
 
@@ -1474,6 +1562,289 @@ function HuntingFundingCard({
         <div className="flex-1" />
 
         {phase === 2 && isRunning && (
+          <button
+            onClick={() => { if (confirm('Закрыть позицию по рынку?')) onClosePosition(); }}
+            disabled={closePositionPending}
+            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
+          >
+            {closePositionPending ? '...' : 'Закрыть'}
+          </button>
+        )}
+
+        {isRunning ? (
+          <button
+            onClick={onStop}
+            className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+          >
+            Стоп
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={onStart}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+            >
+              Старт
+            </button>
+            <button
+              onClick={onEdit}
+              title="Редактировать"
+              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        <button
+          onClick={onDelete}
+          title="Удалить"
+          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── FundingClaim Card ──────────────────────────────────── */
+
+function FundingClaimCard({
+  s,
+  cfg,
+  state,
+  isRunning,
+  onStart,
+  onStop,
+  onDelete,
+  onEdit,
+  onLogs,
+  onClosePosition,
+  closePositionPending,
+  telegramBots,
+  onSetTelegramBot,
+}: {
+  s: Strategy;
+  cfg: FCConfig | null;
+  state: FCStateData | null;
+  isRunning: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onLogs: () => void;
+  onClosePosition: () => void;
+  closePositionPending: boolean;
+  telegramBots: TelegramBotOption[] | undefined;
+  onSetTelegramBot: (botId: string | null) => void;
+}) {
+  const phase = state?.phase ?? 0;
+  const fundingCountdown = useCountdown(state?.nextFundingTime);
+
+  const borderAccent = isRunning
+    ? phase === 1 ? 'border-l-accent-yellow' : 'border-l-accent-green'
+    : 'border-l-border';
+
+  // PnL calculation for InPosition phase
+  let pnlUsd = 0;
+  let pnlPct = 0;
+  if (phase === 1 && state?.entryPrice && state?.lastPrice && state?.entrySizeUsdt) {
+    const isLong = state.direction === 'Long';
+    pnlPct = isLong
+      ? (state.lastPrice - state.entryPrice) / state.entryPrice * 100
+      : (state.entryPrice - state.lastPrice) / state.entryPrice * 100;
+    pnlUsd = (pnlPct / 100) * state.entrySizeUsdt;
+  }
+
+  return (
+    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
+      {/* Header */}
+      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-mono font-semibold text-text-primary truncate">
+              {state?.symbol || cfg?.symbol || '—'}
+            </span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400">
+              FC
+            </span>
+            {cfg?.autoRotateTicker && (
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">
+                AUTO
+              </span>
+            )}
+          </div>
+          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
+            {s.name} · {s.accountName}
+          </div>
+        </div>
+        <StatusBadge status={s.status} />
+      </div>
+
+      {/* Config chips */}
+      {cfg && (
+        <div className="px-4 pb-2 flex flex-wrap gap-1">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            -{cfg.checkBeforeFundingMinutes}мин
+          </span>
+          {cfg.maxCycles > 0 && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+              макс {cfg.maxCycles} цикл.
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Phase content */}
+      <div className="px-4 py-2.5 min-h-[52px] flex items-center">
+        {!isRunning ? (
+          <span className="text-text-secondary text-xs">Остановлен</span>
+        ) : phase === 0 ? (
+          <div className="w-full space-y-1">
+            <div className="flex items-center gap-2">
+              {state?.currentFundingRate != null && (
+                <span className={`text-xs font-semibold ${state.currentFundingRate >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  Funding: {state.currentFundingRate >= 0 ? '+' : ''}{(state.currentFundingRate * 100).toFixed(4)}%
+                </span>
+              )}
+            </div>
+            {state?.nextFundingTime && (
+              <div className="text-[11px] text-text-secondary">
+                До фандинга: <span className="font-mono text-text-primary">{fundingCountdown}</span>
+              </div>
+            )}
+          </div>
+        ) : phase === 1 ? (
+          <div className="w-full space-y-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              {state?.direction && (
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${state.direction === 'Long' ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'}`}>
+                  {state.direction.toUpperCase()}
+                </span>
+              )}
+              {state?.entryPrice != null && (
+                <span className="text-[10px] text-text-secondary">
+                  Вход: <span className="text-text-primary">${state.entryPrice.toFixed(2)}</span>
+                </span>
+              )}
+              {state?.lastPrice != null && (
+                <span className="text-[10px] text-text-secondary">
+                  Цена: <span className="text-text-primary">${state.lastPrice.toFixed(2)}</span>
+                </span>
+              )}
+              {state?.entryPrice != null && state?.lastPrice != null && state?.entrySizeUsdt != null && (
+                <span className={`text-[10px] font-semibold ${pnlUsd >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  {pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(2)} ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
+                </span>
+              )}
+            </div>
+            {state?.cycleTotalFundingPnl != null && (
+              <div className={`text-[10px] font-medium ${state.cycleTotalFundingPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                Funding PnL: {state.cycleTotalFundingPnl >= 0 ? '+' : ''}${state.cycleTotalFundingPnl.toFixed(2)}
+              </div>
+            )}
+            {state?.nextFundingTime && (
+              <div className="text-[11px] text-text-secondary">
+                До фандинга: <span className="font-mono text-text-primary">{fundingCountdown}</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <span className="text-text-secondary text-xs">—</span>
+        )}
+      </div>
+
+      {/* Bottom stats row */}
+      <div className="px-4 pb-2 flex items-center gap-3">
+        {cfg && (
+          <span className="text-[10px] text-text-secondary">
+            Цикл: <span className="text-text-primary font-medium">{state?.cycleCount ?? 0}/{cfg.maxCycles || '∞'}</span>
+          </span>
+        )}
+        {state != null && state.cycleTotalPnl != null && (
+          <span className={`text-[10px] font-medium ${state.cycleTotalPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+            PnL: {state.cycleTotalPnl >= 0 ? '+' : ''}${state.cycleTotalPnl.toFixed(2)}
+          </span>
+        )}
+        {state != null && state.cycleTotalFundingPnl != null && (
+          <span className={`text-[10px] font-medium ${state.cycleTotalFundingPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+            Funding: {state.cycleTotalFundingPnl >= 0 ? '+' : ''}${state.cycleTotalFundingPnl.toFixed(2)}
+          </span>
+        )}
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Actions */}
+      <div className="px-3 py-2 flex items-center gap-1">
+        <button
+          onClick={onLogs}
+          title="Логи"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+        </button>
+
+        {/* TG signal toggle */}
+        {telegramBots && telegramBots.length > 0 && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                if (s.telegramBotId) {
+                  onSetTelegramBot(null);
+                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
+                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
+                }
+              }}
+              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
+              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                s.telegramBotId
+                  ? 'bg-accent-blue/15 text-accent-blue'
+                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
+              }`}
+            >
+              TG
+            </button>
+            {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                value=""
+                onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
+              >
+                <option value="">Select bot...</option>
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+            {s.telegramBotId && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                value={s.telegramBotId}
+                onChange={(e) => onSetTelegramBot(e.target.value || null)}
+              >
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {phase === 1 && isRunning && (
           <button
             onClick={() => { if (confirm('Закрыть позицию по рынку?')) onClosePosition(); }}
             disabled={closePositionPending}
@@ -1969,6 +2340,13 @@ function AddStrategyModal({
     entryLimitTimeoutBars: '3',
   });
 
+  // FundingClaim fields
+  const [fcForm, setFcForm] = useState({
+    maxCycles: '0',
+    checkBeforeFundingMinutes: '10',
+  });
+  const [fcAutoRotate, setFcAutoRotate] = useState(true);
+
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
     queryKey: ['symbols', accountId],
     queryFn: () => api.get(`/exchange/${accountId}/symbols`).then((r) => r.data),
@@ -2037,6 +2415,13 @@ function AddStrategyModal({
         orderType: sdForm.orderType,
         entryLimitOffsetPercent: Number(sdForm.entryLimitOffsetPercent),
         entryLimitTimeoutBars: Number(sdForm.entryLimitTimeoutBars),
+      });
+    } else if (strategyType === 'FundingClaim') {
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        maxCycles: Number(fcForm.maxCycles),
+        autoRotateTicker: fcAutoRotate,
+        checkBeforeFundingMinutes: Number(fcForm.checkBeforeFundingMinutes),
       });
     } else {
       configJson = JSON.stringify({
@@ -2320,6 +2705,50 @@ function AddStrategyModal({
                     Лимитки ставятся на {sdForm.entryLimitOffsetPercent}% {sdForm.direction === 'Long' ? 'ниже' : 'выше'} цены закрытия свечи (всегда maker). Entry-лимит отменяется через {sdForm.entryLimitTimeoutBars} свечей если не исполнился; DCA-лимит висит до исполнения или пока TP не закроет позицию.
                   </>
                 )}
+              </p>
+            </>
+          ) : strategyType === 'FundingClaim' ? (
+            <>
+              {/* Auto-rotate ticker */}
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={fcAutoRotate}
+                  onChange={(e) => setFcAutoRotate(e.target.checked)}
+                  className="rounded border-dark-border"
+                />
+                <span className="text-sm text-text-primary">Автообновление тикера</span>
+                <span className="text-xs text-text-secondary">(по макс. фандингу)</span>
+              </label>
+
+              {/* Check before + Max cycles */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Проверка за (мин)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={fcForm.checkBeforeFundingMinutes}
+                    onChange={(e) => setFcForm({ ...fcForm, checkBeforeFundingMinutes: e.target.value })}
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">Минут до фандинга для проверки ставки</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Макс. циклов <span className="font-normal">(0 = ∞)</span></label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={fcForm.maxCycles}
+                    onChange={(e) => setFcForm({ ...fcForm, maxCycles: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              <p className="text-xs text-text-secondary italic">
+                Бот автоматически определяет направление по знаку фандинга: шорт при положительном, лонг при отрицательном.
+                Позиция открывается маркет-ордером и держится для сбора фандинговых выплат.
               </p>
             </>
           ) : strategyType === 'HuntingFunding' ? (
@@ -2628,6 +3057,7 @@ function EditStrategyModal({
   const cfg = parseJson(strategy.configJson) || {};
   const isHF = strategy.type === 'HuntingFunding';
   const isSD = strategy.type === 'SmaDca';
+  const isFC = strategy.type === 'FundingClaim';
 
   const [name, setName] = useState(strategy.name);
   const [symbol, setSymbol] = useState(cfg.symbol || 'BTCUSDT');
@@ -2678,6 +3108,13 @@ function EditStrategyModal({
     enableShort: cfg.enableShort ?? true,
     minFundingShort: String(cfg.minFundingShort ?? 1.0),
   });
+
+  // FundingClaim form state
+  const [fcForm, setFcForm] = useState({
+    maxCycles: String(cfg.maxCycles ?? 0),
+    checkBeforeFundingMinutes: String(cfg.checkBeforeFundingMinutes ?? 10),
+  });
+  const [fcAutoRotate, setFcAutoRotate] = useState(cfg.autoRotateTicker !== false);
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
     queryKey: ['symbols', strategy.accountId],
@@ -2745,6 +3182,13 @@ function EditStrategyModal({
         dcaTriggerBase: sdForm.dcaTriggerBase,
         orderType: sdForm.orderType,
         entryLimitOffsetPercent: Number(sdForm.entryLimitOffsetPercent),
+      });
+    } else if (isFC) {
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        maxCycles: Number(fcForm.maxCycles),
+        autoRotateTicker: fcAutoRotate,
+        checkBeforeFundingMinutes: Number(fcForm.checkBeforeFundingMinutes),
       });
     } else {
       configJson = JSON.stringify({
@@ -2976,6 +3420,50 @@ function EditStrategyModal({
                   />
                 </div>
               )}
+            </>
+          ) : isFC ? (
+            <>
+              {/* Auto-rotate ticker */}
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={fcAutoRotate}
+                  onChange={(e) => setFcAutoRotate(e.target.checked)}
+                  className="rounded border-dark-border"
+                />
+                <span className="text-sm text-text-primary">Автообновление тикера</span>
+                <span className="text-xs text-text-secondary">(по макс. фандингу)</span>
+              </label>
+
+              {/* Check before + Max cycles */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Проверка за (мин)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={fcForm.checkBeforeFundingMinutes}
+                    onChange={(e) => setFcForm({ ...fcForm, checkBeforeFundingMinutes: e.target.value })}
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">Минут до фандинга для проверки ставки</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Макс. циклов <span className="font-normal">(0 = ∞)</span></label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={fcForm.maxCycles}
+                    onChange={(e) => setFcForm({ ...fcForm, maxCycles: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              <p className="text-xs text-text-secondary italic">
+                Бот автоматически определяет направление по знаку фандинга: шорт при положительном, лонг при отрицательном.
+                Позиция открывается маркет-ордером и держится для сбора фандинговых выплат.
+              </p>
             </>
           ) : isHF ? (
             <>

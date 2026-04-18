@@ -128,6 +128,7 @@ public class AppDbContext : DbContext
             e.Property(x => x.Status).HasMaxLength(20);
             e.Property(x => x.PnlDollar).HasPrecision(18, 8);
             e.Property(x => x.Commission).HasPrecision(18, 8);
+            e.Property(x => x.FundingPnl).HasPrecision(18, 8);
             e.HasOne(x => x.Strategy)
                 .WithMany(s => s.Trades)
                 .HasForeignKey(x => x.StrategyId)

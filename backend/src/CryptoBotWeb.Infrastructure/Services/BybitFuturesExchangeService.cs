@@ -373,9 +373,15 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             if (!result.Success || result.Data?.List == null)
                 return null;
 
+            // In one-way mode, Bybit returns Side as Buy/Sell, but callers pass Long/Short
+            var mappedSide = side.Equals("Long", StringComparison.OrdinalIgnoreCase) ? "Buy"
+                           : side.Equals("Short", StringComparison.OrdinalIgnoreCase) ? "Sell"
+                           : side;
+
             var pos = result.Data.List.FirstOrDefault(p =>
                 p.Symbol == bybitSymbol &&
-                p.Side.ToString().Equals(side, StringComparison.OrdinalIgnoreCase) &&
+                (p.Side.ToString().Equals(side, StringComparison.OrdinalIgnoreCase) ||
+                 p.Side.ToString().Equals(mappedSide, StringComparison.OrdinalIgnoreCase)) &&
                 p.Quantity != 0);
 
             if (pos == null)
@@ -393,6 +399,78 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Fetches funding fee payment history from Bybit transaction logs (type = Settlement).
+    /// Bybit V5 transaction log API filters by baseAsset (e.g. "BTC"), not by full symbol.
+    /// We post-filter results by symbol to ensure accuracy.
+    /// </summary>
+    public async Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            // Extract base asset from symbol (e.g. "BTCUSDT" -> "BTC")
+            var baseAsset = bybitSymbol.Replace("USDT", "", StringComparison.OrdinalIgnoreCase);
+            var payments = new List<FundingPaymentDto>();
+            string? cursor = null;
+
+            do
+            {
+                var result = await _client.V5Api.Account.GetTransactionHistoryAsync(
+                    category: Category.Linear,
+                    baseAsset: baseAsset,
+                    type: TransactionLogType.Settlement,
+                    startTime: startTime,
+                    limit: 50,
+                    cursor: cursor);
+
+                if (!result.Success || result.Data?.List == null)
+                    break;
+
+                foreach (var log in result.Data.List)
+                {
+                    // Post-filter by exact symbol in case baseAsset matches multiple pairs
+                    if (!string.IsNullOrEmpty(log.Symbol) &&
+                        !log.Symbol.Equals(bybitSymbol, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    payments.Add(new FundingPaymentDto
+                    {
+                        Symbol = symbol,
+                        Amount = log.Funding ?? 0m,
+                        FundingRate = log.FeeRate ?? 0m,
+                        PositionSize = Math.Abs(log.Size ?? 0m),
+                        Timestamp = log.TransactionTime
+                    });
+                }
+
+                cursor = result.Data.NextPageCursor;
+            }
+            while (!string.IsNullOrEmpty(cursor));
+
+            return payments.OrderByDescending(p => p.Timestamp).ToList();
+        }
+        catch (Exception)
+        {
+            return new List<FundingPaymentDto>();
+        }
+    }
+
+    public async Task<bool> SetLeverageAsync(string symbol, int leverage)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var result = await _client.V5Api.Account.SetLeverageAsync(
+                Category.Linear, bybitSymbol, leverage, leverage);
+            return result.Success;
+        }
+        catch
+        {
+            return false;
         }
     }
 
