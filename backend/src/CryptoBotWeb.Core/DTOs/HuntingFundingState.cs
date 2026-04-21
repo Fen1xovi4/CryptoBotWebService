@@ -27,6 +27,7 @@ public class HuntingFundingState
     public decimal? LastPrice { get; set; }
     public DateTime? CooldownUntil { get; set; }
     public bool RemainingOrdersCancelled { get; set; }
+    public DateTime? LastSkipLogAt { get; set; } // throttle for pre-funding skip diagnostics
 }
 
 public class PlacedOrderInfo

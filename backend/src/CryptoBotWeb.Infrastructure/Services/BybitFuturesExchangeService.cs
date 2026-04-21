@@ -220,7 +220,7 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         return list;
     }
 
-    public async Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity)
+    public async Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity, bool reduceOnly = false)
     {
         try
         {

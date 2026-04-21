@@ -220,19 +220,76 @@ public class FundingTickerRotationService : IFundingTickerRotationService
                     TransferOwnership(strategy.WorkspaceId, oldSymbol, picked.Symbol, strategy.Id);
                 }
 
+                // Pre-arm HuntingFunding: commit the rotation decision into state so the
+                // handler won't re-evaluate per-bot thresholds at funding time. The handler's
+                // `armedAndActive` guard then preserves Direction through rate decay until
+                // funding+60s. Runs every rotation tick (even when symbol didn't change) so
+                // bots stay armed across hourly cycles.
+                if (strategy.Type == StrategyTypes.HuntingFunding)
+                    PreArmHuntingFunding(strategy, picked);
+
                 occupiedTickers.Add(picked.Symbol);
             }
         }
 
-        if (updatedCount > 0)
+        // Always flush — pre-arm may touch StateJson / add StrategyLogs even when no
+        // ticker changed hands.
+        await _db.SaveChangesAsync(ct);
+        _logger.LogInformation("Ticker rotation completed: {Count} strategies with ticker changes", updatedCount);
+    }
+
+    private void PreArmHuntingFunding(Strategy strategy, FundingRateDto picked)
+    {
+        HuntingFundingState state;
+        try
         {
-            await _db.SaveChangesAsync(ct);
-            _logger.LogInformation("Ticker rotation completed: {Count} strategies updated", updatedCount);
+            state = JsonSerializer.Deserialize<HuntingFundingState>(strategy.StateJson, JsonOptions)
+                    ?? new HuntingFundingState();
         }
-        else
+        catch
         {
-            _logger.LogInformation("Ticker rotation: no changes needed");
+            return;
         }
+
+        // Only arm bots sitting idle in WaitingForFunding — never disturb an
+        // active cycle (OrdersPlaced / InPosition / Cooldown).
+        if (state.Phase != HuntingFundingPhase.WaitingForFunding)
+            return;
+
+        var direction = picked.Rate < 0 ? "Long" : "Short";
+        state.Direction = direction;
+        state.CurrentFundingRate = picked.Rate;
+        state.LastSkipLogAt = null;
+
+        // BingX (and sometimes other exchanges) occasionally return a stale
+        // `NextFundingTime` that is ~now or in the past — e.g. we observed
+        // 15:50:08Z at a 15:50:08 rotation tick. Writing that blindly would
+        // trip the threshold check immediately and cause a spurious early
+        // placement → 60s timeout → cancel-all → Cooldown (wastes a cycle).
+        // Only accept `picked.NextFundingTime` when it's genuinely in the
+        // future (> now + 2 min). Otherwise leave whatever the handler has
+        // already validated via its own drift/rollover guard.
+        var nowUtc = DateTime.UtcNow;
+        var nextFundingForLog = state.NextFundingTime;
+        if (picked.NextFundingTime > nowUtc.AddMinutes(2))
+        {
+            state.NextFundingTime = picked.NextFundingTime;
+            nextFundingForLog = picked.NextFundingTime;
+        }
+
+        strategy.StateJson = JsonSerializer.Serialize(state, JsonOptions);
+
+        var nextFundingStr = nextFundingForLog.HasValue
+            ? nextFundingForLog.Value.ToString("u")
+            : "(unset)";
+        _db.StrategyLogs.Add(new StrategyLog
+        {
+            Id = Guid.NewGuid(),
+            StrategyId = strategy.Id,
+            Level = "Info",
+            Message = $"Armed by rotation: direction={direction}, nextFunding={nextFundingStr}, rate={picked.Rate:P4}",
+            CreatedAt = DateTime.UtcNow
+        });
     }
 
     private static bool IsAutoRotateEnabled(Strategy strategy)
