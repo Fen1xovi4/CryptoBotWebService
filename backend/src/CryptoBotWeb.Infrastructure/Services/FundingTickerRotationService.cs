@@ -14,6 +14,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 {
     private readonly AppDbContext _db;
     private readonly IExchangeServiceFactory _factory;
+    private readonly ISymbolBlacklistService _blacklist;
     private readonly ILogger<FundingTickerRotationService> _logger;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -25,10 +26,12 @@ public class FundingTickerRotationService : IFundingTickerRotationService
     public FundingTickerRotationService(
         AppDbContext db,
         IExchangeServiceFactory factory,
+        ISymbolBlacklistService blacklist,
         ILogger<FundingTickerRotationService> logger)
     {
         _db = db;
         _factory = factory;
+        _blacklist = blacklist;
         _logger = logger;
     }
 
@@ -68,6 +71,17 @@ public class FundingTickerRotationService : IFundingTickerRotationService
                     activeSymbols.Select(s => s.Symbol.ToUpperInvariant()),
                     StringComparer.OrdinalIgnoreCase);
                 rates.RemoveAll(r => !activeSet.Contains(r.Symbol.ToUpperInvariant()));
+
+                // Filter out symbols blacklisted after recent exchange errors (e.g. delisted / not supported for orders).
+                var blacklist = await _blacklist.GetActiveSetAsync(account.ExchangeType, ct);
+                if (blacklist.Count > 0)
+                {
+                    var before = rates.Count;
+                    rates.RemoveAll(r => blacklist.Contains(r.Symbol.ToUpperInvariant()));
+                    _logger.LogInformation(
+                        "Blacklist dropped {Dropped} symbols for {Exchange} ({BlacklistCount} entries)",
+                        before - rates.Count, account.ExchangeType, blacklist.Count);
+                }
 
                 // Sort by absolute rate descending
                 rates.Sort((a, b) => Math.Abs(b.Rate).CompareTo(Math.Abs(a.Rate)));

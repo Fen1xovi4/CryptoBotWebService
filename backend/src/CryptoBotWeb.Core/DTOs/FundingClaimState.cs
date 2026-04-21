@@ -20,6 +20,7 @@ public class FundingClaimState
     public int CycleCount { get; set; }
     public decimal CycleTotalPnl { get; set; }
     public decimal CycleTotalFundingPnl { get; set; }
+    public decimal CurrentCycleFundingPnl { get; set; } // funding earned in current open position
     public decimal? LastPrice { get; set; }
     public DateTime? LastHourlyCheckAt { get; set; } // throttle: one check per hour
 }

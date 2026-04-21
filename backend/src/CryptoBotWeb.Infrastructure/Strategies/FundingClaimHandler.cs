@@ -22,13 +22,19 @@ public class FundingClaimHandler : IStrategyHandler
     private readonly AppDbContext _db;
     private readonly ILogger<FundingClaimHandler> _logger;
     private readonly ITelegramSignalService _telegramSignalService;
+    private readonly ISymbolBlacklistService _blacklist;
+    private readonly IFundingTickerRotationService _rotation;
 
     public FundingClaimHandler(AppDbContext db, ILogger<FundingClaimHandler> logger,
-        ITelegramSignalService telegramSignalService)
+        ITelegramSignalService telegramSignalService,
+        ISymbolBlacklistService blacklist,
+        IFundingTickerRotationService rotation)
     {
         _db = db;
         _logger = logger;
         _telegramSignalService = telegramSignalService;
+        _blacklist = blacklist;
+        _rotation = rotation;
     }
 
     public async Task ProcessAsync(Strategy strategy, IFuturesExchangeService exchange, CancellationToken ct)
@@ -118,6 +124,11 @@ public class FundingClaimHandler : IStrategyHandler
             Log(strategy, "Error", $"Failed to open {direction} market order: {result.ErrorMessage}");
             _logger.LogError("Strategy {Id}: Failed to open {Dir}: {Error}",
                 strategy.Id, direction, result.ErrorMessage);
+
+            if (IsUnsupportedSymbolError(result.ErrorMessage))
+            {
+                await BlacklistAndRotateAsync(strategy, config.Symbol, result.ErrorMessage!, ct);
+            }
             return;
         }
 
@@ -194,23 +205,24 @@ public class FundingClaimHandler : IStrategyHandler
                 var commission = totalUsdt * 2m * 0.0005m;
                 var netPnl = pnlDollar - commission;
 
-                // Fetch funding payments earned during this position
+                // Fetch definitive funding payments for this position
                 var payments = await exchange.GetFundingPaymentsAsync(symbol, state.PositionOpenedAt);
-                var totalFundingPnl = payments.Sum(p => p.Amount);
+                var positionFundingPnl = payments.Sum(p => p.Amount);
 
                 var closeSide = posSide == "Long" ? "Sell" : "Buy";
                 RecordTrade(strategy, symbol, closeSide, quantity, closePrice,
                     null, "ExternalClose", pnlDollar: netPnl, commission: commission,
-                    fundingPnl: totalFundingPnl);
+                    fundingPnl: positionFundingPnl);
 
                 state.CycleTotalPnl += netPnl;
-                state.CycleTotalFundingPnl = totalFundingPnl;
+                state.CycleTotalFundingPnl += positionFundingPnl;
+                state.CurrentCycleFundingPnl = 0;
                 state.CycleCount++;
 
                 Log(strategy, "Warning",
                     $"Position closed externally — {posSide} {symbol}: closePrice={Math.Round(closePrice, 6)}, " +
                     $"entry={Math.Round(entryPrice, 6)}, tradingPnL=${Math.Round(netPnl, 2)}, " +
-                    $"fundingPnL=${Math.Round(totalFundingPnl, 4)}, cycle #{state.CycleCount}");
+                    $"fundingPnL=${Math.Round(positionFundingPnl, 4)}, cycle #{state.CycleCount}");
                 _logger.LogWarning("Strategy {Id}: Position gone externally for {Symbol} side={Side}, PnL=${Pnl}",
                     strategy.Id, symbol, posSide, Math.Round(netPnl, 2));
                 await ResetToIdle(strategy, config, state, exchange, ct);
@@ -272,19 +284,15 @@ public class FundingClaimHandler : IStrategyHandler
             var payments = await exchange.GetFundingPaymentsAsync(symbol, state.PositionOpenedAt);
             if (payments.Count > 0)
             {
-                // Only count payments we haven't counted yet (after last NextFundingTime - interval)
-                var newPayments = payments
-                    .Where(p => !state.LastHourlyCheckAt.HasValue ||
-                                p.Timestamp > state.NextFundingTime.Value.AddMinutes(-5))
-                    .ToList();
-
-                decimal newFunding = newPayments.Sum(p => p.Amount);
-                if (newFunding != 0)
+                // Use the full sum as the definitive total for this position
+                decimal totalFunding = payments.Sum(p => p.Amount);
+                decimal delta = totalFunding - state.CurrentCycleFundingPnl;
+                if (delta != 0)
                 {
-                    state.CycleTotalFundingPnl += newFunding;
+                    state.CurrentCycleFundingPnl = totalFunding;
                     Log(strategy, "Info",
-                        $"Funding payment: ${Math.Round(newFunding, 4)}, " +
-                        $"total funding=${Math.Round(state.CycleTotalFundingPnl, 4)}");
+                        $"Funding payment: +${Math.Round(delta, 4)}, " +
+                        $"position funding=${Math.Round(state.CurrentCycleFundingPnl, 4)}");
                 }
             }
 
@@ -372,28 +380,29 @@ public class FundingClaimHandler : IStrategyHandler
         var commission = totalUsdt * 2m * 0.0005m;
         var netPnl = pnlDollar - commission;
 
-        // Fetch final funding payments
+        // Fetch definitive funding payments for this position
         var payments = await exchange.GetFundingPaymentsAsync(symbol, state.PositionOpenedAt);
-        var totalFundingPnl = payments.Sum(p => p.Amount);
+        var positionFundingPnl = payments.Sum(p => p.Amount);
 
         RecordTrade(strategy, symbol, closeSide, quantity, closePrice,
             result.OrderId, reason, pnlDollar: netPnl, commission: commission,
-            fundingPnl: totalFundingPnl);
+            fundingPnl: positionFundingPnl);
 
         state.CycleTotalPnl += netPnl;
-        state.CycleTotalFundingPnl = totalFundingPnl; // use final total from exchange
+        state.CycleTotalFundingPnl += positionFundingPnl;
+        state.CurrentCycleFundingPnl = 0;
         state.CycleCount++;
 
         Log(strategy, "Info",
             $"{state.Direction} closed ({reason}): price={closePrice}, entry={Math.Round(avgEntry, 6)}, " +
             $"qty={Math.Round(quantity, 6)}, tradingPnL=${Math.Round(netPnl, 2)}, " +
-            $"fundingPnL=${Math.Round(totalFundingPnl, 4)}, commission=${Math.Round(commission, 2)}, " +
+            $"fundingPnL=${Math.Round(positionFundingPnl, 4)}, commission=${Math.Round(commission, 2)}, " +
             $"cycle #{state.CycleCount}, totalPnl=${Math.Round(state.CycleTotalPnl, 2)}, " +
             $"totalFunding=${Math.Round(state.CycleTotalFundingPnl, 4)}");
         _logger.LogInformation(
             "Strategy {Id}: {Dir} closed ({Reason}) at {Price}, NetPnl={NetPnl}, FundingPnl={FundingPnl}, Cycle={Cycle}",
             strategy.Id, state.Direction, reason, closePrice, Math.Round(netPnl, 2),
-            Math.Round(totalFundingPnl, 4), state.CycleCount);
+            Math.Round(positionFundingPnl, 4), state.CycleCount);
 
         await ResetToIdle(strategy, config, state, exchange, ct);
     }
@@ -423,6 +432,7 @@ public class FundingClaimHandler : IStrategyHandler
         state.EntrySizeUsdt = null;
         state.PositionOpenedAt = null;
         state.LastHourlyCheckAt = null;
+        state.CurrentCycleFundingPnl = 0;
         state.Phase = FundingClaimPhase.Idle;
 
         if (funding != null)
@@ -497,5 +507,33 @@ public class FundingClaimHandler : IStrategyHandler
             Message = message,
             CreatedAt = DateTime.UtcNow
         });
+    }
+
+    private static bool IsUnsupportedSymbolError(string? errorMessage)
+    {
+        if (string.IsNullOrEmpty(errorMessage)) return false;
+        var msg = errorMessage.ToLowerInvariant();
+        return msg.Contains("not supported")
+            || msg.Contains("unsupported symbol")
+            || msg.Contains("invalid symbol")
+            || msg.Contains("symbol does not exist");
+    }
+
+    private async Task BlacklistAndRotateAsync(Strategy strategy, string symbol, string reason, CancellationToken ct)
+    {
+        try
+        {
+            await _blacklist.AddOrRefreshAsync(strategy.Account.ExchangeType, symbol, reason, ct);
+            Log(strategy, "Warning",
+                $"Symbol {symbol} blacklisted for 3 days (reason: {reason}). Triggering ticker rotation.");
+
+            await _rotation.RotateTickersAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Strategy {Id}: Failed to blacklist/rotate after unsupported symbol {Symbol}",
+                strategy.Id, symbol);
+        }
     }
 }

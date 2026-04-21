@@ -1271,6 +1271,7 @@ interface FCStateData {
   cycleCount: number;
   cycleTotalPnl: number;
   cycleTotalFundingPnl: number;
+  currentCycleFundingPnl: number;
   lastPrice: number | null;
 }
 
@@ -1746,9 +1747,18 @@ function FundingClaimCard({
                 </span>
               )}
             </div>
-            {state?.cycleTotalFundingPnl != null && (
-              <div className={`text-[10px] font-medium ${state.cycleTotalFundingPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                Funding PnL: {state.cycleTotalFundingPnl >= 0 ? '+' : ''}${state.cycleTotalFundingPnl.toFixed(2)}
+            {state?.currentCycleFundingPnl != null && (
+              <div className={`text-[10px] font-medium ${state.currentCycleFundingPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                Funding PnL: {state.currentCycleFundingPnl >= 0 ? '+' : ''}${state.currentCycleFundingPnl.toFixed(4)}
+              </div>
+            )}
+            {state?.currentFundingRate != null && (
+              <div className="text-[11px] text-text-secondary flex items-center gap-2">
+                <span>
+                  Текущий funding: <span className={`font-mono font-semibold ${state.currentFundingRate >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                    {state.currentFundingRate >= 0 ? '+' : ''}{(state.currentFundingRate * 100).toFixed(4)}%
+                  </span>
+                </span>
               </div>
             )}
             {state?.nextFundingTime && (
@@ -1774,11 +1784,14 @@ function FundingClaimCard({
             PnL: {state.cycleTotalPnl >= 0 ? '+' : ''}${state.cycleTotalPnl.toFixed(2)}
           </span>
         )}
-        {state != null && state.cycleTotalFundingPnl != null && (
-          <span className={`text-[10px] font-medium ${state.cycleTotalFundingPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-            Funding: {state.cycleTotalFundingPnl >= 0 ? '+' : ''}${state.cycleTotalFundingPnl.toFixed(2)}
-          </span>
-        )}
+        {state != null && (state.cycleTotalFundingPnl != null || state.currentCycleFundingPnl != null) && (() => {
+          const totalF = (state.cycleTotalFundingPnl ?? 0) + (state.currentCycleFundingPnl ?? 0);
+          return (
+            <span className={`text-[10px] font-medium ${totalF >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+              Funding: {totalF >= 0 ? '+' : ''}${totalF.toFixed(4)}
+            </span>
+          );
+        })()}
       </div>
 
       {/* Divider */}

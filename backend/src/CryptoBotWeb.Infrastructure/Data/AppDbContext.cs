@@ -24,6 +24,7 @@ public class AppDbContext : DbContext
     public DbSet<SupportMessage> SupportMessages => Set<SupportMessage>();
     public DbSet<TelegramBot> TelegramBots => Set<TelegramBot>();
     public DbSet<TelegramSubscriber> TelegramSubscribers => Set<TelegramSubscriber>();
+    public DbSet<SymbolBlacklistEntry> SymbolBlacklist => Set<SymbolBlacklistEntry>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -307,6 +308,18 @@ public class AppDbContext : DbContext
                 .HasForeignKey(x => x.TelegramBotId)
                 .OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => new { x.TelegramBotId, x.ChatId }).IsUnique();
+        });
+
+        modelBuilder.Entity<SymbolBlacklistEntry>(e =>
+        {
+            e.ToTable("symbol_blacklist");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.ExchangeType).HasConversion<short>();
+            e.Property(x => x.Symbol).HasMaxLength(30);
+            e.Property(x => x.Reason).HasMaxLength(500);
+            e.HasIndex(x => new { x.ExchangeType, x.Symbol }).IsUnique();
+            e.HasIndex(x => x.ExpiresAt);
         });
     }
 }

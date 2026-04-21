@@ -22,13 +22,19 @@ public class HuntingFundingHandler : IStrategyHandler
     private readonly AppDbContext _db;
     private readonly ILogger<HuntingFundingHandler> _logger;
     private readonly ITelegramSignalService _telegramSignalService;
+    private readonly ISymbolBlacklistService _blacklist;
+    private readonly IFundingTickerRotationService _rotation;
 
     public HuntingFundingHandler(AppDbContext db, ILogger<HuntingFundingHandler> logger,
-        ITelegramSignalService telegramSignalService)
+        ITelegramSignalService telegramSignalService,
+        ISymbolBlacklistService blacklist,
+        IFundingTickerRotationService rotation)
     {
         _db = db;
         _logger = logger;
         _telegramSignalService = telegramSignalService;
+        _blacklist = blacklist;
+        _rotation = rotation;
     }
 
     public async Task ProcessAsync(Strategy strategy, IFuturesExchangeService exchange, CancellationToken ct)
@@ -233,6 +239,14 @@ public class HuntingFundingHandler : IStrategyHandler
                         $"Funding settlement in progress — skipping remaining {config.Levels.Count - i - 1} levels. " +
                         $"Consider increasing SecondsBeforeFunding (current={config.SecondsBeforeFunding}) to ≥65 for BingX");
                     break;
+                }
+
+                // Symbol delisted / not supported for orders on this exchange — blacklist + rotate,
+                // and stop trying remaining levels (they will all fail with the same error).
+                if (IsUnsupportedSymbolError(result.ErrorMessage))
+                {
+                    await BlacklistAndRotateAsync(strategy, config.Symbol, result.ErrorMessage!, ct);
+                    return;
                 }
             }
         }
@@ -640,5 +654,33 @@ public class HuntingFundingHandler : IStrategyHandler
             Message = message,
             CreatedAt = DateTime.UtcNow
         });
+    }
+
+    private static bool IsUnsupportedSymbolError(string? errorMessage)
+    {
+        if (string.IsNullOrEmpty(errorMessage)) return false;
+        var msg = errorMessage.ToLowerInvariant();
+        return msg.Contains("not supported")
+            || msg.Contains("unsupported symbol")
+            || msg.Contains("invalid symbol")
+            || msg.Contains("symbol does not exist");
+    }
+
+    private async Task BlacklistAndRotateAsync(Strategy strategy, string symbol, string reason, CancellationToken ct)
+    {
+        try
+        {
+            await _blacklist.AddOrRefreshAsync(strategy.Account.ExchangeType, symbol, reason, ct);
+            Log(strategy, "Warning",
+                $"Symbol {symbol} blacklisted for 3 days (reason: {reason}). Triggering ticker rotation.");
+
+            await _rotation.RotateTickersAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Strategy {Id}: Failed to blacklist/rotate after unsupported symbol {Symbol}",
+                strategy.Id, symbol);
+        }
     }
 }

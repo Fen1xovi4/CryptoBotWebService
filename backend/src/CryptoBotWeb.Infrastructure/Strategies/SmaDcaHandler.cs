@@ -119,19 +119,27 @@ public class SmaDcaHandler : IStrategyHandler
                 return;
             }
 
-            // Verify the stored TP is still alive on the exchange. Manual cancel or an exchange-side
-            // drop (risk engine, margin change) won't close the position, so CheckLimitTpFilled
-            // misses it. Clear the id here; the self-heal below then re-places the TP.
+            // Verify the stored TP is still alive on the exchange. Returns true if the verification
+            // detected the position is also gone — treat as TP fill and exit.
             if (!string.IsNullOrEmpty(state.TakeProfitOrderId))
-                await VerifyTakeProfitAlive(strategy, config, state, exchange);
+            {
+                if (await VerifyTakeProfitAlive(strategy, config, state, exchange))
+                {
+                    SaveState(strategy, state);
+                    await _db.SaveChangesAsync(ct);
+                    return;
+                }
+            }
 
             // Heal: if we're in position but have no active TP limit (startup / previous placement failed
-            // / TP vanished from the exchange) → place one.
+            // / TP vanished from the exchange) → place one. PlaceTakeProfitLimit also self-heals
+            // state if the exchange reports the position is gone.
             if (string.IsNullOrEmpty(state.TakeProfitOrderId))
             {
                 await PlaceTakeProfitLimit(strategy, config, state, exchange);
                 SaveState(strategy, state);
                 await _db.SaveChangesAsync(ct);
+                if (!state.InPosition) return;
             }
         }
 
@@ -420,7 +428,55 @@ public class SmaDcaHandler : IStrategyHandler
         var exchangeHasPosition = pos != null && pos.Quantity > 0;
         if (exchangeHasPosition) return false;
 
-        // Position closed on exchange while our TP limit was active → treat as TP fill.
+        // Bitget (and possibly others) occasionally return an empty position response while
+        // the position is actually still open. Before trusting that signal, verify the TP
+        // order itself is no longer live. If it's still Open/PartiallyFilled, the position
+        // must still exist and GetPositionAsync just gave a stale/empty response.
+        OrderStatusDto? tpOrder;
+        try
+        {
+            tpOrder = await exchange.GetOrderAsync(config.Symbol, state.TakeProfitOrderId!);
+        }
+        catch (NotSupportedException)
+        {
+            // Exchange can't confirm — fall back to the old position-only heuristic.
+            await RecordLimitTpFillAndReset(strategy, config, state, exchange);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SmaDca: TP-fill verify GetOrderAsync failed for {OrderId} — skipping reset this cycle",
+                state.TakeProfitOrderId);
+            return false;
+        }
+
+        if (tpOrder != null
+            && (tpOrder.Status == OrderLifecycleStatus.Open
+                || tpOrder.Status == OrderLifecycleStatus.PartiallyFilled))
+        {
+            _logger.LogWarning(
+                "Strategy {Id}: GetPositionAsync reported empty but TP order {OrderId} still {Status} — treating as stale position response, skipping reset",
+                strategy.Id, state.TakeProfitOrderId, tpOrder.Status);
+            Log(strategy, "Warning",
+                $"⚠️ Биржа вернула пустую позицию, но TP #{state.TakeProfitOrderId} ещё {tpOrder.Status} — игнорирую ложное срабатывание");
+            return false;
+        }
+
+        // tpOrder is null (purged after fill), Filled, Cancelled, Rejected, or Unknown → reset is safe.
+        await RecordLimitTpFillAndReset(strategy, config, state, exchange);
+        return true;
+    }
+
+    /// <summary>
+    /// Records a TP-fill trade at state.CurrentTakeProfit, updates realized PnL, cancels any
+    /// hanging DCA limit, and resets position state. Called from CheckLimitTpFilled (TP id known +
+    /// position gone) and VerifyTakeProfitAlive (TP missing/cancelled on exchange + position gone).
+    /// Best-effort: assumes the limit filled at TP price; actual fill price isn't recoverable when
+    /// the order has already been purged from the exchange's active list.
+    /// </summary>
+    private async Task RecordLimitTpFillAndReset(Strategy strategy, SmaDcaConfig config,
+        SmaDcaState state, IFuturesExchangeService exchange)
+    {
         var tpPrice = state.CurrentTakeProfit;
         var qtyClosed = state.TotalQuantity;
         var pnlPct = ComputePnlPercent(state.IsLong, state.AverageEntryPrice, tpPrice);
@@ -441,7 +497,6 @@ public class SmaDcaHandler : IStrategyHandler
             "Strategy {Id}: SmaDca LIMIT TP filled qty={Qty} @ {Price}, avg={Avg}, netPnL={Pnl}",
             strategy.Id, qtyClosed, tpPrice, state.AverageEntryPrice, netPnl);
 
-        // Position is gone — any pending DCA limit would otherwise reopen a mistaken position.
         if (!string.IsNullOrEmpty(state.DcaOrderId))
         {
             var dcaId = state.DcaOrderId;
@@ -451,7 +506,6 @@ public class SmaDcaHandler : IStrategyHandler
 
         ResetPositionState(state);
         state.SkipNextCandle = true;
-        return true;
     }
 
     // ───────── Sync helpers ─────────
@@ -620,13 +674,27 @@ public class SmaDcaHandler : IStrategyHandler
                 state.TakeProfitOrderId = result.OrderId;
                 Log(strategy, "Info",
                     $"🎯 TP лимит выставлен: {closeSide} {state.TotalQuantity} @ {Math.Round(state.CurrentTakeProfit, 6)} (id={result.OrderId})");
+                return;
             }
-            else
+
+            state.TakeProfitOrderId = null;
+            var err = result.ErrorMessage ?? "";
+
+            // Bitget returns "No position to close" / "number of closed positions cannot exceed..."
+            // when the position is already gone. Without this check the heal path retries forever
+            // (we saw 3500+ retries in 10h on TEST2). Treat as an external close: record TP fill
+            // and reset state so a fresh entry can fire on the next signal.
+            if (err.Contains("No position", StringComparison.OrdinalIgnoreCase)
+                || err.Contains("number of closed positions", StringComparison.OrdinalIgnoreCase))
             {
-                state.TakeProfitOrderId = null;
-                Log(strategy, "Error", $"Не удалось выставить TP лимит: {result.ErrorMessage}");
-                _logger.LogError("Strategy {Id}: TP placement failed: {Error}", strategy.Id, result.ErrorMessage);
+                Log(strategy, "Warning",
+                    $"TP не выставлен — биржа сообщает: позиции нет ({err}). Фиксирую закрытие и сбрасываю state.");
+                await RecordLimitTpFillAndReset(strategy, config, state, exchange);
+                return;
             }
+
+            Log(strategy, "Error", $"Не удалось выставить TP лимит: {err}");
+            _logger.LogError("Strategy {Id}: TP placement failed: {Error}", strategy.Id, err);
         }
         catch (NotSupportedException)
         {
@@ -675,40 +743,64 @@ public class SmaDcaHandler : IStrategyHandler
     }
 
     /// <summary>
-    /// Checks that the stored TP order is still live on the exchange. If it's Cancelled/Rejected
-    /// or the exchange has no record of it, clears state.TakeProfitOrderId so the self-heal
-    /// re-places it. Filled TPs are handled by CheckLimitTpFilled via the position-gone heuristic.
-    /// Network/unsupported errors leave state untouched.
+    /// Checks that the stored TP order is still live on the exchange. If the order is missing
+    /// (null) or Cancelled/Rejected, also probes the position: if it's gone, the TP must have
+    /// closed it (or the user manually closed) → record as TP fill and reset state. If the
+    /// position is still alive, just clear the id so the heal step re-places the TP.
+    ///
+    /// Returns true when the position was detected as closed and state was reset (caller should
+    /// persist and exit). Network/unsupported errors leave state untouched and return false.
     /// </summary>
-    private async Task VerifyTakeProfitAlive(Strategy strategy, SmaDcaConfig config, SmaDcaState state,
-        IFuturesExchangeService exchange)
+    private async Task<bool> VerifyTakeProfitAlive(Strategy strategy, SmaDcaConfig config,
+        SmaDcaState state, IFuturesExchangeService exchange)
     {
-        if (string.IsNullOrEmpty(state.TakeProfitOrderId)) return;
+        if (string.IsNullOrEmpty(state.TakeProfitOrderId)) return false;
         var orderId = state.TakeProfitOrderId;
 
         OrderStatusDto? status;
         try { status = await exchange.GetOrderAsync(config.Symbol, orderId); }
-        catch (NotSupportedException) { return; }
+        catch (NotSupportedException) { return false; }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "SmaDca: TP verify GetOrderAsync failed for {Id}", orderId);
-            return;
+            return false;
         }
 
-        if (status == null)
+        var orderMissing = status == null;
+        var orderCancelled = status != null
+            && (status.Status == OrderLifecycleStatus.Cancelled || status.Status == OrderLifecycleStatus.Rejected);
+        if (!orderMissing && !orderCancelled) return false;
+
+        // Order is gone or cancelled — check if the position is also gone (TP filled / external close).
+        PositionDto? pos;
+        try { pos = await exchange.GetPositionAsync(config.Symbol, config.Direction); }
+        catch (NotSupportedException)
         {
+            // Can't probe → fall back to the old behaviour: clear id, let heal re-place.
             Log(strategy, "Warning",
-                $"TP лимит #{orderId} не найден на бирже — сбрасываю id, будет поставлен новый");
+                $"TP лимит #{orderId} {(orderMissing ? "не найден" : status!.Status.ToString())} — сбрасываю id, будет поставлен новый");
             state.TakeProfitOrderId = null;
-            return;
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SmaDca: TP verify GetPositionAsync failed for {Symbol}", config.Symbol);
+            return false;
         }
 
-        if (status.Status == OrderLifecycleStatus.Cancelled || status.Status == OrderLifecycleStatus.Rejected)
+        var positionGone = pos == null || pos.Quantity <= 0;
+        if (positionGone)
         {
-            Log(strategy, "Warning",
-                $"TP лимит #{orderId} {status.Status} на бирже — сбрасываю id, будет поставлен новый");
-            state.TakeProfitOrderId = null;
+            Log(strategy, "Info",
+                $"TP лимит #{orderId} {(orderMissing ? "исчез" : status!.Status.ToString())} и позиция закрыта на бирже — фиксирую TP fill");
+            await RecordLimitTpFillAndReset(strategy, config, state, exchange);
+            return true;
         }
+
+        Log(strategy, "Warning",
+            $"TP лимит #{orderId} {(orderMissing ? "не найден" : status!.Status.ToString())} — сбрасываю id, будет поставлен новый");
+        state.TakeProfitOrderId = null;
+        return false;
     }
 
     // ───────── Entry limit lifecycle ─────────
