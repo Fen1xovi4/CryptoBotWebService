@@ -1910,17 +1910,26 @@ function FundingClaimCard({
 
 /* ── SMA DCA Card ──────────────────────────────────────── */
 
+interface SmaDcaLevel {
+  stepPercent: number;
+  multiplier: number;
+  count: number;
+}
+
 interface SmaDcaCfg {
   symbol: string;
   timeframe: string;
   direction: string;
   smaPeriod: number;
   takeProfitPercent: number;
+  // legacy scalar fields — kept for backward compat (server synthesises a tier from these when levels is empty)
   dcaStepPercent: number;
   dcaTriggerBase?: string;
   dcaMultiplier: number;
   maxDcaLevels: number;
   positionSizeUsd: number;
+  // tiered DCA model
+  levels?: SmaDcaLevel[];
 }
 
 interface SmaDcaStateData {
@@ -1974,6 +1983,12 @@ function SmaDcaCard({
     ? inPos ? 'border-l-accent-yellow' : 'border-l-accent-green'
     : 'border-l-border';
 
+  // Resolve tiered DCA config (supports both new levels[] and legacy scalar fields)
+  const cfgTiersForCard: SmaDcaLevel[] = (cfg?.levels && cfg.levels.length > 0)
+    ? cfg.levels
+    : [{ stepPercent: cfg?.dcaStepPercent ?? 0, multiplier: cfg?.dcaMultiplier ?? 1, count: cfg?.maxDcaLevels ?? 0 }];
+  const totalMax = cfgTiersForCard.reduce((s, t) => s + t.count, 0);
+
   // PnL vs avg entry, using lastPrice
   let pnlPct = 0;
   let pnlUsd = 0;
@@ -1988,15 +2003,23 @@ function SmaDcaCard({
 
     // Next DCA trigger (mirrors SmaDcaHandler.cs trigger logic)
     const dcaLevel = state.dcaLevel ?? 0;
-    const maxDca = cfg?.maxDcaLevels ?? 0;
-    const step = cfg?.dcaStepPercent ?? 0;
-    if (dcaLevel < maxDca && step > 0) {
+    // Walk tiers to find which tier is active at dcaLevel
+    let cumulative = 0;
+    let currentTierStep = 0;
+    for (const tier of cfgTiersForCard) {
+      if (dcaLevel < cumulative + tier.count) {
+        currentTierStep = tier.stepPercent;
+        break;
+      }
+      cumulative += tier.count;
+    }
+    if (dcaLevel < totalMax && currentTierStep > 0) {
       const triggerBase = (cfg?.dcaTriggerBase === 'LastFill' && (state.lastDcaPrice ?? 0) > 0)
         ? state.lastDcaPrice
         : avg;
       nextDcaPrice = isLong
-        ? triggerBase * (1 - step / 100)
-        : triggerBase * (1 + step / 100);
+        ? triggerBase * (1 - currentTierStep / 100)
+        : triggerBase * (1 + currentTierStep / 100);
     }
 
     if (pnlPct >= 0) {
@@ -2055,13 +2078,10 @@ function SmaDcaCard({
             TP {cfg.takeProfitPercent}%
           </span>
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-            Step {cfg.dcaStepPercent}%
+            {cfgTiersForCard.map((t, i) => `T${i + 1}: ${t.stepPercent}% ×${t.multiplier} ·${t.count}`).join('  |  ')}
           </span>
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-            ×{cfg.dcaMultiplier}
-          </span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-            Max {cfg.maxDcaLevels}
+            Max {totalMax}
           </span>
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
             ${cfg.positionSizeUsd}
@@ -2091,7 +2111,7 @@ function SmaDcaCard({
                 </span>
               </div>
               <span className={`text-[10px] font-medium ${(state?.dcaLevel ?? 0) > 0 ? 'text-accent-yellow' : 'text-text-secondary'}`}>
-                DCA {state?.dcaLevel ?? 0}/{cfg?.maxDcaLevels ?? 0}
+                DCA {state?.dcaLevel ?? 0}/{totalMax}
               </span>
             </div>
             {state?.lastPrice ? (
@@ -2343,15 +2363,15 @@ function AddStrategyModal({
     direction: 'Long',
     smaPeriod: '50',
     takeProfitPercent: '1.0',
-    dcaStepPercent: '3.0',
-    dcaMultiplier: '3.0',
-    maxDcaLevels: '5',
     positionSizeUsd: '100',
     dcaTriggerBase: 'Average',
     orderType: 'Market',
     entryLimitOffsetPercent: '0.05',
     entryLimitTimeoutBars: '3',
   });
+  const [sdLevels, setSdLevels] = useState<Array<{ stepPercent: string; multiplier: string; count: string }>>(
+    [{ stepPercent: '3.0', multiplier: '3.0', count: '5' }],
+  );
 
   // FundingClaim fields
   const [fcForm, setFcForm] = useState({
@@ -2420,14 +2440,16 @@ function AddStrategyModal({
         direction: sdForm.direction,
         smaPeriod: Number(sdForm.smaPeriod),
         takeProfitPercent: Number(sdForm.takeProfitPercent),
-        dcaStepPercent: Number(sdForm.dcaStepPercent),
-        dcaMultiplier: Number(sdForm.dcaMultiplier),
-        maxDcaLevels: Number(sdForm.maxDcaLevels),
         positionSizeUsd: Number(sdForm.positionSizeUsd),
         dcaTriggerBase: sdForm.dcaTriggerBase,
         orderType: sdForm.orderType,
         entryLimitOffsetPercent: Number(sdForm.entryLimitOffsetPercent),
         entryLimitTimeoutBars: Number(sdForm.entryLimitTimeoutBars),
+        levels: sdLevels.map((l) => ({
+          stepPercent: Number(l.stepPercent),
+          multiplier: Number(l.multiplier),
+          count: Number(l.count),
+        })),
       });
     } else if (strategyType === 'FundingClaim') {
       configJson = JSON.stringify({
@@ -2617,40 +2639,65 @@ function AddStrategyModal({
                 </div>
               </div>
 
-              {/* DCA step + multiplier + max */}
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className={labelCls}>DCA шаг %</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0.01"
-                    value={sdForm.dcaStepPercent}
-                    onChange={(e) => setSdForm({ ...sdForm, dcaStepPercent: e.target.value })}
-                    className={inputCls}
-                  />
+              {/* DCA tiers */}
+              <div>
+                <label className={labelCls}>Уровни DCA</label>
+                <div className="space-y-2">
+                  {sdLevels.map((lvl, i) => (
+                    <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end">
+                      <div>
+                        <label className={labelCls}>DCA шаг, %</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0.01"
+                          value={lvl.stepPercent}
+                          onChange={(e) => setSdLevels(sdLevels.map((l, idx) => idx === i ? { ...l, stepPercent: e.target.value } : l))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>Множитель</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0.1"
+                          value={lvl.multiplier}
+                          onChange={(e) => setSdLevels(sdLevels.map((l, idx) => idx === i ? { ...l, multiplier: e.target.value } : l))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>Доборов</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={lvl.count}
+                          onChange={(e) => setSdLevels(sdLevels.map((l, idx) => idx === i ? { ...l, count: e.target.value } : l))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={sdLevels.length <= 1}
+                        onClick={() => setSdLevels(sdLevels.filter((_, idx) => idx !== i))}
+                        className="pb-0.5 text-accent-red/70 hover:text-accent-red disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        title="Удалить уровень"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
                 </div>
-                <div>
-                  <label className={labelCls}>Множитель</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0.1"
-                    value={sdForm.dcaMultiplier}
-                    onChange={(e) => setSdForm({ ...sdForm, dcaMultiplier: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>Макс. DCA</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={sdForm.maxDcaLevels}
-                    onChange={(e) => setSdForm({ ...sdForm, maxDcaLevels: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setSdLevels([...sdLevels, { stepPercent: '5.0', multiplier: '2.0', count: '2' }])}
+                  className="mt-2 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors"
+                >
+                  + Добавить уровень
+                </button>
               </div>
 
               {/* DCA trigger base */}
@@ -2709,9 +2756,7 @@ function AddStrategyModal({
               )}
 
               <p className="text-xs text-text-secondary italic">
-                {sdForm.dcaTriggerBase === 'LastFill'
-                  ? `Усреднение: при движении на ${sdForm.dcaStepPercent}% от цены последней докупки — докупка qty × ${sdForm.dcaMultiplier}. TP считается от средней и пересчитывается после каждой докупки.`
-                  : `Усреднение: при движении против позиции на ${sdForm.dcaStepPercent}% от текущей средней — докупка qty × ${sdForm.dcaMultiplier}. TP и порог следующего DCA пересчитываются после каждой докупки.`}
+                {`Бот проходит уровни по очереди: сначала выполняет «Доборов» докупок первого уровня с его шагом и множителем, затем переходит к следующему. Когда все уровни исчерпаны — новых DCA нет, бот ждёт TP. Итого докупок: ${sdLevels.reduce((s, l) => s + (Number(l.count) || 0), 0)}.`}
                 {sdForm.orderType === 'Limit' && (
                   <>
                     <br />
@@ -3094,14 +3139,21 @@ function EditStrategyModal({
     direction: cfg.direction || 'Long',
     smaPeriod: String(cfg.smaPeriod ?? 50),
     takeProfitPercent: String(cfg.takeProfitPercent ?? 1.0),
-    dcaStepPercent: String(cfg.dcaStepPercent ?? 3.0),
-    dcaMultiplier: String(cfg.dcaMultiplier ?? 3.0),
-    maxDcaLevels: String(cfg.maxDcaLevels ?? 5),
     positionSizeUsd: String(cfg.positionSizeUsd ?? 100),
     dcaTriggerBase: cfg.dcaTriggerBase || 'Average',
     orderType: cfg.orderType || 'Market',
     entryLimitOffsetPercent: String(cfg.entryLimitOffsetPercent ?? 0.05),
   });
+  // Migrate legacy scalar fields → tiered levels on load
+  const [sdLevels, setSdLevels] = useState<Array<{ stepPercent: string; multiplier: string; count: string }>>(
+    Array.isArray(cfg.levels) && cfg.levels.length > 0
+      ? cfg.levels.map((l: SmaDcaLevel) => ({
+          stepPercent: String(l.stepPercent),
+          multiplier: String(l.multiplier),
+          count: String(l.count),
+        }))
+      : [{ stepPercent: String(cfg.dcaStepPercent ?? 3.0), multiplier: String(cfg.dcaMultiplier ?? 3.0), count: String(cfg.maxDcaLevels ?? 5) }],
+  );
 
   // HuntingFunding form state
   const [hfLevels, setHfLevels] = useState<HFLevel[]>(
@@ -3188,13 +3240,15 @@ function EditStrategyModal({
         direction: sdForm.direction,
         smaPeriod: Number(sdForm.smaPeriod),
         takeProfitPercent: Number(sdForm.takeProfitPercent),
-        dcaStepPercent: Number(sdForm.dcaStepPercent),
-        dcaMultiplier: Number(sdForm.dcaMultiplier),
-        maxDcaLevels: Number(sdForm.maxDcaLevels),
         positionSizeUsd: Number(sdForm.positionSizeUsd),
         dcaTriggerBase: sdForm.dcaTriggerBase,
         orderType: sdForm.orderType,
         entryLimitOffsetPercent: Number(sdForm.entryLimitOffsetPercent),
+        levels: sdLevels.map((l) => ({
+          stepPercent: Number(l.stepPercent),
+          multiplier: Number(l.multiplier),
+          count: Number(l.count),
+        })),
       });
     } else if (isFC) {
       configJson = JSON.stringify({
@@ -3357,39 +3411,65 @@ function EditStrategyModal({
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className={labelCls}>DCA шаг %</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0.01"
-                    value={sdForm.dcaStepPercent}
-                    onChange={(e) => setSdForm({ ...sdForm, dcaStepPercent: e.target.value })}
-                    className={inputCls}
-                  />
+              {/* DCA tiers */}
+              <div>
+                <label className={labelCls}>Уровни DCA</label>
+                <div className="space-y-2">
+                  {sdLevels.map((lvl, i) => (
+                    <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end">
+                      <div>
+                        <label className={labelCls}>DCA шаг, %</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0.01"
+                          value={lvl.stepPercent}
+                          onChange={(e) => setSdLevels(sdLevels.map((l, idx) => idx === i ? { ...l, stepPercent: e.target.value } : l))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>Множитель</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0.1"
+                          value={lvl.multiplier}
+                          onChange={(e) => setSdLevels(sdLevels.map((l, idx) => idx === i ? { ...l, multiplier: e.target.value } : l))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>Доборов</label>
+                        <input
+                          type="number"
+                          min="1"
+                          value={lvl.count}
+                          onChange={(e) => setSdLevels(sdLevels.map((l, idx) => idx === i ? { ...l, count: e.target.value } : l))}
+                          className={inputCls}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={sdLevels.length <= 1}
+                        onClick={() => setSdLevels(sdLevels.filter((_, idx) => idx !== i))}
+                        className="pb-0.5 text-accent-red/70 hover:text-accent-red disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        title="Удалить уровень"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
                 </div>
-                <div>
-                  <label className={labelCls}>Множитель</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0.1"
-                    value={sdForm.dcaMultiplier}
-                    onChange={(e) => setSdForm({ ...sdForm, dcaMultiplier: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>Макс. DCA</label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={sdForm.maxDcaLevels}
-                    onChange={(e) => setSdForm({ ...sdForm, maxDcaLevels: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setSdLevels([...sdLevels, { stepPercent: '5.0', multiplier: '2.0', count: '2' }])}
+                  className="mt-2 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors"
+                >
+                  + Добавить уровень
+                </button>
               </div>
 
               <div>

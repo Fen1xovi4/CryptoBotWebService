@@ -69,13 +69,21 @@ public class SmaDcaHandler : IStrategyHandler
             return;
         }
 
-        if (config.SmaPeriod < 2 || config.MaxDcaLevels < 0 || config.PositionSizeUsd <= 0
-            || config.DcaMultiplier <= 0 || config.DcaStepPercent <= 0 || config.TakeProfitPercent <= 0)
+        if (config.SmaPeriod < 2 || config.PositionSizeUsd <= 0 || config.TakeProfitPercent <= 0)
         {
             Log(strategy, "Error",
-                $"Invalid parameters: SmaPeriod={config.SmaPeriod}, MaxDcaLevels={config.MaxDcaLevels}, " +
-                $"PositionSizeUsd={config.PositionSizeUsd}, DcaMultiplier={config.DcaMultiplier}, " +
-                $"DcaStep={config.DcaStepPercent}%, TP={config.TakeProfitPercent}%");
+                $"Invalid parameters: SmaPeriod={config.SmaPeriod}, " +
+                $"PositionSizeUsd={config.PositionSizeUsd}, TP={config.TakeProfitPercent}%");
+            return;
+        }
+
+        var effectiveLevels = GetEffectiveLevels(config);
+        if (effectiveLevels.Count == 0
+            || effectiveLevels.Any(l => l.Count < 1 || l.StepPercent <= 0 || l.Multiplier <= 0))
+        {
+            Log(strategy, "Error",
+                $"Invalid DCA levels: " + string.Join(", ", effectiveLevels.Select((l, i) =>
+                    $"[{i}] step={l.StepPercent}% mult={l.Multiplier} count={l.Count}")));
             return;
         }
 
@@ -263,7 +271,8 @@ public class SmaDcaHandler : IStrategyHandler
             if (string.IsNullOrEmpty(state.DcaOrderId))
             {
                 var dcaOnCooldown = state.DcaCooldownUntil.HasValue && state.DcaCooldownUntil.Value > DateTime.UtcNow;
-                if (!dcaOnCooldown && state.DcaLevel < config.MaxDcaLevels)
+                var tier = GetTierForDcaLevel(effectiveLevels, state.DcaLevel);
+                if (!dcaOnCooldown && tier != null)
                 {
                     var useLastFill = config.DcaTriggerBase
                         .Equals("LastFill", StringComparison.OrdinalIgnoreCase);
@@ -272,15 +281,15 @@ public class SmaDcaHandler : IStrategyHandler
                         : state.AverageEntryPrice;
 
                     var dcaTrigger = state.IsLong
-                        ? lastClosed.Close <= triggerBase * (1m - config.DcaStepPercent / 100m)
-                        : lastClosed.Close >= triggerBase * (1m + config.DcaStepPercent / 100m);
+                        ? lastClosed.Close <= triggerBase * (1m - tier.StepPercent / 100m)
+                        : lastClosed.Close >= triggerBase * (1m + tier.StepPercent / 100m);
 
                     if (dcaTrigger)
                     {
                         if (useLimitOrders)
-                            await PlaceDcaLimit(strategy, config, state, exchange, lastClosed);
+                            await PlaceDcaLimit(strategy, config, state, exchange, lastClosed, tier);
                         else
-                            await OpenDcaMarket(strategy, config, state, exchange, lastClosed, ct);
+                            await OpenDcaMarket(strategy, config, state, exchange, lastClosed, tier, ct);
                     }
                 }
             }
@@ -345,9 +354,9 @@ public class SmaDcaHandler : IStrategyHandler
     }
 
     private async Task OpenDcaMarket(Strategy strategy, SmaDcaConfig config, SmaDcaState state,
-        IFuturesExchangeService exchange, CandleDto candle, CancellationToken ct)
+        IFuturesExchangeService exchange, CandleDto candle, SmaDcaLevel tier, CancellationToken ct)
     {
-        var targetQty = state.TotalQuantity * config.DcaMultiplier;
+        var targetQty = state.TotalQuantity * tier.Multiplier;
         if (targetQty <= 0)
         {
             Log(strategy, "Warning", $"DCA пропущен: targetQty={targetQty} (TotalQty={state.TotalQuantity})");
@@ -356,9 +365,11 @@ public class SmaDcaHandler : IStrategyHandler
 
         var dcaPrice = candle.Close;
         var quoteAmount = Math.Round(targetQty * dcaPrice, 2);
+        var totalMax = GetTotalMaxLevels(config);
 
         Log(strategy, "Info",
-            $"➕ DCA #{state.DcaLevel + 1}/{config.MaxDcaLevels} {config.Direction}: close={dcaPrice}, " +
+            $"➕ DCA #{state.DcaLevel + 1}/{totalMax} {config.Direction} " +
+            $"(tier step={tier.StepPercent}% ×{tier.Multiplier}): close={dcaPrice}, " +
             $"avg={Math.Round(state.AverageEntryPrice, 6)}, targetQty={targetQty}, USD≈{quoteAmount}");
 
         var result = state.IsLong
@@ -966,9 +977,9 @@ public class SmaDcaHandler : IStrategyHandler
     /// Price offset from candle close by EntryLimitOffsetPercent so the order rests on the book.
     /// </summary>
     private async Task PlaceDcaLimit(Strategy strategy, SmaDcaConfig config, SmaDcaState state,
-        IFuturesExchangeService exchange, CandleDto candle)
+        IFuturesExchangeService exchange, CandleDto candle, SmaDcaLevel tier)
     {
-        var targetQty = state.TotalQuantity * config.DcaMultiplier;
+        var targetQty = state.TotalQuantity * tier.Multiplier;
         if (targetQty <= 0)
         {
             Log(strategy, "Warning", $"DCA LIMIT пропущен: targetQty={targetQty} (TotalQty={state.TotalQuantity})");
@@ -980,9 +991,11 @@ public class SmaDcaHandler : IStrategyHandler
             ? (1m - config.EntryLimitOffsetPercent / 100m)
             : (1m + config.EntryLimitOffsetPercent / 100m);
         var limitPrice = candle.Close * offsetMul;
+        var totalMax = GetTotalMaxLevels(config);
 
         Log(strategy, "Info",
-            $"➕ DCA LIMIT #{state.DcaLevel + 1}/{config.MaxDcaLevels} {config.Direction}: close={candle.Close}, " +
+            $"➕ DCA LIMIT #{state.DcaLevel + 1}/{totalMax} {config.Direction} " +
+            $"(tier step={tier.StepPercent}% ×{tier.Multiplier}): close={candle.Close}, " +
             $"offset={config.EntryLimitOffsetPercent}%, limit={Math.Round(limitPrice, 8)}, qty={targetQty}");
 
         try
@@ -1092,6 +1105,38 @@ public class SmaDcaHandler : IStrategyHandler
     }
 
     // ───────── Utilities ─────────
+
+    // Tiered DCA: if Levels is populated, use it as-is. Otherwise synthesize a single tier from
+    // the legacy scalar fields — keeps old bots (saved before tiered config) running unchanged.
+    private static List<SmaDcaLevel> GetEffectiveLevels(SmaDcaConfig config)
+    {
+        if (config.Levels != null && config.Levels.Count > 0) return config.Levels;
+        return new List<SmaDcaLevel>
+        {
+            new()
+            {
+                StepPercent = config.DcaStepPercent,
+                Multiplier = config.DcaMultiplier,
+                Count = config.MaxDcaLevels,
+            },
+        };
+    }
+
+    // Returns the tier that owns the DCA at zero-based index `dcaLevel`. Walks cumulative counts:
+    // e.g. tiers [{count=2},{count=3}] → dcaLevel 0..1 → tier0, 2..4 → tier1, 5+ → null (exhausted).
+    private static SmaDcaLevel? GetTierForDcaLevel(List<SmaDcaLevel> levels, int dcaLevel)
+    {
+        var cumulative = 0;
+        foreach (var lvl in levels)
+        {
+            cumulative += lvl.Count;
+            if (dcaLevel < cumulative) return lvl;
+        }
+        return null;
+    }
+
+    private static int GetTotalMaxLevels(SmaDcaConfig config)
+        => GetEffectiveLevels(config).Sum(l => l.Count);
 
     private static decimal ComputeTakeProfit(decimal averagePrice, decimal tpPercent, bool isLong)
         => isLong
