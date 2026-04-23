@@ -108,6 +108,22 @@ public class StrategiesController : ControllerBase
                                 unrealizedPnl += hfState.TotalFilledUsdt.Value * pnlPct / 100m;
                             }
                         }
+                        else if (s.Type == StrategyTypes.FundingClaim)
+                        {
+                            var fcState = JsonSerializer.Deserialize<FundingClaimState>(s.StateJson, jsonOpts);
+                            if (fcState == null) continue;
+
+                            if (fcState.Phase == FundingClaimPhase.InPosition
+                                && fcState.EntryPrice.HasValue && fcState.EntryPrice.Value > 0
+                                && fcState.EntrySizeUsdt.HasValue
+                                && fcState.LastPrice.HasValue)
+                            {
+                                var pnlPct = fcState.Direction == "Long"
+                                    ? (fcState.LastPrice.Value - fcState.EntryPrice.Value) / fcState.EntryPrice.Value * 100m
+                                    : (fcState.EntryPrice.Value - fcState.LastPrice.Value) / fcState.EntryPrice.Value * 100m;
+                                unrealizedPnl += fcState.EntrySizeUsdt.Value * pnlPct / 100m;
+                            }
+                        }
                         else
                         {
                             var state = JsonSerializer.Deserialize<EmaBounceState>(s.StateJson, jsonOpts);
@@ -348,6 +364,22 @@ public class StrategiesController : ControllerBase
                 CycleTotalPnl = prevHfState.CycleTotalPnl
             };
             strategy.StateJson = JsonSerializer.Serialize(freshHfState, jsonOpts);
+        }
+        else if (strategy.Type == StrategyTypes.FundingClaim)
+        {
+            // FundingClaim: preserve cycle stats across restarts, reset phase to Idle
+            var prevFcState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
+                ? new FundingClaimState()
+                : JsonSerializer.Deserialize<FundingClaimState>(strategy.StateJson, jsonOpts) ?? new FundingClaimState();
+
+            var freshFcState = new FundingClaimState
+            {
+                Phase = FundingClaimPhase.Idle,
+                CycleCount = prevFcState.CycleCount,
+                CycleTotalPnl = prevFcState.CycleTotalPnl,
+                CycleTotalFundingPnl = prevFcState.CycleTotalFundingPnl
+            };
+            strategy.StateJson = JsonSerializer.Serialize(freshFcState, jsonOpts);
         }
         else
         {

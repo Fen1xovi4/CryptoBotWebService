@@ -16,7 +16,11 @@ builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>()
 
 builder.Services.AddScoped<IStrategyHandler, EmaBounceHandler>();
 builder.Services.AddScoped<IStrategyHandler, HuntingFundingHandler>();
+builder.Services.AddScoped<IStrategyHandler, FundingClaimHandler>();
+builder.Services.AddScoped<IStrategyHandler, SmaDcaHandler>();
 builder.Services.AddScoped<ITelegramSignalService, TelegramSignalService>();
+builder.Services.AddScoped<IFundingTickerRotationService, FundingTickerRotationService>();
+builder.Services.AddScoped<ISymbolBlacklistService, SymbolBlacklistService>();
 
 builder.Services.AddHttpClient("TronGrid");
 builder.Services.AddHttpClient("Telegram");

@@ -16,15 +16,30 @@ public interface IFuturesExchangeService : IDisposable
     Task<FundingRateDto?> GetFundingRateAsync(string symbol) =>
         throw new NotSupportedException("GetFundingRateAsync not implemented");
 
-    Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity) =>
+    Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity, bool reduceOnly = false) =>
         throw new NotSupportedException("PlaceLimitOrderAsync not implemented");
 
     Task<bool> CancelAllOrdersAsync(string symbol) =>
         throw new NotSupportedException("CancelAllOrdersAsync not implemented");
+
+    Task<bool> CancelOrderAsync(string symbol, string orderId) =>
+        throw new NotSupportedException("CancelOrderAsync not implemented");
+
+    Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId) =>
+        throw new NotSupportedException("GetOrderAsync not implemented");
 
     Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol) =>
         throw new NotSupportedException("GetOpenOrdersAsync not implemented");
 
     Task<PositionDto?> GetPositionAsync(string symbol, string side) =>
         throw new NotSupportedException("GetPositionAsync not implemented");
+
+    Task<List<FundingRateDto>> GetAllFundingRatesAsync() =>
+        throw new NotSupportedException("GetAllFundingRatesAsync not implemented");
+
+    Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null) =>
+        throw new NotSupportedException("GetFundingPaymentsAsync not implemented");
+
+    Task<bool> SetLeverageAsync(string symbol, int leverage) =>
+        throw new NotSupportedException("SetLeverageAsync not implemented");
 }

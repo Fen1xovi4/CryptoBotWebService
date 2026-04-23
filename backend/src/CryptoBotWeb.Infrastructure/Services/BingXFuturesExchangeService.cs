@@ -87,7 +87,7 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
 
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Buy, FuturesOrderType.Market,
-            PositionSide.Long, quantity);
+            PositionSide.Both, quantity);
 
         return new OrderResultDto
         {
@@ -114,7 +114,7 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
 
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Sell, FuturesOrderType.Market,
-            PositionSide.Short, quantity);
+            PositionSide.Both, quantity);
 
         return new OrderResultDto
         {
@@ -134,7 +134,7 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
 
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Sell, FuturesOrderType.Market,
-            PositionSide.Long, qty);
+            PositionSide.Both, qty);
 
         return new OrderResultDto
         {
@@ -152,7 +152,7 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
 
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Buy, FuturesOrderType.Market,
-            PositionSide.Short, qty);
+            PositionSide.Both, qty);
 
         return new OrderResultDto
         {
@@ -184,14 +184,40 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         }
     }
 
-    public async Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity)
+    public async Task<List<FundingRateDto>> GetAllFundingRatesAsync()
+    {
+        // BingX: GET /openApi/swap/v2/quote/premiumIndex — bulk endpoint, returns all perpetuals.
+        var result = await _client.PerpetualFuturesApi.ExchangeData.GetFundingRatesAsync();
+        if (!result.Success)
+            throw new Exception($"BingX GetAllFundingRates failed: {result.Error?.Message}");
+        if (result.Data == null)
+            throw new Exception("BingX GetAllFundingRates returned null data");
+
+        var list = new List<FundingRateDto>();
+        foreach (var f in result.Data)
+        {
+            if (string.IsNullOrEmpty(f.Symbol))
+                continue;
+            // BingX symbols come as "BTC-USDT"; keep only USDT-quoted perps.
+            if (!f.Symbol.EndsWith("USDT", StringComparison.Ordinal) && !f.Symbol.EndsWith("-USDT", StringComparison.Ordinal))
+                continue;
+
+            list.Add(new FundingRateDto
+            {
+                Symbol = f.Symbol.Replace("-", ""),
+                Rate = f.LastFundingRate,
+                NextFundingTime = f.NextFundingTime
+            });
+        }
+        return list;
+    }
+
+    public async Task<OrderResultDto> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity, bool reduceOnly = false)
     {
         try
         {
             var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
-            // BingX HEDGE mode: Buy → Long position side, Sell → Short position side
             var orderSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? OrderSide.Buy : OrderSide.Sell;
-            var positionSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? PositionSide.Long : PositionSide.Short;
 
             var (qtyStep, minQty, priceStep) = await GetSymbolInfoWithPriceAsync(bingxSymbol);
             var roundedQty = FloorToStep(quantity, qtyStep);
@@ -202,7 +228,7 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
 
             var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
                 bingxSymbol, orderSide, FuturesOrderType.Limit,
-                positionSide, roundedQty, price: roundedPrice);
+                PositionSide.Both, roundedQty, price: roundedPrice);
 
             return new OrderResultDto
             {
@@ -274,16 +300,16 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
 
             var pos = result.Data.FirstOrDefault(p =>
                 p.Symbol == bingxSymbol &&
-                p.Side.ToString().Equals(side, StringComparison.OrdinalIgnoreCase) &&
                 p.Size != 0);
 
             if (pos == null)
                 return null;
 
+            // In one-way mode Size sign indicates direction: positive = long, negative = short
             return new PositionDto
             {
                 Symbol = symbol,
-                Side = side,
+                Side = pos.Size >= 0 ? "Long" : "Short",
                 Quantity = Math.Abs(pos.Size),
                 EntryPrice = pos.AveragePrice,
                 UnrealizedPnl = pos.UnrealizedProfit
@@ -362,6 +388,53 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
     {
         if (step <= 0) return value;
         return Math.Floor(value / step) * step;
+    }
+
+    public async Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.Account.GetIncomesAsync(
+                symbol: bingxSymbol,
+                incomeType: IncomeType.FundingFee,
+                startTime: startTime,
+                limit: 100);
+
+            if (!result.Success || result.Data == null)
+                return new List<FundingPaymentDto>();
+
+            return result.Data
+                .Select(i => new FundingPaymentDto
+                {
+                    Symbol = (i.Symbol ?? bingxSymbol).Replace("-", ""),
+                    Amount = i.Income,
+                    FundingRate = 0m, // BingX income endpoint does not return the funding rate
+                    PositionSize = 0m, // BingX income endpoint does not return position size
+                    Timestamp = i.Timestamp
+                })
+                .OrderByDescending(p => p.Timestamp)
+                .ToList();
+        }
+        catch (Exception)
+        {
+            return new List<FundingPaymentDto>();
+        }
+    }
+
+    public async Task<bool> SetLeverageAsync(string symbol, int leverage)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.Account.SetLeverageAsync(
+                bingxSymbol, BingX.Net.Enums.PositionSide.Both, leverage);
+            return result.Success;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public void Dispose() => _client.Dispose();

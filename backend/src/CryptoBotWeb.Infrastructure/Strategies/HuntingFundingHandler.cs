@@ -22,13 +22,19 @@ public class HuntingFundingHandler : IStrategyHandler
     private readonly AppDbContext _db;
     private readonly ILogger<HuntingFundingHandler> _logger;
     private readonly ITelegramSignalService _telegramSignalService;
+    private readonly ISymbolBlacklistService _blacklist;
+    private readonly IFundingTickerRotationService _rotation;
 
     public HuntingFundingHandler(AppDbContext db, ILogger<HuntingFundingHandler> logger,
-        ITelegramSignalService telegramSignalService)
+        ITelegramSignalService telegramSignalService,
+        ISymbolBlacklistService blacklist,
+        IFundingTickerRotationService rotation)
     {
         _db = db;
         _logger = logger;
         _telegramSignalService = telegramSignalService;
+        _blacklist = blacklist;
+        _rotation = rotation;
     }
 
     public async Task ProcessAsync(Strategy strategy, IFuturesExchangeService exchange, CancellationToken ct)
@@ -75,30 +81,74 @@ public class HuntingFundingHandler : IStrategyHandler
         if (funding == null)
         {
             _logger.LogWarning("Strategy {Id}: Failed to get funding rate for {Symbol}", strategy.Id, config.Symbol);
+            MaybeLogPreFundingSkip(strategy, state, $"GetFundingRateAsync returned null for {config.Symbol}");
             return;
         }
 
         state.CurrentFundingRate = funding.Rate;
-        state.NextFundingTime = funding.NextFundingTime;
+
+        // Guard against NextFundingTime rolling forward before the actual settlement.
+        // BingX/Bybit/Bitget all advance `nextFundingTime` to the next interval at (or
+        // shortly before) the settlement moment. If we overwrote blindly, threshold
+        // = NextFundingTime - SecondsBeforeFunding would jump an hour+ into the future
+        // and we'd silently miss the placement window — MaybeLogPreFundingSkip also
+        // goes quiet because `secondsUntilFunding > 300` trips its early-return.
+        // Accept the exchange value only when: (a) we have no locked time yet, (b)
+        // we're already past the locked time + 90s buffer (cycle done, safe to re-arm),
+        // or (c) the drift is small (≤ 60s) — not a rollover.
+        if (!state.NextFundingTime.HasValue
+            || DateTime.UtcNow > state.NextFundingTime.Value.AddSeconds(90)
+            || Math.Abs((funding.NextFundingTime - state.NextFundingTime.Value).TotalSeconds) <= 60)
+        {
+            state.NextFundingTime = funding.NextFundingTime;
+        }
 
         // Determine direction based on funding rate and enabled directions
         var ratePercent = Math.Abs(funding.Rate * 100m); // e.g. -0.012 → 1.2%
-        string? direction = null;
-        if (funding.Rate < 0 && config.EnableLong && ratePercent >= config.MinFundingLong)
-            direction = "Long";
-        else if (funding.Rate > 0 && config.EnableShort && ratePercent >= config.MinFundingShort)
-            direction = "Short";
+        var (rangeMin, rangeMax) = await GetWorkspaceFundingRangeAsync(strategy, ct);
+        var inRange = ratePercent >= rangeMin && ratePercent <= rangeMax;
 
-        state.Direction = direction;
+        string? computedDirection = null;
+        if (inRange)
+        {
+            if (funding.Rate < 0 && config.EnableLong && ratePercent >= config.MinFundingLong)
+                computedDirection = "Long";
+            else if (funding.Rate > 0 && config.EnableShort && ratePercent >= config.MinFundingShort)
+                computedDirection = "Short";
+        }
+
+        // Once armed, preserve direction through settlement. BingX/Bybit/Bitget reset
+        // their predicted/last funding rate to ~0 at (or slightly before) the settlement
+        // moment; without this guard, `computedDirection` would flip to null and we'd
+        // disarm on the very tick that's supposed to fire the placement.
+        bool armedAndActive = state.Direction != null
+            && state.NextFundingTime.HasValue
+            && DateTime.UtcNow < state.NextFundingTime.Value.AddSeconds(60);
+
+        if (!armedAndActive || computedDirection != null)
+            state.Direction = computedDirection;
 
         var currentPrice = await exchange.GetTickerPriceAsync(config.Symbol);
         if (currentPrice != null)
             state.LastPrice = currentPrice;
 
-        if (direction == null)
+        if (state.Direction == null)
         {
-            _logger.LogDebug("Strategy {Id}: Funding rate {Rate:P4} below threshold or direction disabled, skipping",
-                strategy.Id, funding.Rate);
+            if (!inRange)
+            {
+                _logger.LogDebug("Strategy {Id}: Funding {Rate:P4} outside range [{Min}%, {Max}%], skipping",
+                    strategy.Id, funding.Rate, rangeMin, rangeMax);
+                MaybeLogPreFundingSkip(strategy, state,
+                    $"rate {funding.Rate:P4} outside workspace range [{rangeMin}%, {rangeMax}%]");
+            }
+            else
+            {
+                _logger.LogDebug("Strategy {Id}: Funding rate {Rate:P4} below threshold or direction disabled, skipping",
+                    strategy.Id, funding.Rate);
+                MaybeLogPreFundingSkip(strategy, state,
+                    $"rate {funding.Rate:P4} below per-bot threshold (Long={config.MinFundingLong}%, Short={config.MinFundingShort}%) " +
+                    $"or direction disabled (EnableLong={config.EnableLong}, EnableShort={config.EnableShort})");
+            }
             return;
         }
 
@@ -107,6 +157,13 @@ public class HuntingFundingHandler : IStrategyHandler
         {
             _logger.LogDebug("Strategy {Id}: Waiting for funding. Rate={Rate}, Next={Next}, Direction={Dir}",
                 strategy.Id, funding.Rate, funding.NextFundingTime, state.Direction);
+            var secondsToThreshold = (threshold - DateTime.UtcNow).TotalSeconds;
+            if (secondsToThreshold <= 60)
+            {
+                MaybeLogPreFundingSkip(strategy, state,
+                    $"armed, waiting for threshold: rate={funding.Rate:P4}, direction={state.Direction}, " +
+                    $"placement in {(int)secondsToThreshold}s");
+            }
             return;
         }
 
@@ -122,6 +179,7 @@ public class HuntingFundingHandler : IStrategyHandler
             $"Funding rate={funding.Rate}, direction={state.Direction}, placing {config.Levels.Count} limit orders at price={price}");
 
         int placedCount = 0;
+        bool settlementInProgress = false;
         for (int i = 0; i < config.Levels.Count; i++)
         {
             var level = config.Levels[i];
@@ -170,6 +228,26 @@ public class HuntingFundingHandler : IStrategyHandler
             else
             {
                 Log(strategy, "Error", $"Level {i}: Failed to place {side} order at {Math.Round(limitPrice, 6)}: {result.ErrorMessage}");
+
+                // BingX blocks trading ~60s before funding (settlement window).
+                // No point retrying remaining levels — they will all fail too.
+                if (result.ErrorMessage != null &&
+                    result.ErrorMessage.Contains("settlement", StringComparison.OrdinalIgnoreCase))
+                {
+                    settlementInProgress = true;
+                    Log(strategy, "Warning",
+                        $"Funding settlement in progress — skipping remaining {config.Levels.Count - i - 1} levels. " +
+                        $"Consider increasing SecondsBeforeFunding (current={config.SecondsBeforeFunding}) to ≥65 for BingX");
+                    break;
+                }
+
+                // Symbol delisted / not supported for orders on this exchange — blacklist + rotate,
+                // and stop trying remaining levels (they will all fail with the same error).
+                if (IsUnsupportedSymbolError(result.ErrorMessage))
+                {
+                    await BlacklistAndRotateAsync(strategy, config.Symbol, result.ErrorMessage!, ct);
+                    return;
+                }
             }
         }
 
@@ -180,6 +258,12 @@ public class HuntingFundingHandler : IStrategyHandler
             Log(strategy, "Info", $"Phase → OrdersPlaced: {placedCount}/{config.Levels.Count} orders placed");
             _logger.LogInformation("Strategy {Id}: Placed {Count} limit orders for {Symbol}, direction={Dir}",
                 strategy.Id, placedCount, config.Symbol, state.Direction);
+        }
+        else if (settlementInProgress)
+        {
+            // Missed this funding window — skip to cooldown to wait for the next one
+            Log(strategy, "Warning", "Missed funding window (settlement) — skipping to Cooldown");
+            state.Phase = HuntingFundingPhase.Cooldown;
         }
         else
         {
@@ -467,6 +551,7 @@ public class HuntingFundingHandler : IStrategyHandler
 
         state.CurrentFundingRate = funding.Rate;
         state.NextFundingTime = funding.NextFundingTime;
+        state.LastSkipLogAt = null;
 
         // Direction will be re-evaluated in WaitingForFunding based on thresholds
         state.Direction = null;
@@ -477,6 +562,59 @@ public class HuntingFundingHandler : IStrategyHandler
     }
 
     // ───────────────────── Helpers ─────────────────────
+
+    // Logs one diagnostic line to strategy_logs when the handler silently skips order
+    // placement in the pre-funding window. Gated to the last 5 min before funding
+    // (down to -60s after). Throttle is adaptive: 2 min in 300-120s range, 60s in
+    // 120-60s range, 15s in final minute. This guarantees we see what the handler
+    // sees at the critical placement moment (~funding-15s).
+    private void MaybeLogPreFundingSkip(Strategy strategy, HuntingFundingState state, string reason)
+    {
+        if (!state.NextFundingTime.HasValue) return;
+
+        var now = DateTime.UtcNow;
+        var secondsUntilFunding = (state.NextFundingTime.Value - now).TotalSeconds;
+        if (secondsUntilFunding > 300 || secondsUntilFunding < -60) return;
+
+        double throttleSec = secondsUntilFunding switch
+        {
+            <= 60 => 15,
+            <= 120 => 60,
+            _ => 120
+        };
+
+        if (state.LastSkipLogAt.HasValue && (now - state.LastSkipLogAt.Value).TotalSeconds < throttleSec) return;
+        state.LastSkipLogAt = now;
+
+        Log(strategy, "Warning",
+            $"Pre-funding skip ({(int)secondsUntilFunding}s to funding): {reason}");
+    }
+
+    private async Task<(decimal min, decimal max)> GetWorkspaceFundingRangeAsync(Strategy strategy, CancellationToken ct)
+    {
+        if (!strategy.WorkspaceId.HasValue)
+            return (1.0m, 2.0m);
+
+        var workspace = await _db.Workspaces.FindAsync(new object[] { strategy.WorkspaceId.Value }, ct);
+        if (workspace == null || string.IsNullOrEmpty(workspace.ConfigJson))
+            return (1.0m, 2.0m);
+
+        try
+        {
+            var cfg = JsonSerializer.Deserialize<WorkspaceHuntingFundingConfig>(workspace.ConfigJson, JsonOptions);
+            if (cfg == null)
+                return (1.0m, 2.0m);
+
+            var min = cfg.FundingRateMin;
+            var max = cfg.FundingRateMax;
+            if (max < min) (min, max) = (max, min);
+            return (min, max);
+        }
+        catch
+        {
+            return (1.0m, 2.0m);
+        }
+    }
 
     private static void SaveState(Strategy strategy, HuntingFundingState state)
     {
@@ -516,5 +654,33 @@ public class HuntingFundingHandler : IStrategyHandler
             Message = message,
             CreatedAt = DateTime.UtcNow
         });
+    }
+
+    private static bool IsUnsupportedSymbolError(string? errorMessage)
+    {
+        if (string.IsNullOrEmpty(errorMessage)) return false;
+        var msg = errorMessage.ToLowerInvariant();
+        return msg.Contains("not supported")
+            || msg.Contains("unsupported symbol")
+            || msg.Contains("invalid symbol")
+            || msg.Contains("symbol does not exist");
+    }
+
+    private async Task BlacklistAndRotateAsync(Strategy strategy, string symbol, string reason, CancellationToken ct)
+    {
+        try
+        {
+            await _blacklist.AddOrRefreshAsync(strategy.Account.ExchangeType, symbol, reason, ct);
+            Log(strategy, "Warning",
+                $"Symbol {symbol} blacklisted for 3 days (reason: {reason}). Triggering ticker rotation.");
+
+            await _rotation.RotateTickersAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Strategy {Id}: Failed to blacklist/rotate after unsupported symbol {Symbol}",
+                strategy.Id, symbol);
+        }
     }
 }

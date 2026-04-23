@@ -3,6 +3,7 @@ using System;
 using CryptoBotWeb.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace CryptoBotWeb.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260417110804_AddTradeFundingPnl")]
+    partial class AddTradeFundingPnl
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -483,41 +486,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("support_tickets", (string)null);
-                });
-
-            modelBuilder.Entity("CryptoBotWeb.Core.Entities.SymbolBlacklistEntry", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasDefaultValueSql("gen_random_uuid()");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<short>("ExchangeType")
-                        .HasColumnType("smallint");
-
-                    b.Property<DateTime>("ExpiresAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Reason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("Symbol")
-                        .IsRequired()
-                        .HasMaxLength(30)
-                        .HasColumnType("character varying(30)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ExpiresAt");
-
-                    b.HasIndex("ExchangeType", "Symbol")
-                        .IsUnique();
-
-                    b.ToTable("symbol_blacklist", (string)null);
                 });
 
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.TelegramBot", b =>

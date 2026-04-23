@@ -10,6 +10,7 @@ public class TradingHostedService : BackgroundService
 {
     private readonly ILogger<TradingHostedService> _logger;
     private readonly IServiceProvider _serviceProvider;
+    private DateTime _lastRotationCheck = DateTime.MinValue;
 
     public TradingHostedService(ILogger<TradingHostedService> logger, IServiceProvider serviceProvider)
     {
@@ -25,6 +26,25 @@ public class TradingHostedService : BackgroundService
         {
             try
             {
+                // Funding ticker rotation at :50 of each hour
+                var now = DateTime.UtcNow;
+                if (now.Minute >= 50 && now.Minute < 55 &&
+                    (now - _lastRotationCheck).TotalMinutes > 10)
+                {
+                    _lastRotationCheck = now;
+                    try
+                    {
+                        using var rotationScope = _serviceProvider.CreateScope();
+                        var rotationService = rotationScope.ServiceProvider
+                            .GetRequiredService<IFundingTickerRotationService>();
+                        await rotationService.RotateTickersAsync(stoppingToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error in funding ticker rotation");
+                    }
+                }
+
                 using var scope = _serviceProvider.CreateScope();
                 var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                 var factory = scope.ServiceProvider.GetRequiredService<IExchangeServiceFactory>();
