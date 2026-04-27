@@ -10,6 +10,10 @@ namespace CryptoBotWeb.Infrastructure.Services;
 
 public class BingXFuturesExchangeService : IFuturesExchangeService
 {
+    // source: https://bingx.com/en/support/articles/360029987112 — standard tier USDT perpetual
+    public decimal TakerFeeRate => 0.0005m;
+    public decimal MakerFeeRate => 0.0002m;
+
     private readonly BingXRestClient _client;
 
     public BingXFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)

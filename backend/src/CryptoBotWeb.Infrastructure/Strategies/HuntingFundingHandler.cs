@@ -495,7 +495,7 @@ public class HuntingFundingHandler : IStrategyHandler
             pnlPercent = avgEntry > 0 ? (avgEntry - closePrice) / avgEntry * 100m : 0;
 
         var pnlDollar = totalUsdt * pnlPercent / 100m;
-        var commission = totalUsdt * 2m * 0.0005m;
+        var commission = totalUsdt * exchange.TakerFeeRate * 2m;
         var netPnl = pnlDollar - commission;
 
         RecordTrade(strategy, config.Symbol, closeSide, quantity, closePrice,

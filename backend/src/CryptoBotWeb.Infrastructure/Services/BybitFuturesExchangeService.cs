@@ -10,6 +10,10 @@ namespace CryptoBotWeb.Infrastructure.Services;
 
 public class BybitFuturesExchangeService : IFuturesExchangeService
 {
+    // source: https://www.bybit.com/en/help-center/article/Trading-fee-rate — non-VIP USDT-perpetual
+    public decimal TakerFeeRate => 0.00055m;
+    public decimal MakerFeeRate => 0.0002m;
+
     private readonly BybitRestClient _client;
 
     public BybitFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)

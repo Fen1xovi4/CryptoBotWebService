@@ -38,9 +38,6 @@ public class SmaDcaHandler : IStrategyHandler
         PropertyNameCaseInsensitive = true
     };
 
-    // Market open + limit maker close fee estimate: ~0.05% taker + ~0.02% maker ≈ 0.07%.
-    private const decimal LimitExitFeeRate = 0.0005m + 0.0002m;
-
     private const int DcaCooldownMinutes = 5;
 
     public string StrategyType => StrategyTypes.SmaDca;
@@ -120,42 +117,42 @@ public class SmaDcaHandler : IStrategyHandler
         // 4. Detect if the reduce-only limit TP order was filled on the exchange.
         if (state.InPosition)
         {
-            if (await CheckLimitTpFilled(strategy, config, state, exchange, ct))
+            if (!exchange.UsesSoftTakeProfit)
             {
-                SaveState(strategy, state);
-                await _db.SaveChangesAsync(ct);
-                return;
-            }
-
-            // Verify the stored TP is still alive on the exchange. Returns true if the verification
-            // detected the position is also gone — treat as TP fill and exit.
-            if (!string.IsNullOrEmpty(state.TakeProfitOrderId))
-            {
-                if (await VerifyTakeProfitAlive(strategy, config, state, exchange))
+                if (await CheckLimitTpFilled(strategy, config, state, exchange, ct))
                 {
                     SaveState(strategy, state);
                     await _db.SaveChangesAsync(ct);
                     return;
                 }
+
+                // Verify the stored TP is still alive on the exchange. Returns true if the verification
+                // detected the position is also gone — treat as TP fill and exit.
+                if (!string.IsNullOrEmpty(state.TakeProfitOrderId))
+                {
+                    if (await VerifyTakeProfitAlive(strategy, config, state, exchange))
+                    {
+                        SaveState(strategy, state);
+                        await _db.SaveChangesAsync(ct);
+                        return;
+                    }
+                }
+
+                // Heal: if we're in position but have no active TP limit (startup / previous placement failed
+                // / TP vanished from the exchange) → place one. PlaceTakeProfitLimit also self-heals
+                // state if the exchange reports the position is gone.
+                if (string.IsNullOrEmpty(state.TakeProfitOrderId))
+                {
+                    await PlaceTakeProfitLimit(strategy, config, state, exchange);
+                    SaveState(strategy, state);
+                    await _db.SaveChangesAsync(ct);
+                    if (!state.InPosition) return;
+                }
             }
 
-            // Heal: if we're in position but have no active TP limit (startup / previous placement failed
-            // / TP vanished from the exchange) → place one. PlaceTakeProfitLimit also self-heals
-            // state if the exchange reports the position is gone.
-            if (string.IsNullOrEmpty(state.TakeProfitOrderId))
-            {
-                await PlaceTakeProfitLimit(strategy, config, state, exchange);
-                SaveState(strategy, state);
-                await _db.SaveChangesAsync(ct);
-                if (!state.InPosition) return;
-            }
-
-            // 4b. TP price-cross safety net. Bridges the case where the exchange's TP failed to
-            // trigger even though price has been past the TP target for a while — observed on
-            // Dzengi where TP is a position parameter (not a reduce-only limit), and triggering
-            // is sometimes silently skipped. Real reduce-only limits (Bybit/Bitget/BingX) fill
-            // within seconds of being crossed, so a 60s grace period gives them time before we
-            // step in.
+            // 4b. TP price-cross check. On exchanges with real reduce-only limit TP, this is a
+            // safety net (60s grace) for the rare case the limit fails to trigger. On soft-TP
+            // exchanges (Dzengi) this *is* the TP — close at market immediately on cross.
             if (state.InPosition && state.CurrentTakeProfit > 0)
             {
                 if (await CheckTpCrossSafetyNet(strategy, config, state, exchange, ct))
@@ -363,7 +360,8 @@ public class SmaDcaHandler : IStrategyHandler
         _logger.LogInformation("Strategy {Id}: SmaDca ENTRY {Dir} qty={Qty} @ {Price}, TP={TP}",
             strategy.Id, config.Direction, filledQty, fillPrice, state.CurrentTakeProfit);
 
-        await PlaceTakeProfitLimit(strategy, config, state, exchange);
+        if (!exchange.UsesSoftTakeProfit)
+            await PlaceTakeProfitLimit(strategy, config, state, exchange);
 
         await _telegramSignalService.SendOpenPositionSignalAsync(strategy, config.Symbol, config.Direction,
             quoteAmount, fillPrice, state.CurrentTakeProfit, stopLoss: null, ct);
@@ -427,7 +425,8 @@ public class SmaDcaHandler : IStrategyHandler
 
         AssertInvariant(strategy, state);
 
-        await ReplaceTakeProfitLimit(strategy, config, state, exchange);
+        if (!exchange.UsesSoftTakeProfit)
+            await ReplaceTakeProfitLimit(strategy, config, state, exchange);
 
         await _telegramSignalService.SendDcaSignalAsync(strategy, config.Symbol, config.Direction,
             state.DcaLevel, fillPrice * filledQty, state.AverageEntryPrice, state.CurrentTakeProfit, ct);
@@ -511,7 +510,7 @@ public class SmaDcaHandler : IStrategyHandler
         var qtyClosed = state.TotalQuantity;
         var pnlPct = ComputePnlPercent(state.IsLong, state.AverageEntryPrice, tpPrice);
         var grossPnl = state.TotalCost * pnlPct / 100m;
-        var commission = state.TotalCost * LimitExitFeeRate;
+        var commission = state.TotalCost * (exchange.TakerFeeRate + exchange.MakerFeeRate);
         var netPnl = grossPnl - commission;
         var direction = state.IsLong ? "Long" : "Short";
 
@@ -572,21 +571,30 @@ public class SmaDcaHandler : IStrategyHandler
             return false;
         }
 
-        if (!state.TpCrossedAt.HasValue)
+        if (exchange.UsesSoftTakeProfit)
         {
-            state.TpCrossedAt = DateTime.UtcNow;
             Log(strategy, "Info",
-                $"⚠️ Цена {price.Value} пересекла TP={Math.Round(state.CurrentTakeProfit, 6)} — " +
-                $"запускаю таймер {TpCrossGraceSeconds}с до принудительного закрытия (если биржевой TP не сработает)");
-            return false;
+                $"🎯 TP достигнут (soft): закрываю позицию по рынку @ {price.Value} " +
+                $"(target={Math.Round(state.CurrentTakeProfit, 6)})");
         }
+        else
+        {
+            if (!state.TpCrossedAt.HasValue)
+            {
+                state.TpCrossedAt = DateTime.UtcNow;
+                Log(strategy, "Info",
+                    $"⚠️ Цена {price.Value} пересекла TP={Math.Round(state.CurrentTakeProfit, 6)} — " +
+                    $"запускаю таймер {TpCrossGraceSeconds}с до принудительного закрытия (если биржевой TP не сработает)");
+                return false;
+            }
 
-        var elapsed = (DateTime.UtcNow - state.TpCrossedAt.Value).TotalSeconds;
-        if (elapsed < TpCrossGraceSeconds) return false;
+            var elapsed = (DateTime.UtcNow - state.TpCrossedAt.Value).TotalSeconds;
+            if (elapsed < TpCrossGraceSeconds) return false;
 
-        Log(strategy, "Warning",
-            $"⏱ Цена {price.Value} держится за TP={Math.Round(state.CurrentTakeProfit, 6)} {elapsed:F0}с, " +
-            "биржевой TP не сработал — закрываю позицию по рынку");
+            Log(strategy, "Warning",
+                $"⏱ Цена {price.Value} держится за TP={Math.Round(state.CurrentTakeProfit, 6)} {elapsed:F0}с, " +
+                "биржевой TP не сработал — закрываю позицию по рынку");
+        }
 
         // Cancel any limits (TP/Entry/DCA) on this symbol before market-closing.
         try { await exchange.CancelAllOrdersAsync(config.Symbol); } catch { }
@@ -608,7 +616,7 @@ public class SmaDcaHandler : IStrategyHandler
         var closePrice = closeResult.FilledPrice ?? price.Value;
         var pnlPct = ComputePnlPercent(state.IsLong, state.AverageEntryPrice, closePrice);
         var grossPnl = state.TotalCost * pnlPct / 100m;
-        var commission = state.TotalCost * (LimitExitFeeRate + 0.0003m); // taker on close ≈ +0.03%
+        var commission = state.TotalCost * exchange.TakerFeeRate * 2m;
         var netPnl = grossPnl - commission;
         var direction = state.IsLong ? "Long" : "Short";
 
@@ -1001,7 +1009,8 @@ public class SmaDcaHandler : IStrategyHandler
                 var filledQty = status.FilledQuantity > 0 ? status.FilledQuantity : state.EntryOrderQuantity;
                 AdoptEntryFill(strategy, config, state, isLong, filledQty, fillPrice, orderId);
                 ClearEntryPendingFields(state);
-                await PlaceTakeProfitLimit(strategy, config, state, exchange);
+                if (!exchange.UsesSoftTakeProfit)
+                    await PlaceTakeProfitLimit(strategy, config, state, exchange);
                 await _telegramSignalService.SendOpenPositionSignalAsync(
                     strategy, config.Symbol, config.Direction,
                     fillPrice * filledQty, fillPrice, state.CurrentTakeProfit, stopLoss: null, ct);
@@ -1015,7 +1024,8 @@ public class SmaDcaHandler : IStrategyHandler
                     var fillPrice = status.AverageFilledPrice > 0 ? status.AverageFilledPrice : state.EntryOrderLimitPrice;
                     AdoptEntryFill(strategy, config, state, isLong, status.FilledQuantity, fillPrice, orderId);
                     ClearEntryPendingFields(state);
-                    await PlaceTakeProfitLimit(strategy, config, state, exchange);
+                    if (!exchange.UsesSoftTakeProfit)
+                        await PlaceTakeProfitLimit(strategy, config, state, exchange);
                 }
                 else
                 {
@@ -1052,7 +1062,8 @@ public class SmaDcaHandler : IStrategyHandler
                 $"Entry лимит #{orderId} отменён с частичным филлом {status.FilledQuantity} @ {fillPrice} — принимаем как вход");
             AdoptEntryFill(strategy, config, state, isLong, status.FilledQuantity, fillPrice, orderId);
             ClearEntryPendingFields(state);
-            await PlaceTakeProfitLimit(strategy, config, state, exchange);
+            if (!exchange.UsesSoftTakeProfit)
+                await PlaceTakeProfitLimit(strategy, config, state, exchange);
         }
         else
         {
@@ -1166,7 +1177,8 @@ public class SmaDcaHandler : IStrategyHandler
                 var filledQty = status.FilledQuantity > 0 ? status.FilledQuantity : state.DcaOrderQuantity;
                 AdoptDcaFill(strategy, config, state, filledQty, fillPrice, orderId);
                 ClearDcaPendingFields(state);
-                await ReplaceTakeProfitLimit(strategy, config, state, exchange);
+                if (!exchange.UsesSoftTakeProfit)
+                    await ReplaceTakeProfitLimit(strategy, config, state, exchange);
                 await _telegramSignalService.SendDcaSignalAsync(strategy, config.Symbol, config.Direction,
                     state.DcaLevel, fillPrice * filledQty, state.AverageEntryPrice, state.CurrentTakeProfit, ct);
                 break;
@@ -1180,7 +1192,8 @@ public class SmaDcaHandler : IStrategyHandler
                     var filledQty = status.FilledQuantity;
                     AdoptDcaFill(strategy, config, state, filledQty, fillPrice, orderId);
                     ClearDcaPendingFields(state);
-                    await ReplaceTakeProfitLimit(strategy, config, state, exchange);
+                    if (!exchange.UsesSoftTakeProfit)
+                        await ReplaceTakeProfitLimit(strategy, config, state, exchange);
                     await _telegramSignalService.SendDcaSignalAsync(strategy, config.Symbol, config.Direction,
                         state.DcaLevel, fillPrice * filledQty, state.AverageEntryPrice, state.CurrentTakeProfit, ct);
                 }

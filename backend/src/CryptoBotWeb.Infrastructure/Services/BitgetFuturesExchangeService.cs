@@ -11,6 +11,10 @@ namespace CryptoBotWeb.Infrastructure.Services;
 
 public class BitgetFuturesExchangeService : IFuturesExchangeService
 {
+    // source: https://www.bitget.com/support/articles/12560603810662 — standard tier USDT-M perpetual
+    public decimal TakerFeeRate => 0.0006m;
+    public decimal MakerFeeRate => 0.0002m;
+
     private readonly BitgetRestClient _client;
 
     public BitgetFuturesExchangeService(string apiKey, string apiSecret, string? passphrase, ApiProxy? proxy = null)

@@ -13,7 +13,15 @@ namespace CryptoBotWeb.Infrastructure.Services;
 public class DzengiFuturesExchangeService : IFuturesExchangeService
 {
     private const string DefaultBaseUrl = "https://api-adapter.dzengi.com";
-    private const string SyntheticTpPrefix = "dzengi-tp:";
+
+    public bool UsesSoftTakeProfit => true;
+
+    // source: https://dzengi.com/fees-charges — 0.075% per side, no maker/taker split, for non-BTC/ETH
+    // leveraged crypto. BTC/ETH would be 0.06% but we don't currently trade those on Dzengi-Marjan, and
+    // the strategy framework assumes one rate per exchange.
+    public decimal TakerFeeRate => 0.00075m;
+    public decimal MakerFeeRate => 0.00075m;
+
     private static readonly TimeSpan ExchangeInfoTtl = TimeSpan.FromSeconds(30);
 
     private readonly HttpClient _http;
@@ -204,23 +212,51 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
     {
         try
         {
-            var position = await FindPositionAsync(symbol, direction);
-            if (position == null)
+            // Dzengi opens a separate trading position per market order; close every raw position
+            // matching (symbol, direction) so the netted view returns to zero in one tick.
+            var raws = await FindRawPositionsAsync(symbol, direction);
+            if (raws.Count == 0)
                 return new OrderResultDto { Success = false, ErrorMessage = $"No {direction} position for {symbol}" };
 
-            var form = new Dictionary<string, string>
+            var succeeded = new List<string>();
+            var failed = new List<(string Id, string Error)>();
+            decimal closedQty = 0m;
+
+            foreach (var raw in raws)
             {
-                ["positionId"] = position.PositionId
-            };
-            // /api/v2/closeTradingPosition takes no accountId per swagger.
+                try
+                {
+                    var form = new Dictionary<string, string> { ["positionId"] = raw.PositionId };
+                    using var _ = await SignedRequestAsync(HttpMethod.Post, "/api/v2/closeTradingPosition", form);
+                    succeeded.Add(raw.PositionId);
+                    closedQty += raw.Quantity;
+                }
+                catch (Exception ex)
+                {
+                    failed.Add((raw.PositionId, ex.Message));
+                }
+            }
 
-            using var doc = await SignedRequestAsync(HttpMethod.Post, "/api/v2/closeTradingPosition", form);
+            if (failed.Count == 0)
+            {
+                return new OrderResultDto
+                {
+                    Success = true,
+                    OrderId = succeeded.Count == 1
+                        ? $"close-{succeeded[0]}"
+                        : $"close-multi:{string.Join(",", succeeded)}",
+                    FilledQuantity = closedQty
+                };
+            }
 
+            var failDesc = string.Join("; ", failed.Select(f => $"{f.Id}: {f.Error}"));
+            var okDesc = succeeded.Count > 0 ? $" succeeded: {string.Join(",", succeeded)}." : string.Empty;
             return new OrderResultDto
             {
-                Success = true,
-                OrderId = $"close-{position.PositionId}",
-                FilledQuantity = quantity
+                Success = false,
+                OrderId = succeeded.Count > 0 ? $"close-multi:{string.Join(",", succeeded)}" : null,
+                FilledQuantity = closedQty,
+                ErrorMessage = $"Failed to close {failed.Count}/{raws.Count} positions ({failDesc}).{okDesc}"
             };
         }
         catch (Exception ex)
@@ -234,7 +270,11 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
         try
         {
             if (reduceOnly)
-                return await PlaceSyntheticTpAsync(symbol, side, price);
+                return new OrderResultDto
+                {
+                    Success = false,
+                    ErrorMessage = "Dzengi does not support reduce-only limit orders; use market close"
+                };
 
             var info = await GetSymbolInfoAsync(symbol);
             var roundedQty = FloorToStep(quantity, info.QtyStep);
@@ -278,96 +318,10 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
         }
     }
 
-    private async Task<OrderResultDto> PlaceSyntheticTpAsync(string symbol, string side, decimal tpPrice)
-    {
-        // reduceOnly=true: attach TP to existing position via /updateTradingPosition.
-        // side argument is the CLOSE direction, so position direction is the opposite.
-        var positionDirection = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? "SHORT" : "LONG";
-        var position = await FindPositionAsync(symbol, positionDirection);
-        if (position == null)
-            return new OrderResultDto { Success = false, ErrorMessage = $"No {positionDirection} position to attach TP on {symbol}" };
-
-        var info = await GetSymbolInfoAsync(symbol);
-        var roundedTp = FloorToStep(tpPrice, info.TickSize);
-
-        var form = new Dictionary<string, string>
-        {
-            ["positionId"] = position.PositionId,
-            ["takeProfit"] = FormatDecimal(roundedTp)
-        };
-        // /api/v2/updateTradingPosition takes no accountId per swagger.
-
-        var syntheticOrderId = $"{SyntheticTpPrefix}{position.PositionId}:{FormatDecimal(roundedTp)}";
-
-        try
-        {
-            using var doc = await SignedRequestAsync(HttpMethod.Post, "/api/v2/updateTradingPosition", form);
-        }
-        catch (HttpRequestException ex) when (
-            ex.Message.Contains("-1128", StringComparison.Ordinal) ||
-            ex.Message.Contains("Invalid take profit", StringComparison.OrdinalIgnoreCase))
-        {
-            // Dzengi rejects when the TP price has already been crossed by the market — their TP is
-            // position-attached (not a resting limit), so it must sit ahead of current price. After
-            // DCA averaging shifts the TP target close to current price, this is the typical
-            // outcome. The semantically correct action is "TP already hit" → market-close the
-            // position and return a synthetic TP-order id; GetSyntheticTpStatusAsync will report it
-            // Filled (because the position is gone) and the strategy will record the TP fill via
-            // its normal path.
-            var closeForm = new Dictionary<string, string>
-            {
-                ["positionId"] = position.PositionId
-            };
-            try
-            {
-                using var _ = await SignedRequestAsync(HttpMethod.Post, "/api/v2/closeTradingPosition", closeForm);
-            }
-            catch (Exception closeEx)
-            {
-                return new OrderResultDto
-                {
-                    Success = false,
-                    ErrorMessage = $"TP rejected (price already crossed: {ex.Message}); fallback close also failed: {closeEx.Message}"
-                };
-            }
-
-            return new OrderResultDto
-            {
-                Success = true,
-                OrderId = syntheticOrderId,
-                FilledPrice = roundedTp,
-                FilledQuantity = position.Quantity
-            };
-        }
-
-        return new OrderResultDto
-        {
-            Success = true,
-            OrderId = syntheticOrderId,
-            FilledPrice = roundedTp,
-            FilledQuantity = position.Quantity
-        };
-    }
-
     public async Task<bool> CancelOrderAsync(string symbol, string orderId)
     {
         try
         {
-            if (orderId.StartsWith(SyntheticTpPrefix, StringComparison.Ordinal))
-            {
-                var parts = orderId.Substring(SyntheticTpPrefix.Length).Split(':');
-                if (parts.Length < 1) return false;
-                var positionId = parts[0];
-
-                var form = new Dictionary<string, string>
-                {
-                    ["positionId"] = positionId,
-                    ["takeProfit"] = "" // clear TP
-                };
-                using var _ = await SignedRequestAsync(HttpMethod.Post, "/api/v2/updateTradingPosition", form);
-                return true;
-            }
-
             var dzengiSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Dzengi);
             var q = new Dictionary<string, string>
             {
@@ -405,9 +359,6 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
     {
         try
         {
-            if (orderId.StartsWith(SyntheticTpPrefix, StringComparison.Ordinal))
-                return await GetSyntheticTpStatusAsync(symbol, orderId);
-
             var dzengiSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Dzengi);
             var q = new Dictionary<string, string>
             {
@@ -430,35 +381,6 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
         {
             return null;
         }
-    }
-
-    private async Task<OrderStatusDto?> GetSyntheticTpStatusAsync(string symbol, string orderId)
-    {
-        var parts = orderId.Substring(SyntheticTpPrefix.Length).Split(':');
-        if (parts.Length < 2) return null;
-        var positionId = parts[0];
-        var tpPrice = ParseDecimal(parts[1]);
-
-        var position = await FindPositionByIdAsync(positionId);
-        if (position == null)
-        {
-            // Position gone — treat as TP filled.
-            return new OrderStatusDto
-            {
-                OrderId = orderId,
-                Status = OrderLifecycleStatus.Filled,
-                FilledQuantity = 0m,
-                AverageFilledPrice = tpPrice
-            };
-        }
-
-        return new OrderStatusDto
-        {
-            OrderId = orderId,
-            Status = OrderLifecycleStatus.Open,
-            FilledQuantity = 0m,
-            AverageFilledPrice = tpPrice
-        };
     }
 
     public async Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol)
@@ -497,7 +419,7 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
     public async Task<PositionDto?> GetPositionAsync(string symbol, string side)
     {
         var direction = side.Equals("Long", StringComparison.OrdinalIgnoreCase) ? "LONG" : "SHORT";
-        var position = await FindPositionAsync(symbol, direction);
+        var position = await FindAggregatedPositionAsync(symbol, direction);
         if (position == null) return null;
 
         return new PositionDto
@@ -513,24 +435,21 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
     public async Task<List<PositionDto>> GetOpenPositionsAsync()
     {
         // Let exceptions propagate — controller wraps as 502 with message so the UI can show the real cause.
-        var positions = await GetPositionsRawAsync();
+        var raws = await GetPositionsRawAsync();
         var list = new List<PositionDto>();
-        foreach (var p in positions)
+        foreach (var agg in AggregatePositions(raws))
         {
-            if (p.Quantity == 0) continue;
-            if (string.IsNullOrEmpty(p.Symbol)) continue;
-
-            var side = p.Direction.Equals("LONG", StringComparison.OrdinalIgnoreCase) ? "Long"
-                     : p.Direction.Equals("SHORT", StringComparison.OrdinalIgnoreCase) ? "Short"
-                     : p.Direction;
+            var side = agg.Direction.Equals("LONG", StringComparison.OrdinalIgnoreCase) ? "Long"
+                     : agg.Direction.Equals("SHORT", StringComparison.OrdinalIgnoreCase) ? "Short"
+                     : agg.Direction;
 
             list.Add(new PositionDto
             {
-                Symbol = SymbolHelper.FromDzengiSymbol(p.Symbol),
+                Symbol = SymbolHelper.FromDzengiSymbol(agg.DzengiSymbol),
                 Side = side,
-                Quantity = Math.Abs(p.Quantity),
-                EntryPrice = p.EntryPrice,
-                UnrealizedPnl = p.UnrealizedPnl
+                Quantity = agg.Quantity,
+                EntryPrice = agg.EntryPrice,
+                UnrealizedPnl = agg.UnrealizedPnl
             });
         }
         return list;
@@ -704,31 +623,57 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
         return map;
     }
 
-    private record DzengiPosition(string PositionId, decimal Quantity, decimal EntryPrice, decimal UnrealizedPnl);
+    // Synthetic netted view — PositionId is for logs/UI only, not for close routing.
+    private record DzengiPosition(string PositionId, string DzengiSymbol, string Direction, decimal Quantity, decimal EntryPrice, decimal UnrealizedPnl);
 
-    private async Task<DzengiPosition?> FindPositionAsync(string symbol, string direction)
+    private async Task<DzengiPosition?> FindAggregatedPositionAsync(string symbol, string direction)
+    {
+        var dzengiSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Dzengi);
+        var raws = await GetPositionsRawAsync();
+        foreach (var agg in AggregatePositions(raws))
+        {
+            if (!string.Equals(agg.DzengiSymbol, dzengiSymbol, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!string.Equals(agg.Direction, direction, StringComparison.OrdinalIgnoreCase)) continue;
+            return agg;
+        }
+        return null;
+    }
+
+    private async Task<List<RawPosition>> FindRawPositionsAsync(string symbol, string direction)
     {
         var dzengiSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Dzengi);
         var positions = await GetPositionsRawAsync();
+        var list = new List<RawPosition>();
         foreach (var p in positions)
         {
             if (!string.Equals(p.Symbol, dzengiSymbol, StringComparison.OrdinalIgnoreCase)) continue;
             if (!string.Equals(p.Direction, direction, StringComparison.OrdinalIgnoreCase)) continue;
             if (p.Quantity == 0) continue;
-            return new DzengiPosition(p.PositionId, p.Quantity, p.EntryPrice, p.UnrealizedPnl);
+            list.Add(p);
         }
-        return null;
+        return list;
     }
 
-    private async Task<DzengiPosition?> FindPositionByIdAsync(string positionId)
+    // Dzengi opens a separate trading position per market order; net them per (symbol, direction).
+    private static IEnumerable<DzengiPosition> AggregatePositions(List<RawPosition> raws)
     {
-        var positions = await GetPositionsRawAsync();
-        foreach (var p in positions)
+        var groups = raws
+            .Where(p => p.Quantity != 0 && !string.IsNullOrEmpty(p.Symbol))
+            .GroupBy(p => (Symbol: p.Symbol, Direction: p.Direction.ToUpperInvariant()));
+
+        foreach (var g in groups)
         {
-            if (string.Equals(p.PositionId, positionId, StringComparison.Ordinal) && p.Quantity != 0)
-                return new DzengiPosition(p.PositionId, p.Quantity, p.EntryPrice, p.UnrealizedPnl);
+            var totalQty = g.Sum(p => p.Quantity);
+            if (totalQty == 0) continue;
+
+            var weightedEntry = g.Sum(p => p.Quantity * p.EntryPrice) / totalQty;
+            var totalPnl = g.Sum(p => p.UnrealizedPnl);
+
+            var ids = g.Select(p => p.PositionId).ToList();
+            var displayId = ids.Count == 1 ? ids[0] : $"{ids[0]}+{ids.Count - 1}";
+
+            yield return new DzengiPosition(displayId, g.Key.Symbol, g.Key.Direction, totalQty, weightedEntry, totalPnl);
         }
-        return null;
     }
 
     private record RawPosition(string PositionId, string Symbol, string Direction, decimal Quantity, decimal EntryPrice, decimal UnrealizedPnl);
