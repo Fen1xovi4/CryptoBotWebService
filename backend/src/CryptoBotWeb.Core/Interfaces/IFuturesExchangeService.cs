@@ -34,6 +34,9 @@ public interface IFuturesExchangeService : IDisposable
     Task<PositionDto?> GetPositionAsync(string symbol, string side) =>
         throw new NotSupportedException("GetPositionAsync not implemented");
 
+    Task<List<PositionDto>> GetOpenPositionsAsync() =>
+        throw new NotSupportedException("GetOpenPositionsAsync not implemented");
+
     Task<List<FundingRateDto>> GetAllFundingRatesAsync() =>
         throw new NotSupportedException("GetAllFundingRatesAsync not implemented");
 

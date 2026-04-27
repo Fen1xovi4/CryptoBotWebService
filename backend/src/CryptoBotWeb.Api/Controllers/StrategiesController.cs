@@ -631,6 +631,113 @@ public class StrategiesController : ControllerBase
             return Ok(new { message = "Позиция закрыта по рынку", details = new[] { $"{closedDirection} closed: qty={Math.Round(quantity, 6)}, price={Math.Round(closePrice, 6)}, PnL=${Math.Round(netPnl, 2)}" } });
         }
 
+        // --- SmaDca path ---
+        if (strategy.Type == StrategyTypes.SmaDca)
+        {
+            var smaState = JsonSerializer.Deserialize<SmaDcaState>(strategy.StateJson, jsonOpts);
+            if (smaState == null || !smaState.InPosition || smaState.TotalQuantity <= 0)
+                return BadRequest(new { message = "Нет открытой позиции" });
+
+            var smaConfig = JsonSerializer.Deserialize<SmaDcaConfig>(strategy.ConfigJson, jsonOpts);
+            if (smaConfig == null || string.IsNullOrEmpty(smaConfig.Symbol))
+                return BadRequest(new { message = "Некорректная конфигурация (symbol пуст)" });
+
+            using var smaExchange = _exchangeFactory.CreateFutures(strategy.Account);
+
+            // Cancel any TP/Entry/DCA limits before market-closing.
+            try { await smaExchange.CancelAllOrdersAsync(smaConfig.Symbol); } catch { }
+
+            var smaCurrentPrice = await smaExchange.GetTickerPriceAsync(smaConfig.Symbol);
+
+            OrderResultDto smaResult;
+            string smaCloseSide;
+            if (smaState.IsLong)
+            {
+                smaResult = await smaExchange.CloseLongAsync(smaConfig.Symbol, smaState.TotalQuantity);
+                smaCloseSide = "Sell";
+            }
+            else
+            {
+                smaResult = await smaExchange.CloseShortAsync(smaConfig.Symbol, smaState.TotalQuantity);
+                smaCloseSide = "Buy";
+            }
+
+            var smaClosePrice = smaCurrentPrice ?? smaState.AverageEntryPrice;
+            var smaPnlPct = smaState.AverageEntryPrice > 0
+                ? (smaState.IsLong
+                    ? (smaClosePrice - smaState.AverageEntryPrice) / smaState.AverageEntryPrice * 100m
+                    : (smaState.AverageEntryPrice - smaClosePrice) / smaState.AverageEntryPrice * 100m)
+                : 0m;
+            var smaGrossPnl = smaState.TotalCost * smaPnlPct / 100m;
+            var smaCommission = smaState.TotalCost * 2m * 0.0005m;
+            var smaNetPnl = smaGrossPnl - smaCommission;
+            var smaDirection = smaState.IsLong ? "Long" : "Short";
+
+            _db.Trades.Add(new Trade
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                AccountId = strategy.AccountId,
+                ExchangeOrderId = smaResult.OrderId ?? "",
+                Symbol = smaConfig.Symbol,
+                Side = smaCloseSide,
+                Quantity = smaState.TotalQuantity,
+                Price = smaClosePrice,
+                Status = "ManualClose",
+                ExecutedAt = DateTime.UtcNow,
+                PnlDollar = smaNetPnl,
+                Commission = smaCommission
+            });
+
+            _db.StrategyLogs.Add(new StrategyLog
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                Level = "Info",
+                Message = $"{smaDirection.ToUpper()} закрыт вручную (SmaDca): цена={Math.Round(smaClosePrice, 6)}, " +
+                          $"вход={Math.Round(smaState.AverageEntryPrice, 6)}, qty={Math.Round(smaState.TotalQuantity, 6)}, " +
+                          $"PnL={Math.Round(smaPnlPct, 4)}% (${Math.Round(smaNetPnl, 2)}, комиссия≈${Math.Round(smaCommission, 4)})",
+                CreatedAt = DateTime.UtcNow
+            });
+
+            // Reset position state — mirrors SmaDcaHandler.ResetPositionState. SkipNextCandle prevents
+            // an instant re-entry on the same bar; StateInitialized is preserved so restart-sync
+            // doesn't re-fire.
+            var smaClosedQty = smaState.TotalQuantity;
+            smaState.RealizedPnlDollar += smaNetPnl;
+            smaState.InPosition = false;
+            smaState.TotalQuantity = 0;
+            smaState.TotalCost = 0;
+            smaState.AverageEntryPrice = 0;
+            smaState.CurrentTakeProfit = 0;
+            smaState.DcaLevel = 0;
+            smaState.LastDcaPrice = 0;
+            smaState.PositionOpenedAt = null;
+            smaState.DcaCooldownUntil = null;
+            smaState.TakeProfitOrderId = null;
+            smaState.EntryOrderId = null;
+            smaState.EntryOrderLimitPrice = 0;
+            smaState.EntryOrderQuantity = 0;
+            smaState.EntryOrderPlacedAtCandleTime = null;
+            smaState.DcaOrderId = null;
+            smaState.DcaOrderLimitPrice = 0;
+            smaState.DcaOrderQuantity = 0;
+            smaState.TpCrossedAt = null;
+            smaState.SkipNextCandle = true;
+
+            strategy.StateJson = JsonSerializer.Serialize(smaState, saveOpts);
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = "Позиция закрыта по рынку",
+                details = new[]
+                {
+                    $"{smaDirection} closed: qty={Math.Round(smaClosedQty, 6)}, price={Math.Round(smaClosePrice, 6)}, PnL=${Math.Round(smaNetPnl, 2)}"
+                }
+            });
+        }
+
         // --- EmaBounce / MaratG path ---
         var state = JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, jsonOpts);
 

@@ -402,6 +402,46 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    public async Task<List<PositionDto>> GetOpenPositionsAsync()
+    {
+        try
+        {
+            // Bybit V5: GetPositionsAsync requires either symbol or settleAsset for linear category.
+            // settleAsset="USDT" returns all USDT-linear positions in one call (max 200).
+            var result = await _client.V5Api.Trading.GetPositionsAsync(Category.Linear, settleAsset: "USDT");
+
+            if (!result.Success || result.Data?.List == null)
+                return new List<PositionDto>();
+
+            var list = new List<PositionDto>();
+            foreach (var p in result.Data.List)
+            {
+                if (p.Quantity == 0) continue;
+                if (string.IsNullOrEmpty(p.Symbol)) continue;
+
+                // Bybit returns Side as Buy/Sell in one-way mode — map to Long/Short.
+                var sideStr = p.Side.ToString();
+                var mappedSide = sideStr.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? "Long"
+                               : sideStr.Equals("Sell", StringComparison.OrdinalIgnoreCase) ? "Short"
+                               : sideStr;
+
+                list.Add(new PositionDto
+                {
+                    Symbol = p.Symbol,
+                    Side = mappedSide,
+                    Quantity = Math.Abs(p.Quantity),
+                    EntryPrice = p.AveragePrice ?? 0m,
+                    UnrealizedPnl = p.UnrealizedPnl ?? 0m
+                });
+            }
+            return list;
+        }
+        catch (Exception)
+        {
+            return new List<PositionDto>();
+        }
+    }
+
     /// <summary>
     /// Fetches funding fee payment history from Bybit transaction logs (type = Settlement).
     /// Bybit V5 transaction log API filters by baseAsset (e.g. "BTC"), not by full symbol.

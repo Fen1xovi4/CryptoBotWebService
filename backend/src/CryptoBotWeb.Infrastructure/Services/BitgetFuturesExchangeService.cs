@@ -241,18 +241,41 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
                 price: roundedPrice,
                 reduceOnly: reduceOnly ? true : null);
 
+            // Build a maximally informative error string. We've seen the SDK return Success=false
+            // with Error=null (and even Success=true with Data=null) on Bitget rejections, which
+            // surfaced as a blank "Не удалось выставить TP лимит:" log. Capture HTTP status and the
+            // raw response body so the cause is always visible.
+            var success = result.Success && !string.IsNullOrEmpty(result.Data?.OrderId);
+            string? errorMessage = null;
+            if (!success)
+            {
+                var parts = new List<string>();
+                if (result.Error != null) parts.Add(result.Error.ToString());
+                if (result.ResponseStatusCode != null) parts.Add($"HTTP {(int)result.ResponseStatusCode}");
+                if (!string.IsNullOrEmpty(result.OriginalData)) parts.Add($"raw={result.OriginalData}");
+                if (result.Success && string.IsNullOrEmpty(result.Data?.OrderId))
+                    parts.Add("SDK reported Success=true but OrderId is empty/null");
+                errorMessage = parts.Count > 0
+                    ? string.Join(" | ", parts)
+                    : "Bitget SDK returned no error and no order id (unknown failure)";
+            }
+
             return new OrderResultDto
             {
-                Success = result.Success,
+                Success = success,
                 OrderId = result.Data?.OrderId,
                 FilledPrice = roundedPrice,
                 FilledQuantity = roundedQty,
-                ErrorMessage = result.Error?.Message
+                ErrorMessage = errorMessage
             };
         }
         catch (Exception ex)
         {
-            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
+            return new OrderResultDto
+            {
+                Success = false,
+                ErrorMessage = $"{ex.GetType().Name}: {ex.Message}" + (ex.InnerException != null ? $" → {ex.InnerException.Message}" : "")
+            };
         }
     }
 
@@ -454,6 +477,46 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    public async Task<List<PositionDto>> GetOpenPositionsAsync()
+    {
+        try
+        {
+            // Bitget V2: GetPositionsAsync(productType, marginAsset) — returns all open positions for asset.
+            var result = await _client.FuturesApiV2.Trading.GetPositionsAsync(
+                BitgetProductTypeV2.UsdtFutures, "USDT");
+
+            if (!result.Success || result.Data == null)
+                return new List<PositionDto>();
+
+            var list = new List<PositionDto>();
+            foreach (var p in result.Data)
+            {
+                if (p.Total == 0) continue;
+                if (string.IsNullOrEmpty(p.Symbol)) continue;
+
+                // Bitget PositionSide enum is "Long" / "Short" — already canonical.
+                var side = p.PositionSide.ToString();
+                var normalized = side.Equals("Long", StringComparison.OrdinalIgnoreCase) ? "Long"
+                               : side.Equals("Short", StringComparison.OrdinalIgnoreCase) ? "Short"
+                               : side;
+
+                list.Add(new PositionDto
+                {
+                    Symbol = p.Symbol,
+                    Side = normalized,
+                    Quantity = Math.Abs(p.Total),
+                    EntryPrice = p.AverageOpenPrice,
+                    UnrealizedPnl = p.UnrealizedProfitAndLoss
+                });
+            }
+            return list;
+        }
+        catch (Exception)
+        {
+            return new List<PositionDto>();
         }
     }
 

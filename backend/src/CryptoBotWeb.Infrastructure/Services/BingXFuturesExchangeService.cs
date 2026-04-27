@@ -386,6 +386,45 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    public async Task<List<PositionDto>> GetOpenPositionsAsync()
+    {
+        try
+        {
+            // BingX: GetPositionsAsync with null/empty symbol returns all open positions.
+            var result = await _client.PerpetualFuturesApi.Trading.GetPositionsAsync(null!);
+
+            if (!result.Success || result.Data == null)
+                return new List<PositionDto>();
+
+            var list = new List<PositionDto>();
+            foreach (var p in result.Data)
+            {
+                if (p.Size == 0) continue;
+                if (string.IsNullOrEmpty(p.Symbol)) continue;
+
+                // BingX symbols come as "BTC-USDT"; strip dash to canonical form.
+                var canonical = p.Symbol.Replace("-", "");
+
+                // In one-way mode Size sign indicates direction: positive = long, negative = short.
+                var side = p.Size >= 0 ? "Long" : "Short";
+
+                list.Add(new PositionDto
+                {
+                    Symbol = canonical,
+                    Side = side,
+                    Quantity = Math.Abs(p.Size),
+                    EntryPrice = p.AveragePrice,
+                    UnrealizedPnl = p.UnrealizedProfit
+                });
+            }
+            return list;
+        }
+        catch (Exception)
+        {
+            return new List<PositionDto>();
+        }
+    }
+
     private static KlineInterval MapInterval(string timeframe) => timeframe.ToLowerInvariant() switch
     {
         "1m" => KlineInterval.OneMinute,

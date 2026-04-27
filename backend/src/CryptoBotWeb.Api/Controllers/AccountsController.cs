@@ -5,6 +5,7 @@ using CryptoBotWeb.Core.Entities;
 using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
+using CryptoBotWeb.Infrastructure.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -101,6 +102,12 @@ public class AccountsController : ControllerBase
         _db.ExchangeAccounts.Add(account);
         await _db.SaveChangesAsync();
 
+        // Auto-fetch DzengiAccountId on creation (one call, best-effort).
+        if (account.ExchangeType == ExchangeType.Dzengi)
+        {
+            await TryFetchDzengiAccountIdAsync(account);
+        }
+
         // Load proxy name for response
         string? proxyName = null;
         if (request.ProxyId.HasValue)
@@ -189,6 +196,12 @@ public class AccountsController : ControllerBase
 
         try
         {
+            // For Dzengi accounts without a cached accountId, fetch and persist it before testing.
+            if (account.ExchangeType == ExchangeType.Dzengi && string.IsNullOrEmpty(account.DzengiAccountId))
+            {
+                await TryFetchDzengiAccountIdAsync(account);
+            }
+
             using var service = (IDisposable)_exchangeFactory.Create(account);
             var exchangeService = (IExchangeService)service;
             var (success, error) = await exchangeService.TestConnectionAsync();
@@ -197,6 +210,144 @@ public class AccountsController : ControllerBase
         catch (Exception ex)
         {
             return Ok(new { success = false, message = ex.Message });
+        }
+    }
+
+    [HttpGet("{id:guid}/balance")]
+    public async Task<IActionResult> GetBalance(Guid id)
+    {
+        var account = await _db.ExchangeAccounts
+            .Include(a => a.Proxy)
+            .FirstOrDefaultAsync(a => a.Id == id && a.UserId == GetUserId());
+
+        if (account == null)
+            return NotFound();
+
+        try
+        {
+            if (account.ExchangeType == ExchangeType.Dzengi && string.IsNullOrEmpty(account.DzengiAccountId))
+            {
+                await TryFetchDzengiAccountIdAsync(account);
+            }
+
+            using var service = (IDisposable)_exchangeFactory.Create(account);
+            var exchangeService = (IExchangeService)service;
+            var balances = await exchangeService.GetBalancesAsync();
+            return Ok(new AccountBalanceResponse
+            {
+                AccountId = account.Id,
+                AccountName = account.Name,
+                Exchange = account.ExchangeType.ToString(),
+                Balances = balances
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(502, new { message = ex.Message });
+        }
+    }
+
+    [HttpGet("{id:guid}/positions")]
+    public async Task<IActionResult> GetPositions(Guid id)
+    {
+        var account = await _db.ExchangeAccounts
+            .Include(a => a.Proxy)
+            .FirstOrDefaultAsync(a => a.Id == id && a.UserId == GetUserId());
+
+        if (account == null)
+            return NotFound();
+
+        try
+        {
+            if (account.ExchangeType == ExchangeType.Dzengi && string.IsNullOrEmpty(account.DzengiAccountId))
+            {
+                await TryFetchDzengiAccountIdAsync(account);
+            }
+
+            using var service = _exchangeFactory.CreateFutures(account);
+            var positions = await service.GetOpenPositionsAsync();
+            return Ok(positions);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(502, new { message = ex.Message });
+        }
+    }
+
+    [HttpPost("{id:guid}/positions/close")]
+    public async Task<IActionResult> ClosePosition(Guid id, [FromBody] ClosePositionRequest request)
+    {
+        var account = await _db.ExchangeAccounts
+            .Include(a => a.Proxy)
+            .FirstOrDefaultAsync(a => a.Id == id && a.UserId == GetUserId());
+
+        if (account == null)
+            return NotFound();
+
+        if (string.IsNullOrWhiteSpace(request.Symbol) || string.IsNullOrWhiteSpace(request.Side))
+            return BadRequest(new { message = "Symbol and side are required." });
+
+        var side = request.Side.Trim().ToLowerInvariant();
+        if (side != "long" && side != "short")
+            return BadRequest(new { message = "Side must be 'long' or 'short'." });
+
+        try
+        {
+            if (account.ExchangeType == ExchangeType.Dzengi && string.IsNullOrEmpty(account.DzengiAccountId))
+            {
+                await TryFetchDzengiAccountIdAsync(account);
+            }
+
+            using var service = _exchangeFactory.CreateFutures(account);
+
+            // Re-fetch the live position so we close the exact remaining quantity, not stale UI data.
+            var position = await service.GetPositionAsync(request.Symbol, side);
+            if (position == null || position.Quantity <= 0)
+                return BadRequest(new { message = "No open position found on the exchange for this symbol/side." });
+
+            var result = side == "long"
+                ? await service.CloseLongAsync(request.Symbol, position.Quantity)
+                : await service.CloseShortAsync(request.Symbol, position.Quantity);
+
+            if (!result.Success)
+                return StatusCode(502, new { message = result.ErrorMessage ?? "Close failed" });
+
+            return Ok(new
+            {
+                success = true,
+                orderId = result.OrderId,
+                filledPrice = result.FilledPrice,
+                filledQuantity = result.FilledQuantity
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(502, new { message = ex.Message });
+        }
+    }
+
+    private async Task TryFetchDzengiAccountIdAsync(ExchangeAccount account)
+    {
+        var service = _exchangeFactory.Create(account);
+        try
+        {
+            if (service is DzengiExchangeService dzengi)
+            {
+                var accountId = await dzengi.FetchPrimaryAccountIdAsync();
+                if (!string.IsNullOrEmpty(accountId))
+                {
+                    account.DzengiAccountId = accountId;
+                    await _db.SaveChangesAsync();
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort: if fetch fails, user re-runs /test later to fill the id.
+        }
+        finally
+        {
+            (service as IDisposable)?.Dispose();
         }
     }
 }

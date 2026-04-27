@@ -149,6 +149,22 @@ public class SmaDcaHandler : IStrategyHandler
                 await _db.SaveChangesAsync(ct);
                 if (!state.InPosition) return;
             }
+
+            // 4b. TP price-cross safety net. Bridges the case where the exchange's TP failed to
+            // trigger even though price has been past the TP target for a while — observed on
+            // Dzengi where TP is a position parameter (not a reduce-only limit), and triggering
+            // is sometimes silently skipped. Real reduce-only limits (Bybit/Bitget/BingX) fill
+            // within seconds of being crossed, so a 60s grace period gives them time before we
+            // step in.
+            if (state.InPosition && state.CurrentTakeProfit > 0)
+            {
+                if (await CheckTpCrossSafetyNet(strategy, config, state, exchange, ct))
+                {
+                    SaveState(strategy, state);
+                    await _db.SaveChangesAsync(ct);
+                    return;
+                }
+            }
         }
 
         // 3. Fetch candles for SMA. Extra headroom so the seed SMA is well-populated.
@@ -350,7 +366,7 @@ public class SmaDcaHandler : IStrategyHandler
         await PlaceTakeProfitLimit(strategy, config, state, exchange);
 
         await _telegramSignalService.SendOpenPositionSignalAsync(strategy, config.Symbol, config.Direction,
-            quoteAmount, fillPrice, state.CurrentTakeProfit, 0m, ct);
+            quoteAmount, fillPrice, state.CurrentTakeProfit, stopLoss: null, ct);
     }
 
     private async Task OpenDcaMarket(Strategy strategy, SmaDcaConfig config, SmaDcaState state,
@@ -412,6 +428,9 @@ public class SmaDcaHandler : IStrategyHandler
         AssertInvariant(strategy, state);
 
         await ReplaceTakeProfitLimit(strategy, config, state, exchange);
+
+        await _telegramSignalService.SendDcaSignalAsync(strategy, config.Symbol, config.Direction,
+            state.DcaLevel, fillPrice * filledQty, state.AverageEntryPrice, state.CurrentTakeProfit, ct);
     }
 
     /// <summary>
@@ -451,7 +470,7 @@ public class SmaDcaHandler : IStrategyHandler
         catch (NotSupportedException)
         {
             // Exchange can't confirm — fall back to the old position-only heuristic.
-            await RecordLimitTpFillAndReset(strategy, config, state, exchange);
+            await RecordLimitTpFillAndReset(strategy, config, state, exchange, ct);
             return true;
         }
         catch (Exception ex)
@@ -474,7 +493,7 @@ public class SmaDcaHandler : IStrategyHandler
         }
 
         // tpOrder is null (purged after fill), Filled, Cancelled, Rejected, or Unknown → reset is safe.
-        await RecordLimitTpFillAndReset(strategy, config, state, exchange);
+        await RecordLimitTpFillAndReset(strategy, config, state, exchange, ct);
         return true;
     }
 
@@ -486,7 +505,7 @@ public class SmaDcaHandler : IStrategyHandler
     /// the order has already been purged from the exchange's active list.
     /// </summary>
     private async Task RecordLimitTpFillAndReset(Strategy strategy, SmaDcaConfig config,
-        SmaDcaState state, IFuturesExchangeService exchange)
+        SmaDcaState state, IFuturesExchangeService exchange, CancellationToken ct = default)
     {
         var tpPrice = state.CurrentTakeProfit;
         var qtyClosed = state.TotalQuantity;
@@ -494,6 +513,7 @@ public class SmaDcaHandler : IStrategyHandler
         var grossPnl = state.TotalCost * pnlPct / 100m;
         var commission = state.TotalCost * LimitExitFeeRate;
         var netPnl = grossPnl - commission;
+        var direction = state.IsLong ? "Long" : "Short";
 
         RecordTrade(strategy, config.Symbol, state.IsLong ? "Sell" : "Buy", qtyClosed, tpPrice,
             state.TakeProfitOrderId, "TakeProfit", pnlDollar: netPnl, commission: commission);
@@ -501,7 +521,7 @@ public class SmaDcaHandler : IStrategyHandler
         state.RealizedPnlDollar += netPnl;
 
         Log(strategy, "Info",
-            $"💰 EXIT {(state.IsLong ? "Long" : "Short")} (TP лимит): qty={qtyClosed} @ {tpPrice}, " +
+            $"💰 EXIT {direction} (TP лимит): qty={qtyClosed} @ {tpPrice}, " +
             $"avg={Math.Round(state.AverageEntryPrice, 6)}, PnL={Math.Round(pnlPct, 4)}% " +
             $"(${Math.Round(netPnl, 2)}, комиссия≈${Math.Round(commission, 4)})");
         _logger.LogInformation(
@@ -517,6 +537,100 @@ public class SmaDcaHandler : IStrategyHandler
 
         ResetPositionState(state);
         state.SkipNextCandle = true;
+
+        await _telegramSignalService.SendPositionClosedSignalAsync(
+            strategy, config.Symbol, direction, netPnl, pnlPct, ct);
+    }
+
+    // ───────── TP price-cross safety net ─────────
+
+    private const int TpCrossGraceSeconds = 60;
+
+    /// <summary>
+    /// If the market price has crossed state.CurrentTakeProfit and stayed past it for
+    /// TpCrossGraceSeconds, market-close the position. Returns true when a forced close was
+    /// executed (caller should persist state and return).
+    /// </summary>
+    private async Task<bool> CheckTpCrossSafetyNet(Strategy strategy, SmaDcaConfig config,
+        SmaDcaState state, IFuturesExchangeService exchange, CancellationToken ct)
+    {
+        var price = await exchange.GetTickerPriceAsync(config.Symbol);
+        if (price is null or <= 0)
+        {
+            // No usable price → can't decide; clear timer so we don't accidentally count idle ticks.
+            state.TpCrossedAt = null;
+            return false;
+        }
+
+        var crossed = state.IsLong
+            ? price.Value >= state.CurrentTakeProfit
+            : price.Value <= state.CurrentTakeProfit;
+
+        if (!crossed)
+        {
+            state.TpCrossedAt = null;
+            return false;
+        }
+
+        if (!state.TpCrossedAt.HasValue)
+        {
+            state.TpCrossedAt = DateTime.UtcNow;
+            Log(strategy, "Info",
+                $"⚠️ Цена {price.Value} пересекла TP={Math.Round(state.CurrentTakeProfit, 6)} — " +
+                $"запускаю таймер {TpCrossGraceSeconds}с до принудительного закрытия (если биржевой TP не сработает)");
+            return false;
+        }
+
+        var elapsed = (DateTime.UtcNow - state.TpCrossedAt.Value).TotalSeconds;
+        if (elapsed < TpCrossGraceSeconds) return false;
+
+        Log(strategy, "Warning",
+            $"⏱ Цена {price.Value} держится за TP={Math.Round(state.CurrentTakeProfit, 6)} {elapsed:F0}с, " +
+            "биржевой TP не сработал — закрываю позицию по рынку");
+
+        // Cancel any limits (TP/Entry/DCA) on this symbol before market-closing.
+        try { await exchange.CancelAllOrdersAsync(config.Symbol); } catch { }
+
+        var closeResult = state.IsLong
+            ? await exchange.CloseLongAsync(config.Symbol, state.TotalQuantity)
+            : await exchange.CloseShortAsync(config.Symbol, state.TotalQuantity);
+
+        if (!closeResult.Success)
+        {
+            Log(strategy, "Error",
+                $"Не удалось маркет-закрыть позицию (safety net): {closeResult.ErrorMessage}. Повтор на следующем тике.");
+            // Reset the timer so we retry from scratch rather than spamming closes.
+            state.TpCrossedAt = DateTime.UtcNow;
+            return false;
+        }
+
+        var qtyClosed = state.TotalQuantity;
+        var closePrice = closeResult.FilledPrice ?? price.Value;
+        var pnlPct = ComputePnlPercent(state.IsLong, state.AverageEntryPrice, closePrice);
+        var grossPnl = state.TotalCost * pnlPct / 100m;
+        var commission = state.TotalCost * (LimitExitFeeRate + 0.0003m); // taker on close ≈ +0.03%
+        var netPnl = grossPnl - commission;
+        var direction = state.IsLong ? "Long" : "Short";
+
+        RecordTrade(strategy, config.Symbol, state.IsLong ? "Sell" : "Buy", qtyClosed, closePrice,
+            closeResult.OrderId, "TakeProfit", pnlDollar: netPnl, commission: commission);
+
+        state.RealizedPnlDollar += netPnl;
+
+        Log(strategy, "Info",
+            $"💰 EXIT {direction} (safety market): qty={qtyClosed} @ {closePrice}, " +
+            $"avg={Math.Round(state.AverageEntryPrice, 6)}, PnL={Math.Round(pnlPct, 4)}% " +
+            $"(${Math.Round(netPnl, 2)}, комиссия≈${Math.Round(commission, 4)})");
+        _logger.LogInformation(
+            "Strategy {Id}: SmaDca SAFETY-NET market close qty={Qty} @ {Price}, netPnL={Pnl}",
+            strategy.Id, qtyClosed, closePrice, netPnl);
+
+        ResetPositionState(state);
+        state.SkipNextCandle = true;
+
+        await _telegramSignalService.SendPositionClosedSignalAsync(
+            strategy, config.Symbol, direction, netPnl, pnlPct, ct);
+        return true;
     }
 
     // ───────── Sync helpers ─────────
@@ -890,7 +1004,7 @@ public class SmaDcaHandler : IStrategyHandler
                 await PlaceTakeProfitLimit(strategy, config, state, exchange);
                 await _telegramSignalService.SendOpenPositionSignalAsync(
                     strategy, config.Symbol, config.Direction,
-                    fillPrice * filledQty, fillPrice, state.CurrentTakeProfit, 0m, ct);
+                    fillPrice * filledQty, fillPrice, state.CurrentTakeProfit, stopLoss: null, ct);
                 break;
             }
             case OrderLifecycleStatus.Cancelled:
@@ -1053,6 +1167,8 @@ public class SmaDcaHandler : IStrategyHandler
                 AdoptDcaFill(strategy, config, state, filledQty, fillPrice, orderId);
                 ClearDcaPendingFields(state);
                 await ReplaceTakeProfitLimit(strategy, config, state, exchange);
+                await _telegramSignalService.SendDcaSignalAsync(strategy, config.Symbol, config.Direction,
+                    state.DcaLevel, fillPrice * filledQty, state.AverageEntryPrice, state.CurrentTakeProfit, ct);
                 break;
             }
             case OrderLifecycleStatus.Cancelled:
@@ -1061,9 +1177,12 @@ public class SmaDcaHandler : IStrategyHandler
                 if (status.FilledQuantity > 0)
                 {
                     var fillPrice = status.AverageFilledPrice > 0 ? status.AverageFilledPrice : state.DcaOrderLimitPrice;
-                    AdoptDcaFill(strategy, config, state, status.FilledQuantity, fillPrice, orderId);
+                    var filledQty = status.FilledQuantity;
+                    AdoptDcaFill(strategy, config, state, filledQty, fillPrice, orderId);
                     ClearDcaPendingFields(state);
                     await ReplaceTakeProfitLimit(strategy, config, state, exchange);
+                    await _telegramSignalService.SendDcaSignalAsync(strategy, config.Symbol, config.Direction,
+                        state.DcaLevel, fillPrice * filledQty, state.AverageEntryPrice, state.CurrentTakeProfit, ct);
                 }
                 else
                 {
@@ -1160,6 +1279,7 @@ public class SmaDcaHandler : IStrategyHandler
         state.PositionOpenedAt = null;
         state.DcaCooldownUntil = null;
         state.TakeProfitOrderId = null;
+        state.TpCrossedAt = null;
         ClearEntryPendingFields(state);
         ClearDcaPendingFields(state);
     }

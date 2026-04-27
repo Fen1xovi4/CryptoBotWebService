@@ -28,6 +28,7 @@ public class ExchangeServiceFactory : IExchangeServiceFactory
                 account.PassphraseEncrypted != null ? _encryption.Decrypt(account.PassphraseEncrypted) : null,
                 proxy),
             ExchangeType.BingX => new BingXExchangeService(apiKey, apiSecret, proxy),
+            ExchangeType.Dzengi => new DzengiExchangeService(apiKey, apiSecret, account.DzengiAccountId, proxy),
             _ => throw new ArgumentException($"Unsupported exchange type: {account.ExchangeType}")
         };
     }
@@ -46,6 +47,7 @@ public class ExchangeServiceFactory : IExchangeServiceFactory
                 account.PassphraseEncrypted != null ? _encryption.Decrypt(account.PassphraseEncrypted) : null,
                 proxy),
             ExchangeType.BingX => new BingXFuturesExchangeService(apiKey, apiSecret, proxy),
+            ExchangeType.Dzengi => new DzengiFuturesExchangeService(apiKey, apiSecret, account.DzengiAccountId, proxy),
             _ => throw new ArgumentException($"Unsupported exchange type: {account.ExchangeType}")
         };
     }

@@ -13,8 +13,21 @@ public static class SymbolHelper
         return exchange switch
         {
             ExchangeType.BingX => ConvertToBingX(symbol),
+            ExchangeType.Dzengi => ConvertToDzengi(symbol),
             _ => symbol
         };
+    }
+
+    public static string FromDzengiSymbol(string dzengiSymbol)
+    {
+        // Dzengi crypto LEVERAGE pairs are quoted in USD (not USDT).
+        // Map to canonical USDT-quoted form so it matches other exchanges:
+        //   BTC/USD_LEVERAGE -> BTCUSDT
+        var trimmed = dzengiSymbol.Replace("_LEVERAGE", "", StringComparison.OrdinalIgnoreCase);
+        var compact = trimmed.Replace("/", "").ToUpperInvariant();
+        if (compact.EndsWith("USD", StringComparison.Ordinal) && !compact.EndsWith("USDT", StringComparison.Ordinal))
+            compact = compact[..^3] + "USDT";
+        return compact;
     }
 
     private static string ConvertToBingX(string symbol)
@@ -25,6 +38,25 @@ public static class SymbolHelper
             {
                 var baseAsset = symbol[..^quote.Length];
                 return $"{baseAsset}-{quote}";
+            }
+        }
+        return symbol;
+    }
+
+    private static string ConvertToDzengi(string symbol)
+    {
+        // Canonical BTCUSDT -> Dzengi BTC/USD_LEVERAGE (crypto CFDs are USD-quoted, not USDT).
+        if (symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase))
+        {
+            var baseAsset = symbol[..^4];
+            return $"{baseAsset}/USD_LEVERAGE";
+        }
+        foreach (var quote in QuoteAssets)
+        {
+            if (symbol.EndsWith(quote, StringComparison.OrdinalIgnoreCase))
+            {
+                var baseAsset = symbol[..^quote.Length];
+                return $"{baseAsset}/{quote}_LEVERAGE";
             }
         }
         return symbol;
