@@ -132,9 +132,11 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         var (qtyStep, _) = await GetSymbolInfoAsync(bingxSymbol);
         var qty = FloorToStep(quantity, qtyStep);
 
+        // One-way mode: PositionSide.Both + reduceOnly:true so BingX only reduces the existing long
+        // and never opens a counter-position if the qty exceeds the remaining size.
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Sell, FuturesOrderType.Market,
-            PositionSide.Both, qty);
+            PositionSide.Both, qty, price: null, reduceOnly: true);
 
         return new OrderResultDto
         {
@@ -150,9 +152,11 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         var (qtyStep, _) = await GetSymbolInfoAsync(bingxSymbol);
         var qty = FloorToStep(quantity, qtyStep);
 
+        // One-way mode: PositionSide.Both + reduceOnly:true so BingX only reduces the existing short
+        // and never opens a counter-position if the qty exceeds the remaining size.
         var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
             bingxSymbol, OrderSide.Buy, FuturesOrderType.Market,
-            PositionSide.Both, qty);
+            PositionSide.Both, qty, price: null, reduceOnly: true);
 
         return new OrderResultDto
         {
@@ -226,9 +230,11 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
             if (roundedQty < minQty)
                 return new OrderResultDto { Success = false, ErrorMessage = $"Qty {roundedQty} < min {minQty} for {symbol}" };
 
+            // reduceOnly must be propagated — TP/SL limits set by SmaDca rely on it to safely close
+            // the existing position without flipping into the opposite side.
             var result = await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
                 bingxSymbol, orderSide, FuturesOrderType.Limit,
-                PositionSide.Both, roundedQty, price: roundedPrice);
+                PositionSide.Both, roundedQty, price: roundedPrice, reduceOnly: reduceOnly);
 
             return new OrderResultDto
             {
@@ -256,6 +262,65 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         catch (Exception)
         {
             return false;
+        }
+    }
+
+    public async Task<bool> CancelOrderAsync(string symbol, string orderId)
+    {
+        try
+        {
+            // BingX uses long order IDs — refuse non-numeric inputs early instead of letting the SDK 400.
+            if (!long.TryParse(orderId, out var parsedId))
+                return false;
+
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.Trading.CancelOrderAsync(
+                bingxSymbol, parsedId, null, default);
+            return result.Success;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public async Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId)
+    {
+        try
+        {
+            // BingX uses long order IDs — refuse non-numeric inputs early instead of letting the SDK 400.
+            if (!long.TryParse(orderId, out var parsedId))
+                return null;
+
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.Trading.GetOrderAsync(
+                bingxSymbol, parsedId, null, default);
+
+            if (!result.Success || result.Data == null)
+                return null;
+
+            var order = result.Data;
+            var lifecycleStatus = order.Status switch
+            {
+                OrderStatus.New or OrderStatus.Pending => OrderLifecycleStatus.Open,
+                OrderStatus.PartiallyFilled => OrderLifecycleStatus.PartiallyFilled,
+                OrderStatus.Filled => OrderLifecycleStatus.Filled,
+                OrderStatus.Canceled => OrderLifecycleStatus.Cancelled,
+                OrderStatus.Failed => OrderLifecycleStatus.Rejected,
+                _ => OrderLifecycleStatus.Unknown
+            };
+
+            return new OrderStatusDto
+            {
+                OrderId = order.OrderId.ToString(),
+                Status = lifecycleStatus,
+                FilledQuantity = order.QuantityFilled ?? 0m,
+                AverageFilledPrice = order.AveragePrice ?? 0m
+            };
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 
