@@ -1,4 +1,5 @@
 using Bitget.Net.Clients;
+using Bitget.Net.Enums;
 using CryptoExchange.Net.Authentication;
 using CryptoExchange.Net.Objects;
 using CryptoBotWeb.Core.DTOs;
@@ -27,17 +28,28 @@ public class BitgetExchangeService : IExchangeService, IDisposable
 
     public async Task<List<BalanceDto>> GetBalancesAsync()
     {
-        var result = await _client.SpotApiV2.Account.GetSpotBalancesAsync();
+        // Platform trades only USDT-M perpetual futures, so report the futures wallet, not spot.
+        var result = await _client.FuturesApiV2.Account.GetBalancesAsync(BitgetProductTypeV2.UsdtFutures);
         if (!result.Success || result.Data == null)
             return new List<BalanceDto>();
 
+        // Bitget V2 futures balance has no plain "wallet balance" field; `Equity` is what the
+        // exchange UI shows as account balance (includes unrealized PnL). Anchor Total to Equity:
+        // Free = Available (withdrawable), Locked = remainder so Free + Locked == Equity.
         return result.Data
-            .Where(b => b.Available > 0 || b.Frozen > 0)
-            .Select(b => new BalanceDto
+            .Where(b => b.Available > 0 || b.Locked > 0 || b.Equity > 0)
+            .Select(b =>
             {
-                Asset = b.Asset,
-                Free = b.Available,
-                Locked = b.Frozen
+                var equity = b.Equity;
+                var available = b.Available;
+                var locked = equity - available;
+                if (locked < 0) locked = 0m;
+                return new BalanceDto
+                {
+                    Asset = b.MarginAsset,
+                    Free = available,
+                    Locked = locked
+                };
             })
             .ToList();
     }

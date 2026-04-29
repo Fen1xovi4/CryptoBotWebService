@@ -1,6 +1,6 @@
+using System.Globalization;
 using System.Net.Http.Json;
 using System.Text;
-using System.Text.Json;
 using CryptoBotWeb.Core.Entities;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
@@ -24,8 +24,62 @@ public class TelegramSignalService : ITelegramSignalService
     }
 
     public async Task SendOpenPositionSignalAsync(Strategy strategy, string symbol, string direction,
-        decimal orderSize, decimal entryPrice, decimal takeProfit, decimal stopLoss,
+        decimal orderSize, decimal entryPrice, decimal takeProfit, decimal? stopLoss,
         CancellationToken ct = default)
+    {
+        var isLong = direction.Equals("Long", StringComparison.OrdinalIgnoreCase);
+        var emoji = isLong ? "📈" : "📉";
+
+        var message = new StringBuilder();
+        message.AppendLine("🔔 <b>Open position</b>");
+        message.AppendLine($"Ticker: <code>{symbol}</code>");
+        message.AppendLine($"{(isLong ? "LONG" : "SHORT")} {emoji}");
+        message.AppendLine($"Size: ~{FormatUsd(orderSize)} USDT");
+        message.AppendLine($"Entry: <code>{FormatPrice(entryPrice)}</code>");
+        message.AppendLine($"Take Profit: <code>{FormatPrice(takeProfit)}</code>");
+        if (stopLoss is > 0)
+            message.AppendLine($"Stop Loss: <code>{FormatPrice(stopLoss.Value)}</code>");
+
+        await BroadcastAsync(strategy, message.ToString(), ct);
+    }
+
+    public async Task SendDcaSignalAsync(Strategy strategy, string symbol, string direction,
+        int dcaLevel, decimal dcaQuoteAmount, decimal newAveragePrice, decimal newTakeProfit,
+        CancellationToken ct = default)
+    {
+        var isLong = direction.Equals("Long", StringComparison.OrdinalIgnoreCase);
+        var emoji = isLong ? "📈" : "📉";
+
+        var message = new StringBuilder();
+        message.AppendLine($"➕ <b>Position averaging (DCA #{dcaLevel})</b>");
+        message.AppendLine($"Ticker: <code>{symbol}</code>");
+        message.AppendLine($"{(isLong ? "LONG" : "SHORT")} {emoji}");
+        message.AppendLine($"Add-in: ~{FormatUsd(dcaQuoteAmount)} USDT");
+        message.AppendLine($"New avg: <code>{FormatPrice(newAveragePrice)}</code>");
+        message.AppendLine($"New TP: <code>{FormatPrice(newTakeProfit)}</code>");
+
+        await BroadcastAsync(strategy, message.ToString(), ct);
+    }
+
+    public async Task SendPositionClosedSignalAsync(Strategy strategy, string symbol, string direction,
+        decimal pnlDollar, decimal pnlPercent,
+        CancellationToken ct = default)
+    {
+        var profit = pnlDollar >= 0;
+        var headEmoji = profit ? "💰" : "🔻";
+        var sign = profit ? "+" : "";
+
+        var message = new StringBuilder();
+        message.AppendLine($"{headEmoji} <b>Position closed</b>");
+        message.AppendLine($"Ticker: <code>{symbol}</code> ({direction})");
+        message.AppendLine(profit ? "Полностью закрыта ✅" : "Полностью закрыта ❗");
+        message.AppendLine(
+            $"PnL: <b>{sign}{FormatUsd(pnlDollar)} USDT</b> ({sign}{pnlPercent.ToString("0.##", CultureInfo.InvariantCulture)}%)");
+
+        await BroadcastAsync(strategy, message.ToString(), ct);
+    }
+
+    private async Task BroadcastAsync(Strategy strategy, string text, CancellationToken ct)
     {
         if (strategy.TelegramBotId == null)
             return;
@@ -37,20 +91,6 @@ public class TelegramSignalService : ITelegramSignalService
 
         if (bot == null || bot.Subscribers.Count == 0)
             return;
-
-        var isLong = direction.Equals("Long", StringComparison.OrdinalIgnoreCase);
-        var emoji = isLong ? "📈" : "📉";
-
-        var message = new StringBuilder();
-        message.AppendLine("🔔 <b>Open position</b>");
-        message.AppendLine($"Ticker: <code>{symbol}</code>");
-        message.AppendLine($"{(isLong ? "LONG" : "SHORT")} {emoji}");
-        message.AppendLine($"Size: ~{orderSize} USDT");
-        message.AppendLine($"Entry: <code>{entryPrice}</code>");
-        message.AppendLine($"Take Profit: <code>{takeProfit}</code>");
-        message.AppendLine($"Stop Loss: <code>{stopLoss}</code>");
-
-        var text = message.ToString();
 
         foreach (var subscriber in bot.Subscribers)
         {
@@ -87,5 +127,20 @@ public class TelegramSignalService : ITelegramSignalService
             var body = await response.Content.ReadAsStringAsync(ct);
             _logger.LogWarning("Telegram API error {Status}: {Body}", response.StatusCode, body);
         }
+    }
+
+    private static string FormatUsd(decimal value)
+        => Math.Round(value, 2).ToString("0.##", CultureInfo.InvariantCulture);
+
+    // Variable-precision formatter so micro-cap prices (e.g. 0.00012345) keep meaningful digits
+    // while round prices (50000) stay short.
+    private static string FormatPrice(decimal value)
+    {
+        var abs = Math.Abs(value);
+        var digits = abs >= 1000m ? 2
+                   : abs >= 10m ? 4
+                   : abs >= 0.1m ? 6
+                   : 8;
+        return Math.Round(value, digits).ToString("0.########", CultureInfo.InvariantCulture);
     }
 }

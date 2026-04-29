@@ -27,17 +27,30 @@ public class BingXExchangeService : IExchangeService, IDisposable
 
     public async Task<List<BalanceDto>> GetBalancesAsync()
     {
-        var result = await _client.SpotApi.Account.GetBalancesAsync();
+        // Platform trades only USDT-M perpetual futures, so report the futures wallet, not spot.
+        var result = await _client.PerpetualFuturesApi.Account.GetBalancesAsync();
         if (!result.Success || result.Data == null)
             return new List<BalanceDto>();
 
+        // BingX futures: `balance` is the wallet balance shown on the exchange (no unrealized PnL).
+        // `equity = balance + unrealizedProfit`. Decomposed: balance = availableMargin + usedMargin + frozenMargin.
+        // We anchor Total to `balance` so it matches the exchange UI exactly, and derive Locked as the
+        // remainder so Free + Locked == wallet balance even if the margin breakdown rounds slightly.
+        // If `balance` is missing, fall back to `equity` (then Total includes unrealized PnL — best effort).
         return result.Data
-            .Where(b => b.Free > 0 || b.Locked > 0)
-            .Select(b => new BalanceDto
+            .Where(b => (b.Balance ?? 0) > 0 || (b.Equity ?? 0) > 0 || (b.AvailableMargin ?? 0) > 0 || (b.FrozenMargin ?? 0) > 0)
+            .Select(b =>
             {
-                Asset = b.Asset,
-                Free = b.Free,
-                Locked = b.Locked
+                var available = b.AvailableMargin ?? 0m;
+                var wallet = b.Balance ?? b.Equity ?? available;
+                var locked = wallet - available;
+                if (locked < 0) locked = 0m;
+                return new BalanceDto
+                {
+                    Asset = b.Asset,
+                    Free = available,
+                    Locked = locked
+                };
             })
             .ToList();
     }

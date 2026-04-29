@@ -10,6 +10,10 @@ namespace CryptoBotWeb.Infrastructure.Services;
 
 public class BingXFuturesExchangeService : IFuturesExchangeService
 {
+    // source: https://bingx.com/en/support/articles/360029987112 — standard tier USDT perpetual
+    public decimal TakerFeeRate => 0.0005m;
+    public decimal MakerFeeRate => 0.0002m;
+
     private readonly BingXRestClient _client;
 
     public BingXFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)
@@ -383,6 +387,45 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    public async Task<List<PositionDto>> GetOpenPositionsAsync()
+    {
+        try
+        {
+            // BingX: GetPositionsAsync with null/empty symbol returns all open positions.
+            var result = await _client.PerpetualFuturesApi.Trading.GetPositionsAsync(null!);
+
+            if (!result.Success || result.Data == null)
+                return new List<PositionDto>();
+
+            var list = new List<PositionDto>();
+            foreach (var p in result.Data)
+            {
+                if (p.Size == 0) continue;
+                if (string.IsNullOrEmpty(p.Symbol)) continue;
+
+                // BingX symbols come as "BTC-USDT"; strip dash to canonical form.
+                var canonical = p.Symbol.Replace("-", "");
+
+                // In one-way mode Size sign indicates direction: positive = long, negative = short.
+                var side = p.Size >= 0 ? "Long" : "Short";
+
+                list.Add(new PositionDto
+                {
+                    Symbol = canonical,
+                    Side = side,
+                    Quantity = Math.Abs(p.Size),
+                    EntryPrice = p.AveragePrice,
+                    UnrealizedPnl = p.UnrealizedProfit
+                });
+            }
+            return list;
+        }
+        catch (Exception)
+        {
+            return new List<PositionDto>();
         }
     }
 

@@ -1,6 +1,7 @@
 using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
+using CryptoBotWeb.Infrastructure.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -74,6 +75,48 @@ public class TradingHostedService : BackgroundService
                             {
                                 _logger.LogWarning("No handler for strategy type {Type}", strategy.Type);
                                 return;
+                            }
+
+                            // Dzengi requires accountId on signed calls; auto-fetch and persist if missing.
+                            if (strategy.Account != null &&
+                                strategy.Account.ExchangeType == ExchangeType.Dzengi &&
+                                string.IsNullOrEmpty(strategy.Account.DzengiAccountId))
+                            {
+                                IExchangeService? spot = null;
+                                try
+                                {
+                                    spot = innerFactory.Create(strategy.Account);
+                                    if (spot is DzengiExchangeService dzengi)
+                                    {
+                                        var accountId = await dzengi.FetchPrimaryAccountIdAsync();
+                                        if (string.IsNullOrEmpty(accountId))
+                                        {
+                                            _logger.LogWarning("Dzengi accountId fetch returned null for {AccountId}: {Error}",
+                                                strategy.Account.Id, dzengi.LastFetchAccountIdError ?? "(no error)");
+                                        }
+                                        if (!string.IsNullOrEmpty(accountId))
+                                        {
+                                            var innerDb = innerScope.ServiceProvider.GetRequiredService<AppDbContext>();
+                                            var tracked = await innerDb.ExchangeAccounts.FirstOrDefaultAsync(
+                                                a => a.Id == strategy.Account.Id, ct);
+                                            if (tracked != null)
+                                            {
+                                                tracked.DzengiAccountId = accountId;
+                                                await innerDb.SaveChangesAsync(ct);
+                                            }
+                                            strategy.Account.DzengiAccountId = accountId;
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex, "Failed to fetch Dzengi accountId for account {AccountId}",
+                                        strategy.Account.Id);
+                                }
+                                finally
+                                {
+                                    (spot as IDisposable)?.Dispose();
+                                }
                             }
 
                             using var exchange = innerFactory.CreateFutures(strategy.Account);

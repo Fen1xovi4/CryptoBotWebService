@@ -58,4 +58,10 @@ public class SmaDcaState
     // Price and qty the pending DCA limit was placed at.
     public decimal DcaOrderLimitPrice { get; set; }
     public decimal DcaOrderQuantity { get; set; }
+
+    // First moment we observed the market price had crossed the TP target while the position
+    // was still open. Used as a safety net for exchanges (e.g. Dzengi) where the TP is attached
+    // to the position rather than placed as a reduce-only limit, and the exchange may fail to
+    // trigger it. Cleared when the price falls back behind the TP or the position closes.
+    public DateTime? TpCrossedAt { get; set; }
 }

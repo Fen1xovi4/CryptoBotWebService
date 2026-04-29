@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Fragment } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, Link } from 'react-router-dom';
 import api from '../api/client';
@@ -24,11 +24,39 @@ interface ProxyOption {
   isActive: boolean;
 }
 
-const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
+const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX', 4: 'Dzengi' };
 
 interface ConnectionStatus {
   success: boolean;
   message: string;
+}
+
+interface Balance {
+  asset: string;
+  free: number;
+  locked: number;
+  total: number;
+}
+
+interface BalanceResponse {
+  accountId: string;
+  accountName: string;
+  exchange: string;
+  balances: Balance[];
+}
+
+interface Position {
+  symbol: string;
+  side: string;
+  quantity: number;
+  entryPrice: number;
+  unrealizedPnl: number;
+}
+
+function formatAmount(n: number): string {
+  if (n === 0) return '0';
+  if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return n.toLocaleString(undefined, { maximumFractionDigits: 8 });
 }
 
 export default function AccountsPage() {
@@ -36,6 +64,13 @@ export default function AccountsPage() {
   const [editAccount, setEditAccount] = useState<ExchangeAccount | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<Record<string, ConnectionStatus>>({});
   const [checking, setChecking] = useState<Record<string, boolean>>({});
+  const [balances, setBalances] = useState<Record<string, Balance[] | null>>({});
+  const [loadingBalance, setLoadingBalance] = useState<Record<string, boolean>>({});
+  const [balancesExpanded, setBalancesExpanded] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [positions, setPositions] = useState<Record<string, Position[] | null>>({});
+  const [loadingPositions, setLoadingPositions] = useState<Record<string, boolean>>({});
+  const [closingPosition, setClosingPosition] = useState<Record<string, boolean>>({});
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { maxAccounts, currentAccounts } = useSubscriptionStore();
@@ -47,6 +82,53 @@ export default function AccountsPage() {
     queryKey: ['accounts'],
     queryFn: () => api.get('/accounts').then((r) => r.data),
   });
+
+  const fetchPositions = async (accId: string) => {
+    setLoadingPositions((prev) => ({ ...prev, [accId]: true }));
+    try {
+      const { data } = await api.get<Position[]>(`/accounts/${accId}/positions`);
+      setPositions((prev) => ({ ...prev, [accId]: data ?? [] }));
+    } catch {
+      setPositions((prev) => ({ ...prev, [accId]: null }));
+    } finally {
+      setLoadingPositions((prev) => ({ ...prev, [accId]: false }));
+    }
+  };
+
+  const closePosition = async (accId: string, symbol: string, side: string) => {
+    const key = `${accId}|${symbol}|${side}`;
+    setClosingPosition((prev) => ({ ...prev, [key]: true }));
+    try {
+      await api.post(`/accounts/${accId}/positions/close`, { symbol, side });
+      await fetchPositions(accId);
+      fetchBalance(accId);
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || 'Failed to close position';
+      alert(msg);
+    } finally {
+      setClosingPosition((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const toggleExpanded = (accId: string) => {
+    setExpanded((prev) => {
+      const next = { ...prev, [accId]: !prev[accId] };
+      if (next[accId] && positions[accId] === undefined) fetchPositions(accId);
+      return next;
+    });
+  };
+
+  const fetchBalance = async (accId: string) => {
+    setLoadingBalance((prev) => ({ ...prev, [accId]: true }));
+    try {
+      const { data } = await api.get<BalanceResponse>(`/accounts/${accId}/balance`);
+      setBalances((prev) => ({ ...prev, [accId]: data.balances ?? [] }));
+    } catch {
+      setBalances((prev) => ({ ...prev, [accId]: null }));
+    } finally {
+      setLoadingBalance((prev) => ({ ...prev, [accId]: false }));
+    }
+  };
 
   // Auto-test active accounts on load
   useEffect(() => {
@@ -60,6 +142,7 @@ export default function AccountsPage() {
       try {
         const { data } = await api.post(`/accounts/${acc.id}/test`);
         setConnectionStatus((prev) => ({ ...prev, [acc.id]: data }));
+        if (data.success) fetchBalance(acc.id);
       } catch {
         setConnectionStatus((prev) => ({
           ...prev,
@@ -86,6 +169,11 @@ export default function AccountsPage() {
       queryClient.invalidateQueries({ queryKey: ['accounts'] });
       if (!variables.isActive) {
         setConnectionStatus((prev) => {
+          const next = { ...prev };
+          delete next[variables.id];
+          return next;
+        });
+        setBalances((prev) => {
           const next = { ...prev };
           delete next[variables.id];
           return next;
@@ -132,24 +220,39 @@ export default function AccountsPage() {
         <table className="w-full">
           <thead>
             <tr className="text-xs text-text-secondary border-b border-border">
+              <th className="w-8 px-2 py-2.5"></th>
               <th className="text-left px-5 py-2.5 font-medium">Name</th>
               <th className="text-left px-5 py-2.5 font-medium">Exchange</th>
               <th className="text-left px-5 py-2.5 font-medium">Proxy</th>
               <th className="text-left px-5 py-2.5 font-medium">Status</th>
+              <th className="text-left px-5 py-2.5 font-medium">Balance</th>
               <th className="text-left px-5 py-2.5 font-medium">Created</th>
               <th className="text-right px-5 py-2.5 font-medium">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={6} className="px-5 py-8 text-center text-text-secondary text-sm">Loading...</td></tr>
+              <tr><td colSpan={8} className="px-5 py-8 text-center text-text-secondary text-sm">Loading...</td></tr>
             ) : accounts?.length === 0 ? (
-              <tr><td colSpan={6} className="px-5 py-8 text-center text-text-secondary text-sm">No accounts yet. Add one to get started.</td></tr>
+              <tr><td colSpan={8} className="px-5 py-8 text-center text-text-secondary text-sm">No accounts yet. Add one to get started.</td></tr>
             ) : (
               accounts?.map((acc) => {
                 const status = connectionStatus[acc.id];
+                const isOpen = !!expanded[acc.id];
                 return (
-                  <tr key={acc.id} className="border-b border-border/50 hover:bg-bg-tertiary/30 transition-colors">
+                <Fragment key={acc.id}>
+                  <tr className="border-b border-border/50 hover:bg-bg-tertiary/30 transition-colors">
+                    <td className="px-2 py-3 align-middle">
+                      <button
+                        onClick={() => toggleExpanded(acc.id)}
+                        className="w-6 h-6 flex items-center justify-center rounded hover:bg-bg-tertiary text-text-secondary"
+                        aria-label={isOpen ? 'Collapse' : 'Expand'}
+                      >
+                        <svg className={`w-3.5 h-3.5 transition-transform ${isOpen ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                        </svg>
+                      </button>
+                    </td>
                     <td
                       className="px-5 py-3 text-sm font-medium text-accent-blue cursor-pointer hover:underline"
                       onClick={() => navigate(`/accounts/${acc.id}`)}
@@ -195,6 +298,60 @@ export default function AccountsPage() {
                         </span>
                       )}
                     </td>
+                    <td className="px-5 py-3 text-sm">
+                      {loadingBalance[acc.id] ? (
+                        <span className="text-text-secondary/60 text-xs">Loading...</span>
+                      ) : balances[acc.id] === undefined ? (
+                        <span className="text-text-secondary/40 text-xs">—</span>
+                      ) : balances[acc.id] === null ? (
+                        <span className="text-accent-red/70 text-xs">Failed</span>
+                      ) : balances[acc.id]!.length === 0 ? (
+                        <span className="text-text-secondary/60 text-xs">Empty</span>
+                      ) : (() => {
+                        const list = balances[acc.id]!;
+                        const usdt = list.find((b) => b.asset === 'USDT');
+                        const sorted = [...list].sort((a, b) => b.total - a.total);
+                        const ordered = usdt ? [usdt, ...sorted.filter((b) => b.asset !== 'USDT')] : sorted;
+                        const isOpen = !!balancesExpanded[acc.id];
+                        const collapsedShow = ordered.slice(0, 2);
+                        const remaining = ordered.length - collapsedShow.length;
+                        const toggle = () => setBalancesExpanded((p) => ({ ...p, [acc.id]: !p[acc.id] }));
+                        return (
+                          <button
+                            type="button"
+                            onClick={toggle}
+                            className="text-left hover:bg-bg-tertiary/50 rounded px-1 -mx-1 py-0.5 transition-colors"
+                          >
+                            {isOpen ? (
+                              <div className="space-y-0.5">
+                                {ordered.map((b) => (
+                                  <div key={b.asset} className="flex items-baseline gap-1.5">
+                                    <span className="font-mono text-text-primary">{formatAmount(b.total)}</span>
+                                    <span className="text-text-secondary text-xs">{b.asset}</span>
+                                  </div>
+                                ))}
+                                <div className="text-[10px] text-text-secondary/50 pt-0.5">click to collapse</div>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1.5">
+                                <span className="flex flex-wrap gap-x-2 gap-y-0.5">
+                                  {collapsedShow.map((b) => (
+                                    <span key={b.asset} className="whitespace-nowrap">
+                                      <span className="font-mono text-text-primary">{formatAmount(b.total)}</span>{' '}
+                                      <span className="text-text-secondary text-xs">{b.asset}</span>
+                                    </span>
+                                  ))}
+                                </span>
+                                {remaining > 0 && (
+                                  <span className="text-xs text-text-secondary/70">+{remaining} more</span>
+                                )}
+                                <span className="text-text-secondary/40 text-[10px]">▾</span>
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })()}
+                    </td>
                     <td className="px-5 py-3 text-sm text-text-secondary">
                       {new Date(acc.createdAt).toLocaleDateString()}
                     </td>
@@ -218,6 +375,7 @@ export default function AccountsPage() {
                               try {
                                 const { data } = await api.post(`/accounts/${acc.id}/test`);
                                 setConnectionStatus((prev) => ({ ...prev, [acc.id]: data }));
+                                if (data.success) fetchBalance(acc.id);
                               } catch {
                                 setConnectionStatus((prev) => ({
                                   ...prev,
@@ -253,6 +411,20 @@ export default function AccountsPage() {
                       )}
                     </td>
                   </tr>
+                  {isOpen && (
+                    <tr className="bg-bg-primary/60 border-b border-border/50">
+                      <td colSpan={8} className="px-5 py-3">
+                        <PositionsPanel
+                          positions={positions[acc.id]}
+                          loading={loadingPositions[acc.id]}
+                          onRefresh={() => fetchPositions(acc.id)}
+                          onClose={(symbol, side) => closePosition(acc.id, symbol, side)}
+                          isClosing={(symbol, side) => !!closingPosition[`${acc.id}|${symbol}|${side}`]}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
                 );
               }))
             }
@@ -359,6 +531,7 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
               <option value={1}>Bybit</option>
               <option value={2}>Bitget</option>
               <option value={3}>BingX</option>
+              <option value={4}>Dzengi</option>
             </select>
             {form.exchangeType === 1 && (
               <div className="flex items-start gap-2 mt-2 bg-accent-yellow/10 border border-accent-yellow/20 rounded-lg px-3 py-2">
@@ -374,6 +547,14 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
                 </svg>
                 <p className="text-xs text-accent-yellow">Set <span className="font-semibold">One-Way Mode</span> in your {form.exchangeType === 2 ? 'Bitget' : 'BingX'} account futures settings before connecting.</p>
+              </div>
+            )}
+            {form.exchangeType === 4 && (
+              <div className="flex items-start gap-2 mt-2 bg-accent-yellow/10 border border-accent-yellow/20 rounded-lg px-3 py-2">
+                <svg className="w-4 h-4 text-accent-yellow mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                </svg>
+                <p className="text-xs text-accent-yellow">Dzengi uses <span className="font-semibold">One-Way Mode</span>; the leverage account ID will be auto-detected on save. Funding-rate strategies (HuntingFunding, FundingClaim) are not supported.</p>
               </div>
             )}
           </div>
@@ -517,6 +698,133 @@ function EditAccountModal({ account, onClose }: { account: ExchangeAccount; onCl
             {mutation.isPending ? 'Saving...' : 'Save'}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function PositionsPanel({
+  positions,
+  loading,
+  onRefresh,
+  onClose,
+  isClosing,
+}: {
+  positions: Position[] | null | undefined;
+  loading: boolean | undefined;
+  onRefresh: () => void;
+  onClose: (symbol: string, side: string) => void;
+  isClosing: (symbol: string, side: string) => boolean;
+}) {
+  if (loading && positions === undefined) {
+    return <div className="text-sm text-text-secondary py-3">Loading positions...</div>;
+  }
+  if (positions === null) {
+    return (
+      <div className="flex items-center justify-between py-2">
+        <span className="text-sm text-accent-red">Failed to fetch positions</span>
+        <button
+          onClick={onRefresh}
+          className="text-xs px-2.5 py-1 rounded bg-bg-tertiary text-text-secondary hover:bg-border"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+  if (!positions || positions.length === 0) {
+    return (
+      <div className="flex items-center justify-between py-2">
+        <span className="text-sm text-text-secondary">No open futures positions</span>
+        <button
+          onClick={onRefresh}
+          disabled={loading}
+          className="text-xs px-2.5 py-1 rounded bg-bg-tertiary text-text-secondary hover:bg-border disabled:opacity-50"
+        >
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+    );
+  }
+
+  const totalPnl = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
+  const fmt = (n: number, frac = 2) =>
+    n.toLocaleString(undefined, { minimumFractionDigits: frac, maximumFractionDigits: frac });
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-3 text-xs text-text-secondary">
+          <span>{positions.length} open position{positions.length === 1 ? "" : "s"}</span>
+          <span>
+            Total uPnL:{" "}
+            <span className={totalPnl >= 0 ? "text-accent-green font-medium" : "text-accent-red font-medium"}>
+              {totalPnl >= 0 ? "+" : ""}{fmt(totalPnl)} USDT
+            </span>
+          </span>
+        </div>
+        <button
+          onClick={onRefresh}
+          disabled={loading}
+          className="text-xs px-2.5 py-1 rounded bg-bg-tertiary text-text-secondary hover:bg-border disabled:opacity-50"
+        >
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <table className="w-full">
+          <thead>
+            <tr className="text-xs text-text-secondary bg-bg-secondary/40">
+              <th className="text-left px-3 py-2 font-medium">Symbol</th>
+              <th className="text-left px-3 py-2 font-medium">Side</th>
+              <th className="text-right px-3 py-2 font-medium">Qty</th>
+              <th className="text-right px-3 py-2 font-medium">Entry</th>
+              <th className="text-right px-3 py-2 font-medium">uPnL (USDT)</th>
+              <th className="text-right px-3 py-2 font-medium">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {positions.map((p, i) => {
+              const pnlPositive = p.unrealizedPnl >= 0;
+              const sideLong = p.side.toLowerCase() === "long";
+              const closing = isClosing(p.symbol, p.side);
+              return (
+                <tr key={`${p.symbol}-${p.side}-${i}`} className="border-t border-border/40">
+                  <td className="px-3 py-2 text-sm font-mono">{p.symbol}</td>
+                  <td className="px-3 py-2 text-sm">
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                        sideLong
+                          ? "bg-accent-green/10 text-accent-green"
+                          : "bg-accent-red/10 text-accent-red"
+                      }`}
+                    >
+                      {p.side}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-right text-sm font-mono">{fmt(p.quantity, 4)}</td>
+                  <td className="px-3 py-2 text-right text-sm font-mono">{fmt(p.entryPrice, 4)}</td>
+                  <td className={`px-3 py-2 text-right text-sm font-mono ${pnlPositive ? "text-accent-green" : "text-accent-red"}`}>
+                    {pnlPositive ? "+" : ""}{fmt(p.unrealizedPnl)}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      onClick={() => {
+                        if (confirm(`Close ${p.side} ${p.symbol} (${fmt(p.quantity, 4)})?\n\nIf a strategy is currently managing this position it may try to reopen it.`)) {
+                          onClose(p.symbol, p.side);
+                        }
+                      }}
+                      disabled={closing}
+                      className="px-2.5 py-1 text-xs font-medium bg-accent-red/10 text-accent-red rounded hover:bg-accent-red/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {closing ? "Closing..." : "Close"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );

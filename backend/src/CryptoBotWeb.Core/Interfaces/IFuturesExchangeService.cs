@@ -4,6 +4,22 @@ namespace CryptoBotWeb.Core.Interfaces;
 
 public interface IFuturesExchangeService : IDisposable
 {
+    // Dzengi's "TP" is a position attribute (set via /updateTradingPosition), not a resting
+    // reduce-only limit order. We've observed it silently fail to fire even after price stays
+    // past the target — so on Dzengi we skip placing it entirely and close at market on cross.
+    bool UsesSoftTakeProfit => false;
+
+    /// <summary>
+    /// Fee rate for aggressive fills (market order, or marketable limit).
+    /// Used when computing commissions on entry/close that take liquidity.
+    /// </summary>
+    decimal TakerFeeRate => 0.0006m;
+
+    /// <summary>
+    /// Fee rate for passive limit fills (resting maker order).
+    /// </summary>
+    decimal MakerFeeRate => 0.0002m;
+
     Task<List<SymbolDto>> GetSymbolsAsync();
     Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit);
     Task<decimal?> GetTickerPriceAsync(string symbol);
@@ -33,6 +49,9 @@ public interface IFuturesExchangeService : IDisposable
 
     Task<PositionDto?> GetPositionAsync(string symbol, string side) =>
         throw new NotSupportedException("GetPositionAsync not implemented");
+
+    Task<List<PositionDto>> GetOpenPositionsAsync() =>
+        throw new NotSupportedException("GetOpenPositionsAsync not implemented");
 
     Task<List<FundingRateDto>> GetAllFundingRatesAsync() =>
         throw new NotSupportedException("GetAllFundingRatesAsync not implemented");

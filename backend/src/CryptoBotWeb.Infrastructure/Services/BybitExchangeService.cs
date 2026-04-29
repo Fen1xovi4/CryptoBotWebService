@@ -38,15 +38,26 @@ public class BybitExchangeService : IExchangeService, IDisposable
             if (account.Assets == null) continue;
             foreach (var asset in account.Assets)
             {
+                // Bybit Unified: Free/Locked may be null when funds back open positions.
+                // Anchor Total to WalletBalance (matches the exchange UI's wallet balance);
+                // fall back to Equity if WalletBalance is missing. Free + Locked == anchor.
+                var wallet = asset.WalletBalance ?? 0m;
+                var equity = asset.Equity ?? 0m;
                 var free = asset.Free ?? 0m;
                 var locked = asset.Locked ?? 0m;
-                if (free == 0 && locked == 0) continue;
+                if (wallet == 0 && equity == 0 && free == 0 && locked == 0) continue;
+
+                var anchor = wallet > 0 ? wallet : equity > 0 ? equity : free + locked;
+                var freeOut = free > 0 ? free : anchor - locked;
+                if (freeOut < 0) freeOut = 0m;
+                var lockedOut = anchor - freeOut;
+                if (lockedOut < 0) lockedOut = 0m;
 
                 balances.Add(new BalanceDto
                 {
                     Asset = asset.Asset,
-                    Free = free,
-                    Locked = locked
+                    Free = freeOut,
+                    Locked = lockedOut
                 });
             }
         }

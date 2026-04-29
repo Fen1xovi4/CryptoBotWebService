@@ -11,6 +11,7 @@ public class ExchangeAccount
     public string ApiKeyEncrypted { get; set; } = string.Empty;
     public string ApiSecretEncrypted { get; set; } = string.Empty;
     public string? PassphraseEncrypted { get; set; }
+    public string? DzengiAccountId { get; set; }
     public Guid? ProxyId { get; set; }
     public bool IsActive { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

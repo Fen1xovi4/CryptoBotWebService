@@ -10,6 +10,10 @@ namespace CryptoBotWeb.Infrastructure.Services;
 
 public class BybitFuturesExchangeService : IFuturesExchangeService
 {
+    // source: https://www.bybit.com/en/help-center/article/Trading-fee-rate — non-VIP USDT-perpetual
+    public decimal TakerFeeRate => 0.00055m;
+    public decimal MakerFeeRate => 0.0002m;
+
     private readonly BybitRestClient _client;
 
     public BybitFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)
@@ -399,6 +403,46 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    public async Task<List<PositionDto>> GetOpenPositionsAsync()
+    {
+        try
+        {
+            // Bybit V5: GetPositionsAsync requires either symbol or settleAsset for linear category.
+            // settleAsset="USDT" returns all USDT-linear positions in one call (max 200).
+            var result = await _client.V5Api.Trading.GetPositionsAsync(Category.Linear, settleAsset: "USDT");
+
+            if (!result.Success || result.Data?.List == null)
+                return new List<PositionDto>();
+
+            var list = new List<PositionDto>();
+            foreach (var p in result.Data.List)
+            {
+                if (p.Quantity == 0) continue;
+                if (string.IsNullOrEmpty(p.Symbol)) continue;
+
+                // Bybit returns Side as Buy/Sell in one-way mode — map to Long/Short.
+                var sideStr = p.Side.ToString();
+                var mappedSide = sideStr.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? "Long"
+                               : sideStr.Equals("Sell", StringComparison.OrdinalIgnoreCase) ? "Short"
+                               : sideStr;
+
+                list.Add(new PositionDto
+                {
+                    Symbol = p.Symbol,
+                    Side = mappedSide,
+                    Quantity = Math.Abs(p.Quantity),
+                    EntryPrice = p.AveragePrice ?? 0m,
+                    UnrealizedPnl = p.UnrealizedPnl ?? 0m
+                });
+            }
+            return list;
+        }
+        catch (Exception)
+        {
+            return new List<PositionDto>();
         }
     }
 

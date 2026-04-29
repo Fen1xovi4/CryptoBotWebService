@@ -32,3 +32,9 @@ public class UpdateExchangeAccountRequest
     public Guid? ProxyId { get; set; }
     public bool? IsActive { get; set; }
 }
+
+public class ClosePositionRequest
+{
+    public string Symbol { get; set; } = string.Empty;
+    public string Side { get; set; } = string.Empty;
+}

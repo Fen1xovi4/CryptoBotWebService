@@ -68,6 +68,7 @@ public class AppDbContext : DbContext
             e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
             e.Property(x => x.Name).HasMaxLength(100);
             e.Property(x => x.ExchangeType).HasConversion<short>();
+            e.Property(x => x.DzengiAccountId).HasMaxLength(64);
             e.HasOne(x => x.User)
                 .WithMany(u => u.ExchangeAccounts)
                 .HasForeignKey(x => x.UserId)
