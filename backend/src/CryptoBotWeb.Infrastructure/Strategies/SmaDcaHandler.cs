@@ -468,7 +468,10 @@ public class SmaDcaHandler : IStrategyHandler
         }
         catch (NotSupportedException)
         {
-            // Exchange can't confirm — fall back to the old position-only heuristic.
+            // Exchange can't confirm — fall back to the old position-only heuristic, but still
+            // require a confirming second probe so a single-shot empty-position glitch doesn't
+            // trigger reset.
+            if (!await ConfirmPositionClosed(strategy, config, exchange, ct)) return false;
             await RecordLimitTpFillAndReset(strategy, config, state, exchange, ct);
             return true;
         }
@@ -491,9 +494,59 @@ public class SmaDcaHandler : IStrategyHandler
             return false;
         }
 
-        // tpOrder is null (purged after fill), Filled, Cancelled, Rejected, or Unknown → reset is safe.
+        // tpOrder is null (purged after fill), Filled, Cancelled, Rejected, or Unknown.
+        // Before committing the irreversible reset, require a second GetPositionAsync to also
+        // report no position — guards against transient glitches where both calls momentarily
+        // return null while the position is actually still alive on the exchange.
+        if (!await ConfirmPositionClosed(strategy, config, exchange, ct)) return false;
         await RecordLimitTpFillAndReset(strategy, config, state, exchange, ct);
         return true;
+    }
+
+    /// <summary>
+    /// Re-probe GetPositionAsync after a short delay to confirm the position is really closed.
+    /// Single-shot snapshots can be falsely empty during transient exchange glitches; before
+    /// commiting an irreversible state reset (which leaks any reduce-only TP order still alive
+    /// on the exchange), require a second consistent reading. Returns true only if the second
+    /// probe also reports no position. If the second probe fails (network error) the caller
+    /// should retry on the next tick rather than reset on partial evidence.
+    /// </summary>
+    private async Task<bool> ConfirmPositionClosed(Strategy strategy, SmaDcaConfig config,
+        IFuturesExchangeService exchange, CancellationToken ct = default)
+    {
+        try { await Task.Delay(2000, ct); }
+        catch (OperationCanceledException) { return false; }
+
+        PositionDto? pos;
+        try
+        {
+            pos = await exchange.GetPositionAsync(config.Symbol, config.Direction);
+        }
+        catch (NotSupportedException)
+        {
+            // Exchange can't probe positions at all — trust the first reading.
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "SmaDca: ConfirmPositionClosed second-probe failed for {Symbol} — aborting reset this cycle",
+                config.Symbol);
+            Log(strategy, "Warning",
+                "Не удалось подтвердить закрытие позиции (второй опрос упал) — пропускаю reset, повторю на следующем тике");
+            return false;
+        }
+
+        var stillOpen = pos != null && pos.Quantity > 0;
+        if (stillOpen)
+        {
+            _logger.LogWarning(
+                "Strategy {Id}: position resurfaced on second probe (qty={Qty}) — first 'closed' reading was a glitch, aborting reset",
+                strategy.Id, pos!.Quantity);
+            Log(strategy, "Warning",
+                $"⚠️ Повторный опрос: позиция жива (qty={pos!.Quantity}) — первый 'closed' снэпшот был ложным, отменяю reset");
+        }
+        return !stillOpen;
     }
 
     /// <summary>
@@ -526,6 +579,15 @@ public class SmaDcaHandler : IStrategyHandler
         _logger.LogInformation(
             "Strategy {Id}: SmaDca LIMIT TP filled qty={Qty} @ {Price}, avg={Avg}, netPnL={Pnl}",
             strategy.Id, qtyClosed, tpPrice, state.AverageEntryPrice, netPnl);
+
+        // Belt-and-suspenders: cancel the TP order id before clearing state. If the order really
+        // filled, the cancel is a no-op (already gone). If detection was a false positive that
+        // slipped past ConfirmPositionClosed, we don't leak an orphan reduce-only order.
+        if (!string.IsNullOrEmpty(state.TakeProfitOrderId))
+        {
+            var tpId = state.TakeProfitOrderId;
+            try { await exchange.CancelOrderAsync(config.Symbol, tpId); } catch { }
+        }
 
         if (!string.IsNullOrEmpty(state.DcaOrderId))
         {
@@ -820,6 +882,14 @@ public class SmaDcaHandler : IStrategyHandler
             if (err.Contains("No position", StringComparison.OrdinalIgnoreCase)
                 || err.Contains("number of closed positions", StringComparison.OrdinalIgnoreCase))
             {
+                // The error string is reactive evidence, but Bitget has been seen to emit it
+                // transiently. Confirm with a second GetPositionAsync probe before resetting.
+                if (!await ConfirmPositionClosed(strategy, config, exchange))
+                {
+                    Log(strategy, "Warning",
+                        $"TP не выставлен ({err}), но повторный опрос показал что позиция жива — оставляю state, повторю на следующем тике");
+                    return;
+                }
                 Log(strategy, "Warning",
                     $"TP не выставлен — биржа сообщает: позиции нет ({err}). Фиксирую закрытие и сбрасываю state.");
                 await RecordLimitTpFillAndReset(strategy, config, state, exchange);
@@ -924,6 +994,13 @@ public class SmaDcaHandler : IStrategyHandler
         var positionGone = pos == null || pos.Quantity <= 0;
         if (positionGone)
         {
+            // Confirm with a second probe — the same transient glitch that may have made the
+            // TP order look gone could also produce a one-time empty position response.
+            if (!await ConfirmPositionClosed(strategy, config, exchange))
+            {
+                state.TakeProfitOrderId = null;
+                return false;
+            }
             Log(strategy, "Info",
                 $"TP лимит #{orderId} {(orderMissing ? "исчез" : status!.Status.ToString())} и позиция закрыта на бирже — фиксирую TP fill");
             await RecordLimitTpFillAndReset(strategy, config, state, exchange);
