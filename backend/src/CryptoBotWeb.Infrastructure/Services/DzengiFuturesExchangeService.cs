@@ -237,6 +237,10 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
                 }
             }
 
+            // Trade.ExchangeOrderId is varchar(100) — never concatenate every position id
+            // (with N=4+ Dzengi position ids the joined string overflows and the SaveChanges
+            // for the manual-close trade row throws 22001, leaving state.InPosition stuck=true
+            // even though the exchange position is gone).
             if (failed.Count == 0)
             {
                 return new OrderResultDto
@@ -244,7 +248,7 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
                     Success = true,
                     OrderId = succeeded.Count == 1
                         ? $"close-{succeeded[0]}"
-                        : $"close-multi:{string.Join(",", succeeded)}",
+                        : $"close-{succeeded.Count}x:{succeeded[0]}",
                     FilledQuantity = closedQty
                 };
             }
@@ -254,7 +258,7 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
             return new OrderResultDto
             {
                 Success = false,
-                OrderId = succeeded.Count > 0 ? $"close-multi:{string.Join(",", succeeded)}" : null,
+                OrderId = succeeded.Count > 0 ? $"close-{succeeded.Count}x:{succeeded[0]}" : null,
                 FilledQuantity = closedQty,
                 ErrorMessage = $"Failed to close {failed.Count}/{raws.Count} positions ({failDesc}).{okDesc}"
             };

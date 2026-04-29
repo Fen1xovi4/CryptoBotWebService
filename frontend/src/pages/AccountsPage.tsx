@@ -66,6 +66,7 @@ export default function AccountsPage() {
   const [checking, setChecking] = useState<Record<string, boolean>>({});
   const [balances, setBalances] = useState<Record<string, Balance[] | null>>({});
   const [loadingBalance, setLoadingBalance] = useState<Record<string, boolean>>({});
+  const [balancesExpanded, setBalancesExpanded] = useState<Record<string, boolean>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [positions, setPositions] = useState<Record<string, Position[] | null>>({});
   const [loadingPositions, setLoadingPositions] = useState<Record<string, boolean>>({});
@@ -309,33 +310,45 @@ export default function AccountsPage() {
                       ) : (() => {
                         const list = balances[acc.id]!;
                         const usdt = list.find((b) => b.asset === 'USDT');
-                        const primary = usdt ?? [...list].sort((a, b) => b.total - a.total)[0];
-                        const others = list.filter((b) => b.asset !== primary.asset);
+                        const sorted = [...list].sort((a, b) => b.total - a.total);
+                        const ordered = usdt ? [usdt, ...sorted.filter((b) => b.asset !== 'USDT')] : sorted;
+                        const isOpen = !!balancesExpanded[acc.id];
+                        const collapsedShow = ordered.slice(0, 2);
+                        const remaining = ordered.length - collapsedShow.length;
+                        const toggle = () => setBalancesExpanded((p) => ({ ...p, [acc.id]: !p[acc.id] }));
                         return (
-                          <div className="group relative inline-block">
-                            <span className="font-mono text-text-primary">
-                              {formatAmount(primary.total)}{' '}
-                              <span className="text-text-secondary text-xs">{primary.asset}</span>
-                            </span>
-                            {others.length > 0 && (
-                              <span className="ml-1.5 text-xs text-text-secondary/70">+{others.length}</span>
-                            )}
-                            {list.length > 1 && (
-                              <div className="absolute left-0 top-full mt-1 w-56 bg-bg-primary border border-border rounded-lg p-2.5 shadow-lg z-20 hidden group-hover:block">
-                                <div className="space-y-1">
-                                  {list.slice(0, 12).map((b) => (
-                                    <div key={b.asset} className="flex justify-between text-xs">
-                                      <span className="text-text-secondary">{b.asset}</span>
-                                      <span className="font-mono text-text-primary">{formatAmount(b.total)}</span>
-                                    </div>
+                          <button
+                            type="button"
+                            onClick={toggle}
+                            className="text-left hover:bg-bg-tertiary/50 rounded px-1 -mx-1 py-0.5 transition-colors"
+                          >
+                            {isOpen ? (
+                              <div className="space-y-0.5">
+                                {ordered.map((b) => (
+                                  <div key={b.asset} className="flex items-baseline gap-1.5">
+                                    <span className="font-mono text-text-primary">{formatAmount(b.total)}</span>
+                                    <span className="text-text-secondary text-xs">{b.asset}</span>
+                                  </div>
+                                ))}
+                                <div className="text-[10px] text-text-secondary/50 pt-0.5">click to collapse</div>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1.5">
+                                <span className="flex flex-wrap gap-x-2 gap-y-0.5">
+                                  {collapsedShow.map((b) => (
+                                    <span key={b.asset} className="whitespace-nowrap">
+                                      <span className="font-mono text-text-primary">{formatAmount(b.total)}</span>{' '}
+                                      <span className="text-text-secondary text-xs">{b.asset}</span>
+                                    </span>
                                   ))}
-                                  {list.length > 12 && (
-                                    <div className="text-xs text-text-secondary/60 pt-1">+ {list.length - 12} more</div>
-                                  )}
-                                </div>
+                                </span>
+                                {remaining > 0 && (
+                                  <span className="text-xs text-text-secondary/70">+{remaining} more</span>
+                                )}
+                                <span className="text-text-secondary/40 text-[10px]">▾</span>
                               </div>
                             )}
-                          </div>
+                          </button>
                         );
                       })()}
                     </td>
