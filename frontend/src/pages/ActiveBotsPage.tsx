@@ -66,6 +66,9 @@ interface WorkspaceConfig {
   // FundingClaim workspace settings
   fcSizeUsdt: number;
   fcMinFundingRatePercent: number;
+  fcMaxFundingRatePercent: number;
+  fcStopLossPercent: number;
+  fcLeverage: number;
 }
 
 interface WorkspaceStats {
@@ -95,6 +98,9 @@ const defaultConfig: WorkspaceConfig = {
   timerExpiresAt: null,
   fcSizeUsdt: 100,
   fcMinFundingRatePercent: 0.3,
+  fcMaxFundingRatePercent: 2.0,
+  fcStopLossPercent: 1.5,
+  fcLeverage: 3,
 };
 
 const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
@@ -475,7 +481,21 @@ export default function ActiveBotsPage() {
             </div>
             <div className="h-6 w-px bg-border" />
             <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-secondary">Мин. фандинг:</span>
+              <span className="text-sm font-medium text-text-secondary">Плечо:</span>
+              <input
+                type="number"
+                step="1"
+                min="1"
+                max="125"
+                value={localConfig.fcLeverage}
+                onChange={(e) => updateConfig({ fcLeverage: Number(e.target.value) })}
+                className="w-16 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+              />
+              <span className="text-xs text-text-secondary">x</span>
+            </div>
+            <div className="h-6 w-px bg-border" />
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text-secondary">Фандинг:</span>
               <input
                 type="number"
                 step="0.01"
@@ -484,9 +504,34 @@ export default function ActiveBotsPage() {
                 onChange={(e) => updateConfig({ fcMinFundingRatePercent: Number(e.target.value) })}
                 className="w-20 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
               />
+              <span className="text-xs text-text-secondary">..</span>
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                value={localConfig.fcMaxFundingRatePercent}
+                onChange={(e) => updateConfig({ fcMaxFundingRatePercent: Number(e.target.value) })}
+                className="w-20 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+              />
               <span className="text-xs text-text-secondary">%</span>
               <span className="text-xs text-text-secondary italic">
-                Открывать позицию если |funding| ≥ этого значения.
+                диапазон |funding|. 0 = без верхней границы.
+              </span>
+            </div>
+            <div className="h-6 w-px bg-border" />
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text-secondary">Стоп-лосс:</span>
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                value={localConfig.fcStopLossPercent}
+                onChange={(e) => updateConfig({ fcStopLossPercent: Number(e.target.value) })}
+                className="w-20 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+              />
+              <span className="text-xs text-text-secondary">%</span>
+              <span className="text-xs text-text-secondary italic">
+                закрыть позицию при просадке. 0 = выключен.
               </span>
             </div>
             <div className="h-6 w-px bg-border" />

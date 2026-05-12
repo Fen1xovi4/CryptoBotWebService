@@ -308,18 +308,30 @@ public class HuntingFundingHandler : IStrategyHandler
             state.AvgEntryPrice = state.TotalFilledUsdt / state.TotalFilledQuantity;
         }
 
-        // Wait until 60s after funding time, then cancel remaining orders and transition
-        bool timeoutReached = state.NextFundingTime.HasValue &&
-                              DateTime.UtcNow > state.NextFundingTime.Value.AddSeconds(60);
+        // Transition to InPosition early when all levels are filled — there are no
+        // more fills to wait for, and keeping the bot in OrdersPlaced just hides the
+        // real position from the UI (no PnL, no close button).
+        bool allFilled = state.PlacedOrders.Count > 0 && state.PlacedOrders.All(o => o.IsFilled);
 
-        if (!timeoutReached)
+        // Post-funding wait varies by exchange. BingX blocks order placement in the
+        // last ~60s before funding (settlement window), so fills can land late after
+        // settlement — wait the full minute. Bybit/Bitget/Dzengi have no such window:
+        // orders fill instantly when price hits the limit, so no extra wait after
+        // funding is needed.
+        var postFundingWait = strategy.Account.ExchangeType == ExchangeType.BingX
+            ? TimeSpan.FromSeconds(60)
+            : TimeSpan.Zero;
+        bool postFundingReady = state.NextFundingTime.HasValue &&
+                                DateTime.UtcNow > state.NextFundingTime.Value.Add(postFundingWait);
+
+        if (!allFilled && !postFundingReady)
             return;
 
         // Cancel all remaining open orders
         if (openOrders.Count > 0)
         {
             await exchange.CancelAllOrdersAsync(config.Symbol);
-            Log(strategy, "Info", $"Cancelled {openOrders.Count} remaining orders after funding+60s");
+            Log(strategy, "Info", $"Cancelled {openOrders.Count} remaining orders (post-funding cleanup)");
         }
 
         if (filledOrders.Count == 0)

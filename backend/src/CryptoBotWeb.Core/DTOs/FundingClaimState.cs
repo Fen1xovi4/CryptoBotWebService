@@ -23,4 +23,5 @@ public class FundingClaimState
     public decimal CurrentCycleFundingPnl { get; set; } // funding earned in current open position
     public decimal? LastPrice { get; set; }
     public DateTime? LastHourlyCheckAt { get; set; } // throttle: one check per hour
+    public int MissedPositionChecks { get; set; } // consecutive null GetPosition results — debounces ExternalClose
 }

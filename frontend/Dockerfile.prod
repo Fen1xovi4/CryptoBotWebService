@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-RUN node --max-old-space-size=2048 ./node_modules/.bin/vite build
+RUN node --max-old-space-size=4096 ./node_modules/.bin/vite build
 
 FROM nginx:alpine
 COPY --from=build /app/dist/ /usr/share/nginx/html

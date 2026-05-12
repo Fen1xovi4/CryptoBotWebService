@@ -249,10 +249,16 @@ function PnlChart({ points }: { points: PnlPoint[] }) {
       priceFormat: { type: 'custom', formatter: (v: number) => `$${v.toFixed(2)}` },
     });
 
-    const data = points.map((p) => ({
-      time: Math.floor(new Date(p.date).getTime() / 1000) as UTCTimestamp,
-      value: p.cumPnl,
-    }));
+    // lightweight-charts требует строго возрастающие уникальные time.
+    // Если несколько сделок закрылись в одну секунду — оставляем последнее cumPnl.
+    const dedup = new Map<number, number>();
+    for (const p of points) {
+      const t = Math.floor(new Date(p.date).getTime() / 1000);
+      dedup.set(t, p.cumPnl);
+    }
+    const data = [...dedup.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([time, value]) => ({ time: time as UTCTimestamp, value }));
 
     series.setData(data);
     chart.timeScale().fitContent();

@@ -96,6 +96,13 @@ public class FundingClaimHandler : IStrategyHandler
             return;
         }
 
+        if (wsCfg.FcMaxFundingRatePercent > 0 && ratePercent > wsCfg.FcMaxFundingRatePercent)
+        {
+            _logger.LogDebug("Strategy {Id}: Funding {Rate:P4} above max {Max}%, skipping",
+                strategy.Id, funding.Rate, wsCfg.FcMaxFundingRatePercent);
+            return;
+        }
+
         // Only enter in the hourly check window (CheckBeforeFundingMinutes before the hour)
         var now = DateTime.UtcNow;
         var minutesBeforeHour = 60 - now.Minute;
@@ -179,53 +186,85 @@ public class FundingClaimHandler : IStrategyHandler
         if (currentPrice != null)
             state.LastPrice = currentPrice;
 
-        // Verify position still exists
+        // Verify position still exists.
+        // Debounce: a single null result is treated as a transient API blip (rate limit, worker restart,
+        // race after market open). We only declare ExternalClose after MaxMissedChecks consecutive misses.
+        const int MaxMissedChecks = 3;
+
         var posSide = state.Direction ?? "Long";
         var exchangePos = await exchange.GetPositionAsync(symbol, posSide);
         if (exchangePos == null || exchangePos.Quantity <= 0)
-        {
-            // Also try with "Both" side for one-way mode exchanges
             exchangePos = await exchange.GetPositionAsync(symbol, "Both");
-            if (exchangePos == null || exchangePos.Quantity <= 0)
+
+        if (exchangePos == null || exchangePos.Quantity <= 0)
+        {
+            state.MissedPositionChecks++;
+            if (state.MissedPositionChecks < MaxMissedChecks)
             {
-                // Position closed externally (ADL, liquidation, manual close) — calculate PNL
-                var closePrice = state.LastPrice ?? currentPrice ?? 0;
-                var entryPrice = state.EntryPrice ?? 0;
-                var quantity = state.EntryQuantity ?? 0;
-                var totalUsdt = state.EntrySizeUsdt ?? 0;
+                _logger.LogDebug("Strategy {Id}: Position missing for {Symbol} side={Side} ({Cnt}/{Max}) — debouncing",
+                    strategy.Id, symbol, posSide, state.MissedPositionChecks, MaxMissedChecks);
+                return;
+            }
 
-                decimal pnlPercent = 0;
-                if (entryPrice > 0)
-                {
-                    pnlPercent = posSide == "Long"
-                        ? (closePrice - entryPrice) / entryPrice * 100m
-                        : (entryPrice - closePrice) / entryPrice * 100m;
-                }
-                var pnlDollar = totalUsdt * pnlPercent / 100m;
-                var commission = totalUsdt * exchange.TakerFeeRate * 2m;
-                var netPnl = pnlDollar - commission;
+            // MaxMissedChecks consecutive misses — treat as real external close
+            var closePrice = state.LastPrice ?? currentPrice ?? 0;
+            var entryPrice = state.EntryPrice ?? 0;
+            var quantity = state.EntryQuantity ?? 0;
+            var totalUsdt = state.EntrySizeUsdt ?? 0;
 
-                // Fetch definitive funding payments for this position
-                var payments = await exchange.GetFundingPaymentsAsync(symbol, state.PositionOpenedAt);
-                var positionFundingPnl = payments.Sum(p => p.Amount);
+            decimal pnlPercent = 0;
+            if (entryPrice > 0)
+            {
+                pnlPercent = posSide == "Long"
+                    ? (closePrice - entryPrice) / entryPrice * 100m
+                    : (entryPrice - closePrice) / entryPrice * 100m;
+            }
+            var pnlDollar = totalUsdt * pnlPercent / 100m;
+            var commission = totalUsdt * exchange.TakerFeeRate * 2m;
+            var netPnl = pnlDollar - commission;
 
-                var closeSide = posSide == "Long" ? "Sell" : "Buy";
-                RecordTrade(strategy, symbol, closeSide, quantity, closePrice,
-                    null, "ExternalClose", pnlDollar: netPnl, commission: commission,
-                    fundingPnl: positionFundingPnl);
+            // Fetch definitive funding payments for this position
+            var payments = await exchange.GetFundingPaymentsAsync(symbol, state.PositionOpenedAt);
+            var positionFundingPnl = payments.Sum(p => p.Amount);
 
-                state.CycleTotalPnl += netPnl;
-                state.CycleTotalFundingPnl += positionFundingPnl;
-                state.CurrentCycleFundingPnl = 0;
-                state.CycleCount++;
+            var closeSide = posSide == "Long" ? "Sell" : "Buy";
+            RecordTrade(strategy, symbol, closeSide, quantity, closePrice,
+                null, "ExternalClose", pnlDollar: netPnl, commission: commission,
+                fundingPnl: positionFundingPnl);
 
+            state.CycleTotalPnl += netPnl;
+            state.CycleTotalFundingPnl += positionFundingPnl;
+            state.CurrentCycleFundingPnl = 0;
+            state.CycleCount++;
+
+            Log(strategy, "Warning",
+                $"Position closed externally — {posSide} {symbol}: closePrice={Math.Round(closePrice, 6)}, " +
+                $"entry={Math.Round(entryPrice, 6)}, tradingPnL=${Math.Round(netPnl, 2)}, " +
+                $"fundingPnL=${Math.Round(positionFundingPnl, 4)}, cycle #{state.CycleCount} " +
+                $"(after {MaxMissedChecks} consecutive null position reads)");
+            _logger.LogWarning("Strategy {Id}: Position gone externally for {Symbol} side={Side}, PnL=${Pnl}",
+                strategy.Id, symbol, posSide, Math.Round(netPnl, 2));
+            await ResetToIdle(strategy, config, state, exchange, ct);
+            return;
+        }
+
+        // Position confirmed — clear miss counter
+        state.MissedPositionChecks = 0;
+
+        // ── Stop-loss: close if unrealized PnL is worse than -FcStopLossPercent ──
+        var slCfg = await GetWorkspaceConfigAsync(strategy, ct);
+        if (slCfg.FcStopLossPercent > 0 && exchangePos.EntryPrice > 0 && currentPrice.HasValue)
+        {
+            decimal adversePct = posSide == "Long"
+                ? (exchangePos.EntryPrice - currentPrice.Value) / exchangePos.EntryPrice * 100m
+                : (currentPrice.Value - exchangePos.EntryPrice) / exchangePos.EntryPrice * 100m;
+
+            if (adversePct >= slCfg.FcStopLossPercent)
+            {
                 Log(strategy, "Warning",
-                    $"Position closed externally — {posSide} {symbol}: closePrice={Math.Round(closePrice, 6)}, " +
-                    $"entry={Math.Round(entryPrice, 6)}, tradingPnL=${Math.Round(netPnl, 2)}, " +
-                    $"fundingPnL=${Math.Round(positionFundingPnl, 4)}, cycle #{state.CycleCount}");
-                _logger.LogWarning("Strategy {Id}: Position gone externally for {Symbol} side={Side}, PnL=${Pnl}",
-                    strategy.Id, symbol, posSide, Math.Round(netPnl, 2));
-                await ResetToIdle(strategy, config, state, exchange, ct);
+                    $"Stop-loss triggered: adverse={Math.Round(adversePct, 3)}% ≥ threshold {slCfg.FcStopLossPercent}% " +
+                    $"(entry={Math.Round(exchangePos.EntryPrice, 6)}, price={Math.Round(currentPrice.Value, 6)})");
+                await ClosePosition(strategy, config, state, exchange, currentPrice.Value, "StopLoss", ct);
                 return;
             }
         }
@@ -433,6 +472,7 @@ public class FundingClaimHandler : IStrategyHandler
         state.PositionOpenedAt = null;
         state.LastHourlyCheckAt = null;
         state.CurrentCycleFundingPnl = 0;
+        state.MissedPositionChecks = 0;
         state.Phase = FundingClaimPhase.Idle;
 
         if (funding != null)
