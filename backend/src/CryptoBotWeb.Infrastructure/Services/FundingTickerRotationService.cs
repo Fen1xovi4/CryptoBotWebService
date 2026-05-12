@@ -356,22 +356,25 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
     private static (decimal minPct, decimal maxPct) GetFundingRange(Strategy strategy)
     {
-        // FundingClaim uses workspace-level threshold, no max
+        // FundingClaim uses workspace-level threshold + optional upper bound
         if (strategy.Type == StrategyTypes.FundingClaim)
         {
             var wsJson = strategy.Workspace?.ConfigJson;
             if (string.IsNullOrEmpty(wsJson))
-                return (0.3m, decimal.MaxValue);
+                return (0.3m, 2.0m);
 
             try
             {
                 var cfg = JsonSerializer.Deserialize<WorkspaceFundingClaimConfig>(wsJson, JsonOptions);
                 var min = cfg?.FcMinFundingRatePercent ?? 0.3m;
-                return (min, decimal.MaxValue);
+                var max = cfg?.FcMaxFundingRatePercent ?? 2.0m;
+                if (max <= 0) max = decimal.MaxValue; // 0 disables upper bound
+                if (max < min) (min, max) = (max, min);
+                return (min, max);
             }
             catch
             {
-                return (0.3m, decimal.MaxValue);
+                return (0.3m, 2.0m);
             }
         }
 

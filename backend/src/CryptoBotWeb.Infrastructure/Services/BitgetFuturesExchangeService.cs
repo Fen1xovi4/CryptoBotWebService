@@ -23,6 +23,11 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         {
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret, passphrase ?? "");
             if (proxy != null) options.Proxy = proxy;
+            // Keep the raw response body in CallResult.OriginalData so failure logs (notably the
+            // observed "Success=true but OrderId empty" responses for ADA/DOT TP limits) show the
+            // actual JSON the exchange returned — otherwise it's impossible to tell whether the
+            // SDK lost the id or the exchange never sent it.
+            options.OutputOriginalData = true;
         });
     }
 
@@ -245,29 +250,57 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
                 price: roundedPrice,
                 reduceOnly: reduceOnly ? true : null);
 
-            // Build a maximally informative error string. We've seen the SDK return Success=false
-            // with Error=null (and even Success=true with Data=null) on Bitget rejections, which
-            // surfaced as a blank "Не удалось выставить TP лимит:" log. Capture HTTP status and the
-            // raw response body so the cause is always visible.
-            var success = result.Success && !string.IsNullOrEmpty(result.Data?.OrderId);
-            string? errorMessage = null;
-            if (!success)
+            // Happy path: SDK returned an OrderId.
+            if (result.Success && !string.IsNullOrEmpty(result.Data?.OrderId))
             {
-                var parts = new List<string>();
-                if (result.Error != null) parts.Add(result.Error.ToString());
-                if (result.ResponseStatusCode != null) parts.Add($"HTTP {(int)result.ResponseStatusCode}");
-                if (!string.IsNullOrEmpty(result.OriginalData)) parts.Add($"raw={result.OriginalData}");
-                if (result.Success && string.IsNullOrEmpty(result.Data?.OrderId))
-                    parts.Add("SDK reported Success=true but OrderId is empty/null");
-                errorMessage = parts.Count > 0
-                    ? string.Join(" | ", parts)
-                    : "Bitget SDK returned no error and no order id (unknown failure)";
+                return new OrderResultDto
+                {
+                    Success = true,
+                    OrderId = result.Data.OrderId,
+                    FilledPrice = roundedPrice,
+                    FilledQuantity = roundedQty
+                };
             }
+
+            // Recovery: SDK has been observed to return Success=true with Data.OrderId empty on
+            // certain Bitget symbols (e.g. ADA/DOT one-way reduce-only TP limits) — the order
+            // DOES land on the book, we just can't read its id from the response. Without this
+            // recovery the SmaDca heal path re-places a fresh TP every 5s and orphans pile up
+            // (TEST2 hit ~95k retries in 24d). Probe open orders and match by side+price+qty.
+            if (result.Success && string.IsNullOrEmpty(result.Data?.OrderId))
+            {
+                var recovered = await RecoverOrderIdFromOpenOrders(
+                    bitgetSymbol, orderSide, roundedPrice, roundedQty, reduceOnly);
+                if (recovered != null)
+                {
+                    return new OrderResultDto
+                    {
+                        Success = true,
+                        OrderId = recovered,
+                        FilledPrice = roundedPrice,
+                        FilledQuantity = roundedQty
+                    };
+                }
+            }
+
+            // Genuine failure (or recovery couldn't find the order). Build a maximally
+            // informative error string — Bitget has been seen to return Success=false with
+            // Error=null on rejections, which surfaced as a blank
+            // "Не удалось выставить TP лимит:" log.
+            var parts = new List<string>();
+            if (result.Error != null) parts.Add(result.Error.ToString());
+            if (result.ResponseStatusCode != null) parts.Add($"HTTP {(int)result.ResponseStatusCode}");
+            if (!string.IsNullOrEmpty(result.OriginalData)) parts.Add($"raw={result.OriginalData}");
+            if (result.Success && string.IsNullOrEmpty(result.Data?.OrderId))
+                parts.Add("SDK reported Success=true but OrderId is empty/null AND no matching open order found");
+            var errorMessage = parts.Count > 0
+                ? string.Join(" | ", parts)
+                : "Bitget SDK returned no error and no order id (unknown failure)";
 
             return new OrderResultDto
             {
-                Success = success,
-                OrderId = result.Data?.OrderId,
+                Success = false,
+                OrderId = null,
                 FilledPrice = roundedPrice,
                 FilledQuantity = roundedQty,
                 ErrorMessage = errorMessage
@@ -280,6 +313,53 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
                 Success = false,
                 ErrorMessage = $"{ex.GetType().Name}: {ex.Message}" + (ex.InnerException != null ? $" → {ex.InnerException.Message}" : "")
             };
+        }
+    }
+
+    /// <summary>
+    /// Called when PlaceOrderAsync returned Success=true with an empty OrderId — finds the
+    /// just-placed order on the book by matching side+price+qty (+ ReduceOnly), and cancels
+    /// any older duplicates that piled up from prior failed-recovery attempts. Returns the
+    /// id of the order we kept, or null if no match was found.
+    /// </summary>
+    private async Task<string?> RecoverOrderIdFromOpenOrders(
+        string bitgetSymbol, OrderSide side, decimal price, decimal quantity, bool reduceOnly)
+    {
+        try
+        {
+            var openResult = await _client.FuturesApiV2.Trading.GetOpenOrdersAsync(
+                BitgetProductTypeV2.UsdtFutures, bitgetSymbol);
+            if (!openResult.Success || openResult.Data?.Orders == null)
+                return null;
+
+            var matches = openResult.Data.Orders
+                .Where(o => o.Side == side
+                    && (o.Price ?? 0m) == price
+                    && o.Quantity == quantity
+                    && o.ReduceOnly == reduceOnly
+                    && !string.IsNullOrEmpty(o.OrderId))
+                .OrderByDescending(o => o.CreateTime)
+                .ToList();
+
+            if (matches.Count == 0) return null;
+
+            // Keep the newest; cancel any older orphans from prior empty-id placements.
+            // Best-effort — don't fail recovery if a cancel errors out.
+            foreach (var dup in matches.Skip(1))
+            {
+                try
+                {
+                    await _client.FuturesApiV2.Trading.CancelOrderAsync(
+                        BitgetProductTypeV2.UsdtFutures, bitgetSymbol,
+                        dup.OrderId!, clientOrderId: null, marginAsset: "USDT");
+                }
+                catch { /* swallow — duplicate may already be gone */ }
+            }
+            return matches[0].OrderId;
+        }
+        catch
+        {
+            return null;
         }
     }
 

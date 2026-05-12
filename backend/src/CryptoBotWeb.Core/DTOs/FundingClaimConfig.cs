@@ -14,5 +14,7 @@ public class WorkspaceFundingClaimConfig
 {
     public decimal FcSizeUsdt { get; set; } = 100m;
     public decimal FcMinFundingRatePercent { get; set; } = 0.3m;
-    public int FcLeverage { get; set; } = 10;
+    public decimal FcMaxFundingRatePercent { get; set; } = 2.0m;
+    public decimal FcStopLossPercent { get; set; } = 1.5m;
+    public int FcLeverage { get; set; } = 3;
 }
