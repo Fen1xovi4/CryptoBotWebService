@@ -876,11 +876,14 @@ public class SmaDcaHandler : IStrategyHandler
             var err = result.ErrorMessage ?? "";
 
             // Bitget returns "No position to close" / "number of closed positions cannot exceed..."
-            // when the position is already gone. Without this check the heal path retries forever
+            // BingX returns "The Reduce Only order can only decrease the position..." when the
+            // position is already gone. Without this check the heal path retries forever
             // (we saw 3500+ retries in 10h on TEST2). Treat as an external close: record TP fill
             // and reset state so a fresh entry can fire on the next signal.
             if (err.Contains("No position", StringComparison.OrdinalIgnoreCase)
-                || err.Contains("number of closed positions", StringComparison.OrdinalIgnoreCase))
+                || err.Contains("number of closed positions", StringComparison.OrdinalIgnoreCase)
+                || err.Contains("Reduce Only order", StringComparison.OrdinalIgnoreCase)
+                || err.Contains("decrease the position", StringComparison.OrdinalIgnoreCase))
             {
                 // The error string is reactive evidence, but Bitget has been seen to emit it
                 // transiently. Confirm with a second GetPositionAsync probe before resetting.
