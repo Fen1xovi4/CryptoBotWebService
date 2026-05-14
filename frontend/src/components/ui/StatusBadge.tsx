@@ -6,6 +6,7 @@ interface StatusBadgeProps {
 const statusConfig: Record<string, { bg: string; dot: string; text: string }> = {
   active: { bg: 'bg-accent-green/10', dot: 'bg-accent-green', text: 'text-accent-green' },
   running: { bg: 'bg-accent-green/10', dot: 'bg-accent-green', text: 'text-accent-green' },
+  paused: { bg: 'bg-accent-yellow/10', dot: 'bg-accent-yellow', text: 'text-accent-yellow' },
   idle: { bg: 'bg-text-secondary/10', dot: 'bg-text-secondary', text: 'text-text-secondary' },
   stopped: { bg: 'bg-accent-red/10', dot: 'bg-accent-red', text: 'text-accent-red' },
   error: { bg: 'bg-accent-red/10', dot: 'bg-accent-red', text: 'text-accent-red' },

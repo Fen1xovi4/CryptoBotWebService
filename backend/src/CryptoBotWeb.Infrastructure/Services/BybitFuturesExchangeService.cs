@@ -271,6 +271,66 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    public async Task<bool> CancelOrderAsync(string symbol, string orderId)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var result = await _client.V5Api.Trading.CancelOrderAsync(
+                Category.Linear, bybitSymbol, orderId: orderId);
+            return result.Success;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public async Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+
+            // Real-time endpoint covers open / recently-finalized orders.
+            var open = await _client.V5Api.Trading.GetOrdersAsync(
+                Category.Linear, bybitSymbol, orderId: orderId);
+            var order = open.Success ? open.Data?.List?.FirstOrDefault() : null;
+
+            // Fall back to history for fully-finalized orders past the real-time window.
+            if (order == null)
+            {
+                var hist = await _client.V5Api.Trading.GetOrderHistoryAsync(
+                    Category.Linear, bybitSymbol, orderId: orderId);
+                order = hist.Success ? hist.Data?.List?.FirstOrDefault() : null;
+            }
+
+            if (order == null) return null;
+
+            return new OrderStatusDto
+            {
+                OrderId = order.OrderId ?? orderId,
+                Status = MapOrderStatus(order.Status),
+                FilledQuantity = order.QuantityFilled ?? 0m,
+                AverageFilledPrice = order.AveragePrice ?? 0m
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static OrderLifecycleStatus MapOrderStatus(OrderStatus s) => s switch
+    {
+        OrderStatus.New or OrderStatus.Created or OrderStatus.Active or OrderStatus.Untriggered => OrderLifecycleStatus.Open,
+        OrderStatus.PartiallyFilled => OrderLifecycleStatus.PartiallyFilled,
+        OrderStatus.Filled => OrderLifecycleStatus.Filled,
+        OrderStatus.Cancelled or OrderStatus.PartiallyFilledCanceled or OrderStatus.Deactivated => OrderLifecycleStatus.Cancelled,
+        OrderStatus.Rejected => OrderLifecycleStatus.Rejected,
+        _ => OrderLifecycleStatus.Unknown
+    };
+
     public async Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol)
     {
         try
