@@ -11,6 +11,12 @@ public class BybitExchangeService : IExchangeService, IDisposable
 {
     private readonly BybitRestClient _client;
 
+    // TODO(bybit-broker): When spot trading is enabled for Bybit, wire BrokerId here too.
+    // Bybit Broker Program requires the Referer header (our code "Ty001081") on spot orders
+    // as well as derivatives. Add `string? brokerId = null` parameter, read it from
+    // IConfiguration["Bybit:BrokerId"] in ExchangeServiceFactory.Create (currently only
+    // CreateFutures passes it), and set `options.Referer = brokerId;` below.
+    // See BybitFuturesExchangeService for the equivalent wiring.
     public BybitExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)
     {
         _client = new BybitRestClient(options =>

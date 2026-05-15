@@ -16,12 +16,15 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     private readonly BybitRestClient _client;
 
-    public BybitFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)
+    // Bybit Broker Program: our broker code "Ty001081" must be sent as the Referer header
+    // on every REST call. Bybit.Net forwards options.Referer to all requests automatically.
+    public BybitFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null, string? brokerId = null)
     {
         _client = new BybitRestClient(options =>
         {
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret);
             if (proxy != null) options.Proxy = proxy;
+            if (!string.IsNullOrWhiteSpace(brokerId)) options.Referer = brokerId;
         });
     }
 
@@ -405,6 +408,15 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             return (info.LotSizeFilter?.QuantityStep ?? 0.001m, info.LotSizeFilter?.MinOrderQuantity ?? 0m);
         }
         return (0.001m, 0m);
+    }
+
+    // Public interface implementation: takes canonical symbol, applies exchange-specific
+    // mapping, defers to the internal helper. Used by GridFloat for the pre-placement
+    // minimum-notional guard.
+    async Task<(decimal qtyStep, decimal minQty)> IFuturesExchangeService.GetSymbolInfoAsync(string symbol)
+    {
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        return await GetSymbolInfoAsync(bybitSymbol);
     }
 
     private async Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolInfoWithPriceAsync(string bybitSymbol)

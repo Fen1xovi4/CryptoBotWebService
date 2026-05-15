@@ -1,4 +1,5 @@
 using CryptoExchange.Net.Objects;
+using Microsoft.Extensions.Configuration;
 using CryptoBotWeb.Core.Entities;
 using CryptoBotWeb.Core.Interfaces;
 using ExchangeType = CryptoBotWeb.Core.Enums.ExchangeType;
@@ -8,10 +9,13 @@ namespace CryptoBotWeb.Infrastructure.Services;
 public class ExchangeServiceFactory : IExchangeServiceFactory
 {
     private readonly IEncryptionService _encryption;
+    private readonly string? _bybitBrokerId;
 
-    public ExchangeServiceFactory(IEncryptionService encryption)
+    public ExchangeServiceFactory(IEncryptionService encryption, IConfiguration config)
     {
         _encryption = encryption;
+        // Bybit Broker Program code, sent as Referer header on every Bybit REST call.
+        _bybitBrokerId = config["Bybit:BrokerId"];
     }
 
     public IExchangeService Create(ExchangeAccount account)
@@ -41,7 +45,7 @@ public class ExchangeServiceFactory : IExchangeServiceFactory
 
         return account.ExchangeType switch
         {
-            ExchangeType.Bybit => new BybitFuturesExchangeService(apiKey, apiSecret, proxy),
+            ExchangeType.Bybit => new BybitFuturesExchangeService(apiKey, apiSecret, proxy, _bybitBrokerId),
             ExchangeType.Bitget => new BitgetFuturesExchangeService(
                 apiKey, apiSecret,
                 account.PassphraseEncrypted != null ? _encryption.Decrypt(account.PassphraseEncrypted) : null,

@@ -34,6 +34,7 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       TronGrid__ApiKey: ${TRONGRID_API_KEY:-}
       BscScan__ApiKey: ${BSCSCAN_API_KEY:-}
+      Bybit__BrokerId: ${BYBIT_BROKER_ID:-Ty001081}
     ports:
       - "8100:5000"
 
@@ -50,6 +51,7 @@ services:
       Encryption__Key: ${ENCRYPTION_KEY:-default-encryption-key-change-in-production!!}
       TronGrid__ApiKey: ${TRONGRID_API_KEY:-}
       BscScan__ApiKey: ${BSCSCAN_API_KEY:-}
+      Bybit__BrokerId: ${BYBIT_BROKER_ID:-Ty001081}
 
   frontend:
     build:
