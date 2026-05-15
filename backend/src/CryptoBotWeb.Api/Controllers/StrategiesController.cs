@@ -367,17 +367,34 @@ public class StrategiesController : ControllerBase
         }
         else if (strategy.Type == StrategyTypes.GridFloat)
         {
-            // GridFloat: every Start clears static bounds, batches and DCAs — the user's spec
-            // says the frozen range bound is reset on Stop+Start. Realized PnL is preserved
-            // across restarts for reporting.
+            // GridFloat Start: preserve positional state (Batches, DcaOrders, anchor,
+            // static bound) when something is still live — Stop is a freeze, not a wipe.
+            // Then force SyncFromExchangeOnStartup on the next worker tick by clearing
+            // StateInitialized. Sync will either drop state (if the position has been
+            // closed manually in the meantime) or re-place missing TPs/DCAs against the
+            // existing position. Heal flows on the same tick fill any remaining gaps.
+            //
+            // Only a truly empty state collapses to fresh, preserving realized PnL.
             var prevGfState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
                 ? new GridFloatState()
                 : JsonSerializer.Deserialize<GridFloatState>(strategy.StateJson, jsonOpts) ?? new GridFloatState();
 
-            var freshGfState = new GridFloatState
+            var hasLiveState = prevGfState.Batches.Count > 0 || prevGfState.DcaOrders.Count > 0;
+            GridFloatState freshGfState;
+            if (hasLiveState)
             {
-                RealizedPnlDollar = prevGfState.RealizedPnlDollar
-            };
+                freshGfState = prevGfState;
+                freshGfState.StateInitialized = false;      // force restart-sync next tick
+                freshGfState.PlacementCooldownUntil = null; // transient cooldowns are stale
+                freshGfState.OpenAfterTime = null;          // ditto for one-bar gate
+            }
+            else
+            {
+                freshGfState = new GridFloatState
+                {
+                    RealizedPnlDollar = prevGfState.RealizedPnlDollar
+                };
+            }
             strategy.StateJson = JsonSerializer.Serialize(freshGfState, jsonOpts);
         }
         else if (strategy.Type == StrategyTypes.FundingClaim)
@@ -518,16 +535,25 @@ public class StrategiesController : ControllerBase
         return Ok(new { message = "Strategy resumed", status = strategy.Status.ToString() });
     }
 
-    // Live-tune GridFloat RangePercent while paused. Only RangePercent is mutable here —
+    // Live-tune GridFloat Tiers while paused. Only the tier list is mutable here —
     // changing Symbol/Direction/DcaStepPercent/Timeframe mid-grid would break the
     // LevelIdx↔fillPrice correspondence of existing batches and is therefore disallowed
     // (use Stop → Edit → Start for a fresh start with new params).
     //
-    // Widening Range adds slots beyond the existing ones — HealMissingDcas places them on
-    // the next tick after Resume. Narrowing Range is allowed too: existing batches outside
-    // the new range stay alive with their TPs, but no fresh DCAs get placed past the new bound.
-    [HttpPatch("{id:guid}/grid-float/range")]
-    public async Task<IActionResult> UpdateGridFloatRange(Guid id, [FromBody] UpdateGridFloatRangeRequest request)
+    // Widening the outermost tier (or appending new tiers) adds slots beyond the existing
+    // ones — HealMissingDcas places them on the next tick after Resume. Narrowing is allowed
+    // too: existing batches outside the new range stay alive with their TPs, but no fresh
+    // DCAs get placed past the new bound. Changing a tier's SizeUsdt only affects new fills
+    // — already-placed limits keep their original qty until they get cancelled/refilled.
+    //
+    // Static-range bound is re-anchored on widening: when the new outermost tier's
+    // UpToPercent exceeds the old one and the bot is in static mode with an initialized
+    // bound, recompute StaticLowerBound/StaticUpperBound against the *current* anchor and
+    // the new maxTierPct so HealMissingDcas can actually reach the new outer levels.
+    // Without this, the frozen bound from the first anchor of the session caps the ladder
+    // at the old depth no matter how many new tiers are added.
+    [HttpPatch("{id:guid}/grid-float/tiers")]
+    public async Task<IActionResult> UpdateGridFloatTiers(Guid id, [FromBody] UpdateGridFloatTiersRequest request)
     {
         var strategy = await _db.Strategies
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
@@ -540,31 +566,85 @@ public class StrategiesController : ControllerBase
         if (strategy.Status != StrategyStatus.Paused)
             return BadRequest(new { message = "Бот должен быть на паузе для изменения параметров." });
 
-        if (request.RangePercent <= 0)
-            return BadRequest(new { message = "RangePercent должен быть > 0." });
+        if (request.Tiers == null || request.Tiers.Count == 0)
+            return BadRequest(new { message = "Должен быть хотя бы один ярус." });
+
+        if (request.Tiers.Any(t => t.UpToPercent <= 0 || t.SizeUsdt <= 0))
+            return BadRequest(new { message = "Каждый ярус: upToPercent > 0 и sizeUsdt > 0." });
+
+        var sorted = request.Tiers.OrderBy(t => t.UpToPercent).ToList();
+        for (int i = 1; i < sorted.Count; i++)
+        {
+            if (sorted[i].UpToPercent <= sorted[i - 1].UpToPercent)
+                return BadRequest(new { message = "Ярусы должны иметь строго возрастающие upToPercent." });
+        }
 
         var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var config = JsonSerializer.Deserialize<GridFloatConfig>(strategy.ConfigJson, jsonOpts);
         if (config == null)
             return BadRequest(new { message = "Не удалось прочитать ConfigJson стратегии." });
 
-        if (request.RangePercent < config.DcaStepPercent)
-            return BadRequest(new { message = $"RangePercent ({request.RangePercent}%) должен быть ≥ DcaStepPercent ({config.DcaStepPercent}%)." });
+        if (sorted[^1].UpToPercent < config.DcaStepPercent)
+            return BadRequest(new { message = $"Внешняя граница тиров ({sorted[^1].UpToPercent}%) должна быть ≥ DcaStepPercent ({config.DcaStepPercent}%)." });
 
-        // Mutate only RangePercent — everything else stays exactly as user configured it.
+        // Compute old outer-tier extent before mutation so we can detect widening below.
+        // Mirrors NormalizeTiers fallback: if Tiers is empty/null, use legacy RangePercent.
+        var oldMaxTierPct = (config.Tiers != null && config.Tiers.Count > 0)
+            ? config.Tiers.Max(t => t.UpToPercent)
+            : (config.RangePercent ?? 0m);
+        var newMaxTierPct = sorted[^1].UpToPercent;
+
+        // Mutate only Tiers — everything else stays exactly as user configured it. Clear any
+        // legacy single-tier fields so they can't shadow the new list on the next read.
         var configDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(strategy.ConfigJson, jsonOpts)
                          ?? new Dictionary<string, JsonElement>();
-        configDict["rangePercent"] = JsonSerializer.SerializeToElement(request.RangePercent);
+        configDict["tiers"] = JsonSerializer.SerializeToElement(sorted, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        });
+        configDict.Remove("baseSizeUsdt");
+        configDict.Remove("rangePercent");
         strategy.ConfigJson = JsonSerializer.Serialize(configDict);
+
+        // Re-anchor the static bound on widening. Skip narrowing — existing batches outside
+        // the new outer tier stay alive (per the comment above) and a tighter bound would
+        // never benefit them.
+        bool boundRecomputed = false;
+        decimal? newBound = null;
+        if (config.UseStaticRange && newMaxTierPct > oldMaxTierPct
+            && !string.IsNullOrEmpty(strategy.StateJson) && strategy.StateJson != "{}")
+        {
+            var state = JsonSerializer.Deserialize<GridFloatState>(strategy.StateJson, jsonOpts);
+            if (state != null && state.StaticBoundsInitialized && state.AnchorPrice > 0)
+            {
+                if (state.IsLong)
+                {
+                    state.StaticLowerBound = state.AnchorPrice * (1m - newMaxTierPct / 100m);
+                    newBound = state.StaticLowerBound;
+                }
+                else
+                {
+                    state.StaticUpperBound = state.AnchorPrice * (1m + newMaxTierPct / 100m);
+                    newBound = state.StaticUpperBound;
+                }
+                strategy.StateJson = JsonSerializer.Serialize(state, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                });
+                boundRecomputed = true;
+            }
+        }
 
         await _db.SaveChangesAsync();
 
-        var newLevels = (int)Math.Floor(request.RangePercent / config.DcaStepPercent);
+        var newLevels = (int)Math.Floor(newMaxTierPct / config.DcaStepPercent);
         return Ok(new
         {
-            message = "Range updated",
-            rangePercent = request.RangePercent,
-            dcaSlots = newLevels
+            message = "Tiers updated",
+            tiers = sorted,
+            dcaSlots = newLevels,
+            boundRecomputed,
+            newBound
         });
     }
 
@@ -1238,7 +1318,7 @@ public class SetTelegramBotRequest
     public Guid? TelegramBotId { get; set; }
 }
 
-public class UpdateGridFloatRangeRequest
+public class UpdateGridFloatTiersRequest
 {
-    public decimal RangePercent { get; set; }
+    public List<GridFloatTier> Tiers { get; set; } = new();
 }

@@ -2,6 +2,7 @@ using System.Text.Json;
 using CryptoBotWeb.Core.Constants;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Entities;
+using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
@@ -70,14 +71,18 @@ public class GridFloatHandler : IStrategyHandler
             return;
         }
 
-        if (config.BaseSizeUsdt <= 0 || config.RangePercent <= 0 || config.DcaStepPercent <= 0
-            || config.TpStepPercent <= 0 || config.RangePercent < config.DcaStepPercent
+        // Migrate legacy single-tier configs (BaseSizeUsdt + RangePercent) → Tiers list and
+        // sort. Mutates `config.Tiers` in-place; idempotent on already-tiered configs.
+        NormalizeTiers(config);
+
+        if (config.Tiers.Count == 0 || config.Tiers.Any(t => t.UpToPercent <= 0 || t.SizeUsdt <= 0)
+            || config.DcaStepPercent <= 0 || config.TpStepPercent <= 0
+            || config.Tiers[^1].UpToPercent < config.DcaStepPercent
             || config.Leverage < 1)
         {
             Log(strategy, "Error",
-                $"Некорректные параметры: BaseSizeUsdt={config.BaseSizeUsdt}, " +
-                $"Range={config.RangePercent}%, DcaStep={config.DcaStepPercent}%, " +
-                $"TpStep={config.TpStepPercent}%, Leverage={config.Leverage}");
+                $"Некорректные параметры: Tiers=[{string.Join(", ", config.Tiers.Select(t => $"upTo={t.UpToPercent}%/size={t.SizeUsdt}"))}], " +
+                $"DcaStep={config.DcaStepPercent}%, TpStep={config.TpStepPercent}%, Leverage={config.Leverage}");
             return;
         }
 
@@ -200,6 +205,13 @@ public class GridFloatHandler : IStrategyHandler
     private async Task OpenAnchor(Strategy strategy, GridFloatConfig config, GridFloatState state,
         IFuturesExchangeService exchange, CandleDto candle, bool isLong, CancellationToken ct)
     {
+        // Pre-placement exchange-minimum guard. If tier 0's USDT size is below the symbol's
+        // minimum order notional at the current price, either auto-bump the tier (if the gap
+        // is ≤ 2×) or stop the bot. Saves users from infinite "Qty 0 < min X" loops on
+        // symbols whose lot size makes the configured tier unviable.
+        if (!await EnsureTierFitsExchangeMinimum(strategy, config, exchange, config.Tiers[0], candle.Close, levelIdx: 0))
+            return;
+
         // Best-effort leverage. Some exchanges error if it's already set to the same value
         // — we swallow those because they don't block trading.
         try { await exchange.SetLeverageAsync(config.Symbol, config.Leverage); }
@@ -209,13 +221,19 @@ public class GridFloatHandler : IStrategyHandler
             _logger.LogWarning(ex, "GridFloat: SetLeverageAsync failed (continuing) for {Symbol}", config.Symbol);
         }
 
+        // Anchor (level 0) sits at offset 0% from itself, which is inside the first tier.
+        // Re-read tier.SizeUsdt after the guard — it may have been bumped just above.
+        var anchorSize = config.Tiers[0].SizeUsdt;
+        var maxRangePct = config.Tiers[^1].UpToPercent;
+
         Log(strategy, "Info",
-            $"📈 ANCHOR {config.Direction}: {config.Symbol}, base={config.BaseSizeUsdt}USDT, " +
-            $"close={candle.Close}, range=±{config.RangePercent}%, step={config.DcaStepPercent}%, tp={config.TpStepPercent}%");
+            $"📈 ANCHOR {config.Direction}: {config.Symbol}, anchorSize={anchorSize}USDT, close={candle.Close}, " +
+            $"tiers=[{string.Join(", ", config.Tiers.Select(t => $"≤{t.UpToPercent}%:${t.SizeUsdt}"))}], " +
+            $"step={config.DcaStepPercent}%, tp={config.TpStepPercent}%, maxRange=±{maxRangePct}%");
 
         var result = isLong
-            ? await exchange.OpenLongAsync(config.Symbol, config.BaseSizeUsdt)
-            : await exchange.OpenShortAsync(config.Symbol, config.BaseSizeUsdt);
+            ? await exchange.OpenLongAsync(config.Symbol, anchorSize)
+            : await exchange.OpenShortAsync(config.Symbol, anchorSize);
 
         if (!result.Success || result.FilledQuantity is not > 0)
         {
@@ -232,11 +250,12 @@ public class GridFloatHandler : IStrategyHandler
 
         if (config.UseStaticRange && !state.StaticBoundsInitialized)
         {
-            // First anchor of the bot session — freeze the protected bound.
+            // First anchor of the bot session — freeze the protected bound at the largest
+            // tier's UpToPercent (the outermost edge of the configured grid).
             if (isLong)
-                state.StaticLowerBound = fillPrice * (1m - config.RangePercent / 100m);
+                state.StaticLowerBound = fillPrice * (1m - maxRangePct / 100m);
             else
-                state.StaticUpperBound = fillPrice * (1m + config.RangePercent / 100m);
+                state.StaticUpperBound = fillPrice * (1m + maxRangePct / 100m);
             state.StaticBoundsInitialized = true;
             Log(strategy, "Info",
                 $"📌 STATIC RANGE: " +
@@ -262,7 +281,7 @@ public class GridFloatHandler : IStrategyHandler
         await PlaceBatchTpLimit(strategy, config, state, exchange, batch);
 
         await _telegramSignalService.SendOpenPositionSignalAsync(strategy, config.Symbol, config.Direction,
-            config.BaseSizeUsdt, fillPrice, tpPrice, stopLoss: null, ct);
+            anchorSize, fillPrice, tpPrice, stopLoss: null, ct);
     }
 
     private async Task PlaceInitialDcaLadder(Strategy strategy, GridFloatConfig config, GridFloatState state,
@@ -271,29 +290,35 @@ public class GridFloatHandler : IStrategyHandler
         var levels = ComputeDcaLevels(config, state);
         if (levels.Count == 0)
         {
-            Log(strategy, "Warning", "Сетка пуста: 0 уровней (Range/Step или статическая граница слишком близки)");
+            Log(strategy, "Warning", "Сетка пуста: 0 уровней (тиры/Step или статическая граница слишком близки)");
             return;
         }
 
         Log(strategy, "Info",
             $"Расставляю DCA-сетку: {levels.Count} уровней (" +
-            string.Join(", ", levels.Take(5).Select(l => $"#{l.idx}@{Math.Round(l.price, 8)}")) +
+            string.Join(", ", levels.Take(5).Select(l => $"#{l.idx}@{Math.Round(l.price, 8)}({l.tier.SizeUsdt}$)")) +
             (levels.Count > 5 ? "…" : "") + ")");
 
-        foreach (var (idx, price) in levels)
-            await PlaceDcaLimit(strategy, config, state, exchange, idx, price);
+        foreach (var (idx, price, tier) in levels)
+            await PlaceDcaLimit(strategy, config, state, exchange, idx, price, tier);
     }
 
     private async Task PlaceDcaLimit(Strategy strategy, GridFloatConfig config, GridFloatState state,
-        IFuturesExchangeService exchange, int levelIdx, decimal price)
+        IFuturesExchangeService exchange, int levelIdx, decimal price, GridFloatTier tier)
     {
         if (state.PlacementCooldownUntil.HasValue && state.PlacementCooldownUntil.Value > DateTime.UtcNow)
             return;
 
-        var qty = config.BaseSizeUsdt / price;
+        // Pre-placement exchange-minimum guard: bump tier size or stop the bot if the
+        // configured size is below the symbol's minimum notional. Re-reads tier.SizeUsdt
+        // below so the bump takes effect on this same placement.
+        if (!await EnsureTierFitsExchangeMinimum(strategy, config, exchange, tier, price, levelIdx))
+            return;
+
+        var qty = tier.SizeUsdt / price;
         if (qty <= 0)
         {
-            Log(strategy, "Warning", $"DCA #{levelIdx}: qty=0 (price={price}, base={config.BaseSizeUsdt}) — пропуск");
+            Log(strategy, "Warning", $"DCA #{levelIdx}: qty=0 (price={price}, size={tier.SizeUsdt}) — пропуск");
             return;
         }
 
@@ -346,6 +371,27 @@ public class GridFloatHandler : IStrategyHandler
             Log(strategy, "Info",
                 $"Soft TP for batch #{batch.LevelIdx} (биржа без reduce-only limit): qty={batch.Qty} target={Math.Round(batch.TpPrice, 8)}");
             return;
+        }
+
+        // Cleanup guard: drop batches whose qty is below the exchange minimum (legacy zombies
+        // from partial-fill reconcile adoptions before Fix #5 was deployed). Without this they
+        // would loop in HealMissingTps forever logging "Qty 0 < min N".
+        try
+        {
+            var (qtyStep, minQty) = await exchange.GetSymbolInfoAsync(config.Symbol);
+            if (minQty > 0 && batch.Qty < minQty)
+            {
+                Log(strategy, "Warning",
+                    $"🧹 Удаляю sub-min батч #{batch.LevelIdx}: qty={batch.Qty} < биржевой минимум {minQty}. " +
+                    $"Это легаси из partial-fill reconcile до Fix #5. PnL по нему не реализуется.");
+                state.Batches.Remove(batch);
+                return;
+            }
+        }
+        catch (NotSupportedException) { /* exchange doesn't expose, fall through to normal flow */ }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat TP-place: GetSymbolInfoAsync probe failed for {Symbol}", config.Symbol);
         }
 
         var closeSide = state.IsLong ? "Sell" : "Buy";
@@ -624,10 +670,20 @@ public class GridFloatHandler : IStrategyHandler
         var exchangeQty = pos?.Quantity ?? 0m;
         var stateQty = state.Batches.Sum(b => b.Qty);
 
-        // Tolerance band: ±0.1% of max(stateQty, exchangeQty) — noise from rounding & fees.
-        var noiseFloor = Math.Max(stateQty, exchangeQty) * 0.001m;
+        // Tolerance band: max of 0.1% of position size OR the symbol's minimum order quantity.
+        // The min-qty floor (Fix #5 follow-up) prevents perpetual re-adoption of sub-minimum
+        // dust (e.g. 59 of a 100-min-qty symbol left over from a historical partial fill).
+        // Such dust can't be re-traded anyway — adopt → drop → re-place → adopt loops otherwise.
+        var (qtyStep, minQty) = (0m, 0m);
+        try { (qtyStep, minQty) = await exchange.GetSymbolInfoAsync(config.Symbol); }
+        catch (NotSupportedException) { /* fall through, minQty = 0 */ }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat reconcile: GetSymbolInfoAsync failed for {Symbol}", config.Symbol);
+        }
+        var noiseFloor = Math.Max(Math.Max(stateQty, exchangeQty) * 0.001m, minQty);
         var rawDelta = exchangeQty - stateQty;
-        if (Math.Abs(rawDelta) <= noiseFloor) return; // in-sync within tolerance
+        if (Math.Abs(rawDelta) <= noiseFloor) return; // in-sync within tolerance / dust ignored
 
         // Second probe to filter out transient exchange empty/stale snapshots.
         try { await Task.Delay(2000, ct); }
@@ -654,12 +710,24 @@ public class GridFloatHandler : IStrategyHandler
         exchangeQty = Math.Abs(rawDelta) < Math.Abs(rawDelta2) ? exchangeQty : exchangeQty2;
         var delta = exchangeQty - stateQty;
 
-        var price = state.LastPrice ?? 0m;
-        if (price <= 0)
+        // Fix #3: always prefer a fresh ticker over state.LastPrice for the cross-check.
+        // state.LastPrice is the previous CLOSED candle's close, which lags the live
+        // price by up to candle-interval seconds. A stale LastPrice below all batch TPs
+        // makes ReconcileMissedTpFills skip every batch (`crossed` returns false) and
+        // emit a misleading "Возможно ручное частичное закрытие извне" warning, even
+        // when the TP fill is happening in real time on the exchange. Fall back to
+        // state.LastPrice only if the ticker call fails.
+        decimal price = 0m;
+        try
         {
             var ticker = await exchange.GetTickerPriceAsync(config.Symbol);
             if (ticker is not (null or <= 0)) price = ticker.Value;
         }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat reconcile: GetTickerPriceAsync failed for {Symbol}", config.Symbol);
+        }
+        if (price <= 0) price = state.LastPrice ?? 0m;
 
         if (delta < 0)
             await ReconcileMissedTpFills(strategy, config, state, exchange, exchangeQty, stateQty, price, ct);
@@ -799,7 +867,10 @@ public class GridFloatHandler : IStrategyHandler
     private async Task HealMissingTps(Strategy strategy, GridFloatConfig config, GridFloatState state,
         IFuturesExchangeService exchange)
     {
-        foreach (var batch in state.Batches)
+        // Snapshot — PlaceBatchTpLimit may drop sub-min legacy batches from state.Batches,
+        // which would otherwise corrupt the foreach iterator (Fix #5 cleanup path).
+        var snapshot = state.Batches.ToList();
+        foreach (var batch in snapshot)
         {
             if (string.IsNullOrEmpty(batch.TpOrderId))
                 await PlaceBatchTpLimit(strategy, config, state, exchange, batch);
@@ -817,10 +888,10 @@ public class GridFloatHandler : IStrategyHandler
         foreach (var d in state.DcaOrders) occupiedLevels.Add(d.LevelIdx);
 
         var levels = ComputeDcaLevels(config, state);
-        foreach (var (idx, price) in levels)
+        foreach (var (idx, price, tier) in levels)
         {
             if (occupiedLevels.Contains(idx)) continue;
-            await PlaceDcaLimit(strategy, config, state, exchange, idx, price);
+            await PlaceDcaLimit(strategy, config, state, exchange, idx, price, tier);
         }
     }
 
@@ -917,19 +988,26 @@ public class GridFloatHandler : IStrategyHandler
     // ────────────────────────── Utilities ──────────────────────────
 
     /// <summary>
-    /// Returns the list of (levelIdx, price) for live DCA slots — slot 0 is the anchor and is
-    /// excluded; DCAs run 1..N where N depends on range mode:
-    ///   - Dynamic: N = floor(Range / Step).
-    ///   - Static (Long): largest k such that anchor·(1−k·step/100) ≥ StaticLowerBound.
-    ///   - Static (Short): largest k such that anchor·(1+k·step/100) ≤ StaticUpperBound.
+    /// Returns the list of (levelIdx, price, tier) for live DCA slots — slot 0 is the anchor
+    /// and is excluded; DCAs run 1..N where N depends on range mode and ALL tiers:
+    ///   - Dynamic: walk k=1,2,…, stop when offset% strictly exceeds the largest tier
+    ///     UpToPercent. For each k pick the first tier whose UpToPercent ≥ offset%.
+    ///   - Static (Long): same plus the additional price-floor check against StaticLowerBound.
+    ///   - Static (Short): mirror image with StaticUpperBound as ceiling.
+    ///
+    /// Returns the tier reference (not its SizeUsdt) so callers can apply Fix #5's
+    /// pre-placement guard and bump the tier in-place if the exchange minimum demands it.
     /// </summary>
-    private static List<(int idx, decimal price)> ComputeDcaLevels(GridFloatConfig config, GridFloatState state)
+    private static List<(int idx, decimal price, GridFloatTier tier)> ComputeDcaLevels(
+        GridFloatConfig config, GridFloatState state)
     {
-        var list = new List<(int idx, decimal price)>();
-        if (state.AnchorPrice <= 0) return list;
+        var list = new List<(int idx, decimal price, GridFloatTier tier)>();
+        if (state.AnchorPrice <= 0 || config.Tiers.Count == 0) return list;
 
-        var stepFrac = config.DcaStepPercent / 100m;
-        var dynamicMaxN = (int)Math.Floor(config.RangePercent / config.DcaStepPercent);
+        var stepPct = config.DcaStepPercent;
+        var stepFrac = stepPct / 100m;
+        var maxTierPct = config.Tiers[^1].UpToPercent;
+        var dynamicMaxN = (int)Math.Floor(maxTierPct / stepPct);
         if (dynamicMaxN < 1) return list;
 
         // Static mode places however many fit before crossing the frozen bound. Cap with a
@@ -940,6 +1018,7 @@ public class GridFloatHandler : IStrategyHandler
 
         for (int k = 1; k <= maxN; k++)
         {
+            var offsetPct = k * stepPct;
             decimal price = state.IsLong
                 ? state.AnchorPrice * (1m - k * stepFrac)
                 : state.AnchorPrice * (1m + k * stepFrac);
@@ -952,9 +1031,42 @@ public class GridFloatHandler : IStrategyHandler
                 if (!state.IsLong && price > state.StaticUpperBound) break;
             }
 
-            list.Add((k, price));
+            // Find first tier whose UpToPercent covers this offset%. Tiers are sorted ascending.
+            var tier = config.Tiers.FirstOrDefault(t => offsetPct <= t.UpToPercent);
+            if (tier == null)
+            {
+                // Beyond the outermost tier — in dynamic mode loop bound already prevents this,
+                // but in static mode we may walk past it; stop placing.
+                break;
+            }
+
+            list.Add((k, price, tier));
         }
         return list;
+    }
+
+    /// <summary>
+    /// Migrates legacy single-tier configs (BaseSizeUsdt + RangePercent) into the new Tiers
+    /// list when Tiers is empty. Then sorts the list ascending by UpToPercent so tier lookup
+    /// in ComputeDcaLevels can short-circuit on the first match. Idempotent.
+    /// </summary>
+    private static void NormalizeTiers(GridFloatConfig config)
+    {
+        if ((config.Tiers == null || config.Tiers.Count == 0)
+            && config.BaseSizeUsdt is > 0
+            && config.RangePercent is > 0)
+        {
+            config.Tiers = new List<GridFloatTier>
+            {
+                new() { UpToPercent = config.RangePercent.Value, SizeUsdt = config.BaseSizeUsdt.Value }
+            };
+        }
+
+        config.Tiers ??= new List<GridFloatTier>();
+        config.Tiers = config.Tiers
+            .Where(t => t.UpToPercent > 0 && t.SizeUsdt > 0)
+            .OrderBy(t => t.UpToPercent)
+            .ToList();
     }
 
     private static decimal ComputeTp(decimal fillPrice, decimal tpPercent, bool isLong)
@@ -1010,5 +1122,82 @@ public class GridFloatHandler : IStrategyHandler
             Message = message,
             CreatedAt = DateTime.UtcNow
         });
+    }
+
+    // ────────────────────────── Pre-placement guard (Fix #5) ──────────────────────────
+
+    /// <summary>
+    /// Pre-placement guard: ensures the tier's USDT size is at or above the exchange's
+    /// minimum-notional requirement for this symbol at the given price.
+    ///
+    ///   - If tier fits → return true, place normally.
+    ///   - If tier &lt; minNotional ≤ 2 × tier → auto-bump tier.SizeUsdt to minNotional rounded
+    ///     up to whole USDT, persist to ConfigJson, log INFO. Return true so the placement
+    ///     proceeds with the bumped size.
+    ///   - If minNotional &gt; 2 × tier → stop the bot (Status=Stopped) and log ERROR; the
+    ///     gap is too wide for an auto-fix without surprising the user. Return false.
+    ///
+    /// Without this guard, partial fills / lot-size rounding on low-cost symbols (e.g.
+    /// JCTUSDT, lot=100) can produce sub-minimum batches whose TPs cannot be placed and
+    /// cause an infinite "Qty 0 &lt; min N" error loop in HealMissingTps.
+    /// </summary>
+    private async Task<bool> EnsureTierFitsExchangeMinimum(
+        Strategy strategy, GridFloatConfig config,
+        IFuturesExchangeService exchange, GridFloatTier tier, decimal price, int levelIdx)
+    {
+        if (price <= 0 || tier.SizeUsdt <= 0) return true;
+
+        (decimal qtyStep, decimal minQty) info;
+        try
+        {
+            info = await exchange.GetSymbolInfoAsync(config.Symbol);
+        }
+        catch (NotSupportedException) { return true; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat tier-guard: GetSymbolInfoAsync failed for {Symbol}", config.Symbol);
+            return true; // fail-open — let the exchange itself reject if size is truly wrong
+        }
+
+        if (info.minQty <= 0) return true; // exchange didn't expose a minimum
+
+        var minNotional = info.minQty * price;
+        if (tier.SizeUsdt >= minNotional) return true; // tier already fits
+
+        if (minNotional <= 2m * tier.SizeUsdt)
+        {
+            // Auto-bump within the user's tolerance: round up to whole USDT so the new size
+            // is recognisable in the UI (e.g. $10 → $11, not $10.4087).
+            var oldSize = tier.SizeUsdt;
+            tier.SizeUsdt = Math.Ceiling(minNotional);
+            PersistConfigJson(strategy, config);
+            Log(strategy, "Info",
+                $"⚙️ Автокоррекция тира #{levelIdx}: ${oldSize} → ${tier.SizeUsdt} " +
+                $"(минимум биржи: {info.minQty} @ {Math.Round(price, 8)} = ${Math.Round(minNotional, 4)} USDT). " +
+                $"Размер тира был меньше биржевого минимума, поднял автоматически.");
+            return true;
+        }
+
+        // Gap is > 2× — refuse to silently spend more than 2× the user's intent.
+        strategy.Status = StrategyStatus.Stopped;
+        Log(strategy, "Error",
+            $"🛑 Бот остановлен: для тира #{levelIdx} биржевой минимум ${Math.Round(minNotional, 4)} " +
+            $"({info.minQty} @ {Math.Round(price, 8)}) превышает текущий размер тира ${tier.SizeUsdt} более чем в 2 раза. " +
+            $"Увеличьте sizeUsdt в настройках бота вручную или выберите другой инструмент.");
+        return false;
+    }
+
+    private static void PersistConfigJson(Strategy strategy, GridFloatConfig config)
+    {
+        var configDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(strategy.ConfigJson, JsonOptions)
+                         ?? new Dictionary<string, JsonElement>();
+        configDict["tiers"] = JsonSerializer.SerializeToElement(config.Tiers, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        });
+        // Clear any legacy fields so they cannot shadow the new tier list on subsequent loads.
+        configDict.Remove("baseSizeUsdt");
+        configDict.Remove("rangePercent");
+        strategy.ConfigJson = JsonSerializer.Serialize(configDict);
     }
 }
