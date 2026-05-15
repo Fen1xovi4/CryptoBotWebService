@@ -2384,6 +2384,10 @@ function SmaDcaCard({
 interface GridFloatTier {
   upToPercent: number;
   sizeUsdt: number;
+  // Optional per-tier overrides. When null/undefined, the bot uses the global
+  // dcaStepPercent / tpStepPercent from the root config.
+  dcaStepPercent?: number | null;
+  tpStepPercent?: number | null;
 }
 
 interface GridFloatCfg {
@@ -2410,7 +2414,17 @@ function normalizeGridFloatCfg(raw: Partial<GridFloatCfg> & Record<string, unkno
     .filter((t) => t && typeof t === 'object'
       && typeof (t as GridFloatTier).upToPercent === 'number' && (t as GridFloatTier).upToPercent > 0
       && typeof (t as GridFloatTier).sizeUsdt === 'number' && (t as GridFloatTier).sizeUsdt > 0)
-    .map((t) => ({ upToPercent: (t as GridFloatTier).upToPercent, sizeUsdt: (t as GridFloatTier).sizeUsdt }));
+    .map((t) => {
+      const tier = t as GridFloatTier;
+      return {
+        upToPercent: tier.upToPercent,
+        sizeUsdt: tier.sizeUsdt,
+        dcaStepPercent: typeof tier.dcaStepPercent === 'number' && tier.dcaStepPercent > 0
+          ? tier.dcaStepPercent : null,
+        tpStepPercent: typeof tier.tpStepPercent === 'number' && tier.tpStepPercent > 0
+          ? tier.tpStepPercent : null,
+      };
+    });
 
   if (tiers.length === 0
     && typeof raw.baseSizeUsdt === 'number' && raw.baseSizeUsdt > 0
@@ -2506,38 +2520,84 @@ function GridFloatCard({
   const maxRangePct = tiers.length > 0 ? tiers[tiers.length - 1].upToPercent : 0;
   const anchorSize = tiers.length > 0 ? tiers[0].sizeUsdt : 0;
 
-  // Inline Tiers editor — visible only when paused. Each tier row has its own upToPercent +
-  // sizeUsdt input. Add/remove tier buttons mutate the list locally; "Apply" sends the full
-  // sorted list to the API.
-  const [tierDraft, setTierDraft] = useState<Array<{ upTo: string; size: string }>>([]);
+  // Inline Tiers editor — visible only when paused. Each tier row has its own upToPercent,
+  // sizeUsdt, and optional per-tier dcaStep / tpStep overrides (blank = use global default).
+  // Add/remove tier buttons mutate the list locally; "Apply" sends the full sorted list to
+  // the API.
+  type TierDraftRow = { upTo: string; size: string; dca: string; tp: string };
+  const [tierDraft, setTierDraft] = useState<TierDraftRow[]>([]);
   // Build a stable signature of the persisted tiers so the effect only re-syncs the draft
   // when the actual tier values change (not on every refetch's new object identity).
   const persistedSig = useMemo(
-    () => tiers.map((t) => `${t.upToPercent}:${t.sizeUsdt}`).join('|'),
+    () => tiers.map((t) => `${t.upToPercent}:${t.sizeUsdt}:${t.dcaStepPercent ?? ''}:${t.tpStepPercent ?? ''}`).join('|'),
     [tiers],
   );
   useEffect(() => {
     if (isPaused) {
-      setTierDraft(tiers.map((t) => ({ upTo: String(t.upToPercent), size: String(t.sizeUsdt) })));
+      setTierDraft(tiers.map((t) => ({
+        upTo: String(t.upToPercent),
+        size: String(t.sizeUsdt),
+        dca: t.dcaStepPercent != null && t.dcaStepPercent > 0 ? String(t.dcaStepPercent) : '',
+        tp: t.tpStepPercent != null && t.tpStepPercent > 0 ? String(t.tpStepPercent) : '',
+      })));
     }
   }, [isPaused, persistedSig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const parsedDraft = tierDraft.map((t) => ({
     upToPercent: parseFloat(t.upTo),
     sizeUsdt: parseFloat(t.size),
+    dcaStepPercent: t.dca.trim() === '' ? null : parseFloat(t.dca),
+    tpStepPercent: t.tp.trim() === '' ? null : parseFloat(t.tp),
   }));
+  // Each tier with an override must parse to a positive number. Blank → null is valid (uses global).
+  const overridesValid = parsedDraft.every((t) =>
+    (t.dcaStepPercent === null || (!isNaN(t.dcaStepPercent) && t.dcaStepPercent > 0))
+    && (t.tpStepPercent === null || (!isNaN(t.tpStepPercent) && t.tpStepPercent > 0)));
+  const effectiveDca = (t: { dcaStepPercent: number | null }) =>
+    t.dcaStepPercent ?? normalizedCfg?.dcaStepPercent ?? 0;
   const draftValid = parsedDraft.length > 0
     && parsedDraft.every((t) => !isNaN(t.upToPercent) && t.upToPercent > 0 && !isNaN(t.sizeUsdt) && t.sizeUsdt > 0)
     && normalizedCfg != null
-    && parsedDraft.every((t) => t.upToPercent >= normalizedCfg.dcaStepPercent)
+    && overridesValid
+    // Outermost tier must accommodate at least one DCA at its effective step.
+    && (() => {
+      const outer = parsedDraft[parsedDraft.length - 1];
+      const prevUp = parsedDraft.length > 1 ? parsedDraft[parsedDraft.length - 2].upToPercent : 0;
+      return outer.upToPercent - prevUp >= effectiveDca(outer);
+    })()
     && parsedDraft.every((t, i, a) => i === 0 || t.upToPercent > a[i - 1].upToPercent);
-  const draftChanged = draftValid
-    && tierDraft.map((t) => `${t.upTo}:${t.size}`).join('|') !== persistedSig;
+  // Send each tier's payload — omit null overrides so the backend reads the global default.
+  const payloadDraft = parsedDraft.map((t) => ({
+    upToPercent: t.upToPercent,
+    sizeUsdt: t.sizeUsdt,
+    ...(t.dcaStepPercent != null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+    ...(t.tpStepPercent != null ? { tpStepPercent: t.tpStepPercent } : {}),
+  }));
+  const draftSig = tierDraft.map((t) => `${t.upTo}:${t.size}:${t.dca}:${t.tp}`).join('|');
+  const draftChanged = draftValid && draftSig !== persistedSig;
+  // Per-tier walk preview — matches GridFloatHandler.ComputeDcaLevels exactly.
+  const countSlots = (parsed: typeof parsedDraft, fallbackStep: number) => {
+    let total = 0;
+    let prev = 0;
+    for (const t of parsed) {
+      const step = t.dcaStepPercent ?? fallbackStep;
+      if (step > 0) total += Math.floor((t.upToPercent - prev) / step);
+      prev = t.upToPercent;
+    }
+    return total;
+  };
   const previewSlots = draftValid && normalizedCfg
-    ? Math.floor(parsedDraft[parsedDraft.length - 1].upToPercent / normalizedCfg.dcaStepPercent)
+    ? countSlots(parsedDraft, normalizedCfg.dcaStepPercent)
     : 0;
-  const currentSlots = normalizedCfg && maxRangePct > 0
-    ? Math.floor(maxRangePct / normalizedCfg.dcaStepPercent)
+  const currentSlots = normalizedCfg
+    ? countSlots(
+        tiers.map((t) => ({
+          upToPercent: t.upToPercent,
+          sizeUsdt: t.sizeUsdt,
+          dcaStepPercent: t.dcaStepPercent ?? null,
+          tpStepPercent: t.tpStepPercent ?? null,
+        })),
+        normalizedCfg.dcaStepPercent)
     : 0;
 
   const addTierRow = () => {
@@ -2545,11 +2605,11 @@ function GridFloatCard({
       const last = prev[prev.length - 1];
       const nextUpTo = last && parseFloat(last.upTo) > 0 ? parseFloat(last.upTo) * 2 : 10;
       const nextSize = last && parseFloat(last.size) > 0 ? parseFloat(last.size) * 2 : 100;
-      return [...prev, { upTo: String(nextUpTo), size: String(nextSize) }];
+      return [...prev, { upTo: String(nextUpTo), size: String(nextSize), dca: '', tp: '' }];
     });
   };
   const removeTierRow = (i: number) => setTierDraft((prev) => prev.filter((_, idx) => idx !== i));
-  const updateTierRow = (i: number, field: 'upTo' | 'size', value: string) =>
+  const updateTierRow = (i: number, field: keyof TierDraftRow, value: string) =>
     setTierDraft((prev) => prev.map((t, idx) => idx === i ? { ...t, [field]: value } : t));
 
   // Mark-to-market unrealized PnL — uses state.lastPrice (refreshed by handler each tick).
@@ -2610,9 +2670,18 @@ function GridFloatCard({
           ) : (
             tiers.map((t, i) => {
               const prevUp = i === 0 ? 0 : tiers[i - 1].upToPercent;
+              const dcaOverride = typeof t.dcaStepPercent === 'number' && t.dcaStepPercent > 0;
+              const tpOverride = typeof t.tpStepPercent === 'number' && t.tpStepPercent > 0;
+              const effDca = dcaOverride ? t.dcaStepPercent : normalizedCfg.dcaStepPercent;
+              const effTp = tpOverride ? t.tpStepPercent : normalizedCfg.tpStepPercent;
               return (
                 <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300">
                   T{i + 1}: {prevUp}%–{t.upToPercent}% · ${t.sizeUsdt}
+                  {(dcaOverride || tpOverride) && (
+                    <span className="ml-1 text-indigo-200/80">
+                      ·dca{effDca}%·tp{effTp}%
+                    </span>
+                  )}
                 </span>
               );
             })
@@ -2699,7 +2768,7 @@ function GridFloatCard({
             <div className="text-[10px] font-medium text-accent-yellow mb-1.5">
               Расширить сетку (ярусы)
             </div>
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               {tierDraft.map((t, i) => {
                 const prevUp = i === 0 ? 0 : parseFloat(tierDraft[i - 1].upTo);
                 return (
@@ -2709,12 +2778,12 @@ function GridFloatCard({
                     <input
                       type="number"
                       step="0.5"
-                      min={normalizedCfg.dcaStepPercent}
+                      min="0.1"
                       value={t.upTo}
                       onChange={(e) => updateTierRow(i, 'upTo', e.target.value)}
                       className="w-14 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary"
                     />
-                    <span className="text-[10px] text-text-secondary">%, ставка $</span>
+                    <span className="text-[10px] text-text-secondary">%, $</span>
                     <input
                       type="number"
                       step="1"
@@ -2723,6 +2792,27 @@ function GridFloatCard({
                       onChange={(e) => updateTierRow(i, 'size', e.target.value)}
                       className="w-16 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary"
                     />
+                    <span className="text-[10px] text-text-secondary">dca</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0.01"
+                      value={t.dca}
+                      placeholder={String(normalizedCfg.dcaStepPercent)}
+                      onChange={(e) => updateTierRow(i, 'dca', e.target.value)}
+                      className="w-12 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary placeholder:text-text-secondary/40"
+                    />
+                    <span className="text-[10px] text-text-secondary">% tp</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0.01"
+                      value={t.tp}
+                      placeholder={String(normalizedCfg.tpStepPercent)}
+                      onChange={(e) => updateTierRow(i, 'tp', e.target.value)}
+                      className="w-12 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary placeholder:text-text-secondary/40"
+                    />
+                    <span className="text-[10px] text-text-secondary">%</span>
                     {tierDraft.length > 1 && (
                       <button
                         onClick={() => removeTierRow(i)}
@@ -2746,10 +2836,10 @@ function GridFloatCard({
               <span className="text-[10px] text-text-secondary">
                 {draftValid
                   ? <>будет <span className="text-text-primary font-medium">{previewSlots}</span> уровней (сейчас {currentSlots})</>
-                  : <span className="text-accent-red">upTo должен быть ≥ step ({normalizedCfg.dcaStepPercent}%) и возрастать</span>}
+                  : <span className="text-accent-red">upTo возрастает, ширина внешнего тира ≥ его шага DCA, шаги &gt; 0</span>}
               </span>
               <button
-                onClick={() => { if (draftChanged) onUpdateTiers(parsedDraft); }}
+                onClick={() => { if (draftChanged) onUpdateTiers(payloadDraft as GridFloatTier[]); }}
                 disabled={!draftChanged || updateTiersPending}
                 className="ml-auto px-2 py-1 text-[10px] font-medium bg-accent-yellow/15 text-accent-yellow rounded-md hover:bg-accent-yellow/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
@@ -2757,7 +2847,7 @@ function GridFloatCard({
               </button>
             </div>
             <div className="text-[10px] text-text-secondary/70 mt-1.5 leading-tight">
-              После «Применить» нажми ▶ Возобновить — HealMissingDcas поставит лимиты на новые свободные уровни с размером своего яруса. Уже стоящие лимитки не пересчитываются.
+              После «Применить» нажми ▶ Возобновить — HealMissingDcas поставит лимиты на новые свободные уровни с размером своего яруса. Уже стоящие лимитки не пересчитываются. Пустые dca/tp = глобальный шаг ({normalizedCfg.dcaStepPercent}% / {normalizedCfg.tpStepPercent}%).
             </div>
           </div>
         </>
@@ -3009,7 +3099,8 @@ function AddStrategyModal({
   const [fcAutoRotate, setFcAutoRotate] = useState(true);
 
   // GridFloat fields. `tiers` is the dynamic expanding-grid list; start with one tier so the
-  // default config matches the legacy single-zone behaviour ($100 in the first 10%).
+  // default config matches the legacy single-zone behaviour ($100 in the first 10%). Per-tier
+  // dca/tp inputs default empty — empty falls back to the global step from gfForm.
   const [gfForm, setGfForm] = useState({
     timeframe: '1h',
     direction: 'Long',
@@ -3018,8 +3109,8 @@ function AddStrategyModal({
     leverage: '1',
     useStaticRange: false,
   });
-  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string }>>(
-    [{ upTo: '10', size: '100' }],
+  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(
+    [{ upTo: '10', size: '100', dca: '', tp: '' }],
   );
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
@@ -3102,7 +3193,13 @@ function AddStrategyModal({
       });
     } else if (strategyType === 'GridFloat') {
       const tiers = gfTiers
-        .map((t) => ({ upToPercent: Number(t.upTo), sizeUsdt: Number(t.size) }))
+        .map((t) => {
+          const upToPercent = Number(t.upTo);
+          const sizeUsdt = Number(t.size);
+          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
+          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
+          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
+        })
         .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
         .sort((a, b) => a.upToPercent - b.upToPercent);
       if (tiers.length === 0) {
@@ -3115,11 +3212,29 @@ function AddStrategyModal({
           return;
         }
       }
+      // Per-tier overrides, when provided, must be strictly positive.
+      for (const t of tiers) {
+        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) {
+          setError('Per-tier шаг DCA должен быть > 0 (или оставьте пустым)');
+          return;
+        }
+        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) {
+          setError('Per-tier шаг TP должен быть > 0 (или оставьте пустым)');
+          return;
+        }
+      }
+      // Send each tier — omit null overrides so the bot falls back to the global default.
+      const tiersPayload = tiers.map((t) => ({
+        upToPercent: t.upToPercent,
+        sizeUsdt: t.sizeUsdt,
+        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
+      }));
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: gfForm.timeframe,
         direction: gfForm.direction,
-        tiers,
+        tiers: tiersPayload,
         dcaStepPercent: Number(gfForm.dcaStepPercent),
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
@@ -3522,10 +3637,10 @@ function AddStrategyModal({
                 </div>
               </div>
 
-              {/* TP step + DCA step */}
+              {/* TP step + DCA step — defaults for tiers that don't override */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className={labelCls}>Шаг TP, %</label>
+                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -3534,10 +3649,10 @@ function AddStrategyModal({
                     onChange={(e) => setGfForm({ ...gfForm, tpStepPercent: e.target.value })}
                     className={inputCls}
                   />
-                  <p className="text-xs text-text-secondary mt-0.5">От цены каждого фила, не от средней</p>
+                  <p className="text-xs text-text-secondary mt-0.5">Используется для тиров без своего TP-шага</p>
                 </div>
                 <div>
-                  <label className={labelCls}>Шаг DCA, %</label>
+                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -3546,22 +3661,24 @@ function AddStrategyModal({
                     onChange={(e) => setGfForm({ ...gfForm, dcaStepPercent: e.target.value })}
                     className={inputCls}
                   />
-                  <p className="text-xs text-text-secondary mt-0.5">Расстояние между DCA-уровнями</p>
+                  <p className="text-xs text-text-secondary mt-0.5">Используется для тиров без своего DCA-шага</p>
                 </div>
               </div>
 
-              {/* Tiers — expanding zones */}
+              {/* Tiers — expanding zones, each can override DCA/TP step */}
               <div>
                 <label className={labelCls}>Ярусы сетки</label>
                 <div className="rounded-lg border border-border overflow-hidden">
-                  <table className="w-full text-sm">
+                  <table className="w-full text-xs">
                     <thead>
-                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
-                        <th className="px-3 py-2 text-left font-medium w-12">#</th>
-                        <th className="px-3 py-2 text-left font-medium">От %</th>
-                        <th className="px-3 py-2 text-left font-medium">До %</th>
-                        <th className="px-3 py-2 text-left font-medium">Ставка $</th>
-                        <th className="px-3 py-2 w-8" />
+                      <tr className="bg-bg-tertiary text-text-secondary">
+                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
+                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
+                        <th className="px-2 py-2 text-left font-medium">До %</th>
+                        <th className="px-2 py-2 text-left font-medium">$</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
+                        <th className="px-2 py-2 w-6" />
                       </tr>
                     </thead>
                     <tbody>
@@ -3569,9 +3686,9 @@ function AddStrategyModal({
                         const prevUp = i === 0 ? '0' : gfTiers[i - 1].upTo || '?';
                         return (
                           <tr key={i} className="border-t border-border/50">
-                            <td className="px-3 py-1.5 text-xs text-text-secondary">T{i + 1}</td>
-                            <td className="px-3 py-1.5 text-xs text-text-secondary">{prevUp}</td>
-                            <td className="px-3 py-1.5">
+                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
+                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
+                            <td className="px-2 py-1.5">
                               <input
                                 type="number"
                                 step="0.5"
@@ -3579,10 +3696,10 @@ function AddStrategyModal({
                                 value={t.upTo}
                                 onChange={(e) => setGfTiers((prev) =>
                                   prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
-                                className="w-20 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
                               />
                             </td>
-                            <td className="px-3 py-1.5">
+                            <td className="px-2 py-1.5">
                               <input
                                 type="number"
                                 step="1"
@@ -3590,15 +3707,39 @@ function AddStrategyModal({
                                 value={t.size}
                                 onChange={(e) => setGfTiers((prev) =>
                                   prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
-                                className="w-24 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
                               />
                             </td>
-                            <td className="px-3 py-1.5 text-right">
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.dca}
+                                placeholder={gfForm.dcaStepPercent}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.tp}
+                                placeholder={gfForm.tpStepPercent}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5 text-right">
                               {gfTiers.length > 1 && (
                                 <button
                                   type="button"
                                   onClick={() => setGfTiers((prev) => prev.filter((_, idx) => idx !== i))}
-                                  className="px-2 py-0.5 text-xs text-accent-red hover:bg-accent-red/10 rounded"
+                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
                                   title="Удалить ярус"
                                 >
                                   ×
@@ -3617,15 +3758,16 @@ function AddStrategyModal({
                     const last = prev[prev.length - 1];
                     const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
                     const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
-                    return [...prev, { upTo: String(nextUp), size: String(nextSize) }];
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
                   })}
                   className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
                 >
                   + Добавить ярус
                 </button>
                 <p className="text-xs text-text-secondary mt-1.5">
-                  Каждый ярус задаёт верхнюю границу (% от якоря) и ставку для всех филов в этом диапазоне.
-                  Якорь использует ставку первого яруса.
+                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
+                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
+                  Якорь использует параметры первого яруса.
                 </p>
               </div>
 
@@ -3648,10 +3790,22 @@ function AddStrategyModal({
               </label>
 
               <p className="text-xs text-text-secondary italic">
-                Уровней DCA на старте: ~{Math.max(0, Math.floor(Number(gfTiers[gfTiers.length - 1]?.upTo) / Math.max(0.0001, Number(gfForm.dcaStepPercent)))) || '?'}.
+                Уровней DCA на старте: ~{(() => {
+                  const fallback = Math.max(0.0001, Number(gfForm.dcaStepPercent));
+                  let total = 0;
+                  let prev = 0;
+                  for (const row of gfTiers) {
+                    const upTo = Number(row.upTo);
+                    if (!(upTo > 0)) continue;
+                    const tierStep = row.dca.trim() === '' ? fallback : Number(row.dca);
+                    if (tierStep > 0 && upTo > prev) total += Math.floor((upTo - prev) / tierStep);
+                    prev = upTo;
+                  }
+                  return total > 0 ? total : '?';
+                })()}.
                 Каждый фил (якорь и доборы) получает свой собственный reduce-only лимит на закрытие
-                в плюс {gfForm.tpStepPercent}% от ЦЕНЫ этого фила. Размер фила берётся из яруса,
-                в который попадает offset от якоря. Когда срабатывает TP — DCA-слот на этом
+                в плюс шаг_TP того яруса, в который попадает offset от якоря. Размер фила и шаг DCA
+                тоже берутся из соответствующего яруса. Когда срабатывает TP — DCA-слот на этом
                 уровне переустанавливается. Полное закрытие всех батчей → отмена всех лимиток
                 → ожидание следующего бара → новый якорь. Стоп-лосса нет.
               </p>
@@ -4039,21 +4193,27 @@ function EditStrategyModal({
     leverage: String(cfg.leverage ?? 1),
     useStaticRange: cfg.useStaticRange ?? false,
   });
-  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string }>>(() => {
+  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(() => {
     if (Array.isArray(cfg.tiers) && cfg.tiers.length > 0) {
       const sorted = [...cfg.tiers]
         .filter((t: { upToPercent: number; sizeUsdt: number }) =>
           Number(t.upToPercent) > 0 && Number(t.sizeUsdt) > 0)
         .sort((a: { upToPercent: number }, b: { upToPercent: number }) => a.upToPercent - b.upToPercent);
       if (sorted.length > 0) {
-        return sorted.map((t: { upToPercent: number; sizeUsdt: number }) =>
-          ({ upTo: String(t.upToPercent), size: String(t.sizeUsdt) }));
+        return sorted.map((t: { upToPercent: number; sizeUsdt: number; dcaStepPercent?: number | null; tpStepPercent?: number | null }) => ({
+          upTo: String(t.upToPercent),
+          size: String(t.sizeUsdt),
+          dca: typeof t.dcaStepPercent === 'number' && t.dcaStepPercent > 0 ? String(t.dcaStepPercent) : '',
+          tp: typeof t.tpStepPercent === 'number' && t.tpStepPercent > 0 ? String(t.tpStepPercent) : '',
+        }));
       }
     }
     // Legacy bot — synthesise a single tier from the old fields.
     return [{
       upTo: String(cfg.rangePercent ?? 10),
       size: String(cfg.baseSizeUsdt ?? 100),
+      dca: '',
+      tp: '',
     }];
   });
 
@@ -4135,7 +4295,13 @@ function EditStrategyModal({
       });
     } else if (isGF) {
       const tiers = gfTiers
-        .map((t) => ({ upToPercent: Number(t.upTo), sizeUsdt: Number(t.size) }))
+        .map((t) => {
+          const upToPercent = Number(t.upTo);
+          const sizeUsdt = Number(t.size);
+          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
+          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
+          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
+        })
         .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
         .sort((a, b) => a.upToPercent - b.upToPercent);
       if (tiers.length === 0) {
@@ -4148,11 +4314,27 @@ function EditStrategyModal({
           return;
         }
       }
+      for (const t of tiers) {
+        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) {
+          setError('Per-tier шаг DCA должен быть > 0 (или оставьте пустым)');
+          return;
+        }
+        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) {
+          setError('Per-tier шаг TP должен быть > 0 (или оставьте пустым)');
+          return;
+        }
+      }
+      const tiersPayload = tiers.map((t) => ({
+        upToPercent: t.upToPercent,
+        sizeUsdt: t.sizeUsdt,
+        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
+      }));
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: gfForm.timeframe,
         direction: gfForm.direction,
-        tiers,
+        tiers: tiersPayload,
         dcaStepPercent: Number(gfForm.dcaStepPercent),
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
@@ -4505,7 +4687,7 @@ function EditStrategyModal({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className={labelCls}>Шаг TP, %</label>
+                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -4516,7 +4698,7 @@ function EditStrategyModal({
                   />
                 </div>
                 <div>
-                  <label className={labelCls}>Шаг DCA, %</label>
+                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -4528,18 +4710,20 @@ function EditStrategyModal({
                 </div>
               </div>
 
-              {/* Tiers — expanding zones */}
+              {/* Tiers — expanding zones, each can override DCA/TP step */}
               <div>
                 <label className={labelCls}>Ярусы сетки</label>
                 <div className="rounded-lg border border-border overflow-hidden">
-                  <table className="w-full text-sm">
+                  <table className="w-full text-xs">
                     <thead>
-                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
-                        <th className="px-3 py-2 text-left font-medium w-12">#</th>
-                        <th className="px-3 py-2 text-left font-medium">От %</th>
-                        <th className="px-3 py-2 text-left font-medium">До %</th>
-                        <th className="px-3 py-2 text-left font-medium">Ставка $</th>
-                        <th className="px-3 py-2 w-8" />
+                      <tr className="bg-bg-tertiary text-text-secondary">
+                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
+                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
+                        <th className="px-2 py-2 text-left font-medium">До %</th>
+                        <th className="px-2 py-2 text-left font-medium">$</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
+                        <th className="px-2 py-2 w-6" />
                       </tr>
                     </thead>
                     <tbody>
@@ -4547,9 +4731,9 @@ function EditStrategyModal({
                         const prevUp = i === 0 ? '0' : gfTiers[i - 1].upTo || '?';
                         return (
                           <tr key={i} className="border-t border-border/50">
-                            <td className="px-3 py-1.5 text-xs text-text-secondary">T{i + 1}</td>
-                            <td className="px-3 py-1.5 text-xs text-text-secondary">{prevUp}</td>
-                            <td className="px-3 py-1.5">
+                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
+                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
+                            <td className="px-2 py-1.5">
                               <input
                                 type="number"
                                 step="0.5"
@@ -4557,10 +4741,10 @@ function EditStrategyModal({
                                 value={t.upTo}
                                 onChange={(e) => setGfTiers((prev) =>
                                   prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
-                                className="w-20 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
                               />
                             </td>
-                            <td className="px-3 py-1.5">
+                            <td className="px-2 py-1.5">
                               <input
                                 type="number"
                                 step="1"
@@ -4568,15 +4752,39 @@ function EditStrategyModal({
                                 value={t.size}
                                 onChange={(e) => setGfTiers((prev) =>
                                   prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
-                                className="w-24 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
                               />
                             </td>
-                            <td className="px-3 py-1.5 text-right">
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.dca}
+                                placeholder={gfForm.dcaStepPercent}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.tp}
+                                placeholder={gfForm.tpStepPercent}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5 text-right">
                               {gfTiers.length > 1 && (
                                 <button
                                   type="button"
                                   onClick={() => setGfTiers((prev) => prev.filter((_, idx) => idx !== i))}
-                                  className="px-2 py-0.5 text-xs text-accent-red hover:bg-accent-red/10 rounded"
+                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
                                   title="Удалить ярус"
                                 >
                                   ×
@@ -4595,15 +4803,16 @@ function EditStrategyModal({
                     const last = prev[prev.length - 1];
                     const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
                     const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
-                    return [...prev, { upTo: String(nextUp), size: String(nextSize) }];
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
                   })}
                   className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
                 >
                   + Добавить ярус
                 </button>
                 <p className="text-xs text-text-secondary mt-1.5">
-                  Каждый ярус задаёт верхнюю границу (% от якоря) и ставку для всех филов в этом диапазоне.
-                  Якорь использует ставку первого яруса.
+                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
+                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
+                  Якорь использует параметры первого яруса.
                 </p>
               </div>
 

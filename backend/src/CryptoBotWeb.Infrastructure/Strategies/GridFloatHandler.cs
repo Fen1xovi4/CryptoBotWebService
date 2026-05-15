@@ -46,6 +46,14 @@ public class GridFloatHandler : IStrategyHandler
 
     private const int PlacementCooldownMinutes = 5;
 
+    // Small delay between sequential REST placements to stay inside per-key rate limits
+    // (Bybit ~10/sec on linear post-order, Bitget ~10/sec, BingX ~5/sec). 75ms between calls
+    // caps the burst at ~13 req/sec which fits every exchange we support. Applied in
+    // PlaceInitialDcaLadder, HealMissingDcas and HealMissingTps — the three sites that can
+    // legitimately fire dozens of orders back-to-back (initial ladder on a fresh anchor,
+    // re-arm after restart, or TP heal after restart).
+    private const int InterOrderDelayMs = 75;
+
     public string StrategyType => StrategyTypes.GridFloat;
 
     private readonly AppDbContext _db;
@@ -75,13 +83,16 @@ public class GridFloatHandler : IStrategyHandler
         // sort. Mutates `config.Tiers` in-place; idempotent on already-tiered configs.
         NormalizeTiers(config);
 
+        // Per-tier overrides (if present) must be strictly positive; null = inherit the global
+        // DcaStepPercent / TpStepPercent default.
         if (config.Tiers.Count == 0 || config.Tiers.Any(t => t.UpToPercent <= 0 || t.SizeUsdt <= 0)
+            || config.Tiers.Any(t => t.DcaStepPercent is <= 0 || t.TpStepPercent is <= 0)
             || config.DcaStepPercent <= 0 || config.TpStepPercent <= 0
-            || config.Tiers[^1].UpToPercent < config.DcaStepPercent
+            || config.Tiers[^1].UpToPercent < EffectiveDcaStep(config, config.Tiers[^1])
             || config.Leverage < 1)
         {
             Log(strategy, "Error",
-                $"Некорректные параметры: Tiers=[{string.Join(", ", config.Tiers.Select(t => $"upTo={t.UpToPercent}%/size={t.SizeUsdt}"))}], " +
+                $"Некорректные параметры: Tiers=[{string.Join(", ", config.Tiers.Select(t => $"upTo={t.UpToPercent}%/size={t.SizeUsdt}/dca={t.DcaStepPercent?.ToString() ?? "-"}/tp={t.TpStepPercent?.ToString() ?? "-"}"))}], " +
                 $"DcaStep={config.DcaStepPercent}%, TpStep={config.TpStepPercent}%, Leverage={config.Leverage}");
             return;
         }
@@ -228,8 +239,8 @@ public class GridFloatHandler : IStrategyHandler
 
         Log(strategy, "Info",
             $"📈 ANCHOR {config.Direction}: {config.Symbol}, anchorSize={anchorSize}USDT, close={candle.Close}, " +
-            $"tiers=[{string.Join(", ", config.Tiers.Select(t => $"≤{t.UpToPercent}%:${t.SizeUsdt}"))}], " +
-            $"step={config.DcaStepPercent}%, tp={config.TpStepPercent}%, maxRange=±{maxRangePct}%");
+            $"tiers=[{string.Join(", ", config.Tiers.Select(t => $"≤{t.UpToPercent}%:${t.SizeUsdt}/dca{t.DcaStepPercent?.ToString() ?? config.DcaStepPercent.ToString()}%/tp{t.TpStepPercent?.ToString() ?? config.TpStepPercent.ToString()}%"))}], " +
+            $"default step={config.DcaStepPercent}%, tp={config.TpStepPercent}%, maxRange=±{maxRangePct}%");
 
         var result = isLong
             ? await exchange.OpenLongAsync(config.Symbol, anchorSize)
@@ -262,7 +273,9 @@ public class GridFloatHandler : IStrategyHandler
                 (isLong ? $"lower={Math.Round(state.StaticLowerBound, 8)}" : $"upper={Math.Round(state.StaticUpperBound, 8)}"));
         }
 
-        var tpPrice = ComputeTp(fillPrice, config.TpStepPercent, isLong);
+        // Anchor sits at offset 0% → falls inside tier 0; uses its TP override if set.
+        var anchorTpStep = EffectiveTpStep(config, fillPrice, fillPrice);
+        var tpPrice = ComputeTp(fillPrice, anchorTpStep, isLong);
         var batch = new GridFloatBatch
         {
             LevelIdx = 0, // anchor
@@ -299,8 +312,12 @@ public class GridFloatHandler : IStrategyHandler
             string.Join(", ", levels.Take(5).Select(l => $"#{l.idx}@{Math.Round(l.price, 8)}({l.tier.SizeUsdt}$)")) +
             (levels.Count > 5 ? "…" : "") + ")");
 
-        foreach (var (idx, price, tier) in levels)
+        for (int i = 0; i < levels.Count; i++)
+        {
+            if (i > 0) await Task.Delay(InterOrderDelayMs);
+            var (idx, price, tier) = levels[i];
             await PlaceDcaLimit(strategy, config, state, exchange, idx, price, tier);
+        }
     }
 
     private async Task PlaceDcaLimit(Strategy strategy, GridFloatConfig config, GridFloatState state,
@@ -501,7 +518,10 @@ public class GridFloatHandler : IStrategyHandler
         IFuturesExchangeService exchange, GridFloatDcaOrder dca, decimal fillQty, decimal fillPrice,
         CancellationToken ct)
     {
-        var tpPrice = ComputeTp(fillPrice, config.TpStepPercent, state.IsLong);
+        // TP step uses the tier in which this fill's offset% (from anchor) lies. Falls back
+        // to config.TpStepPercent if the tier doesn't define its own override.
+        var tpStep = EffectiveTpStep(config, state.AnchorPrice, fillPrice);
+        var tpPrice = ComputeTp(fillPrice, tpStep, state.IsLong);
         var batch = new GridFloatBatch
         {
             LevelIdx = dca.LevelIdx,
@@ -870,10 +890,15 @@ public class GridFloatHandler : IStrategyHandler
         // Snapshot — PlaceBatchTpLimit may drop sub-min legacy batches from state.Batches,
         // which would otherwise corrupt the foreach iterator (Fix #5 cleanup path).
         var snapshot = state.Batches.ToList();
+        var placed = 0;
         foreach (var batch in snapshot)
         {
             if (string.IsNullOrEmpty(batch.TpOrderId))
+            {
+                if (placed > 0) await Task.Delay(InterOrderDelayMs);
                 await PlaceBatchTpLimit(strategy, config, state, exchange, batch);
+                placed++;
+            }
         }
     }
 
@@ -888,10 +913,13 @@ public class GridFloatHandler : IStrategyHandler
         foreach (var d in state.DcaOrders) occupiedLevels.Add(d.LevelIdx);
 
         var levels = ComputeDcaLevels(config, state);
+        var placed = 0;
         foreach (var (idx, price, tier) in levels)
         {
             if (occupiedLevels.Contains(idx)) continue;
+            if (placed > 0) await Task.Delay(InterOrderDelayMs);
             await PlaceDcaLimit(strategy, config, state, exchange, idx, price, tier);
+            placed++;
         }
     }
 
@@ -989,9 +1017,19 @@ public class GridFloatHandler : IStrategyHandler
 
     /// <summary>
     /// Returns the list of (levelIdx, price, tier) for live DCA slots — slot 0 is the anchor
-    /// and is excluded; DCAs run 1..N where N depends on range mode and ALL tiers:
-    ///   - Dynamic: walk k=1,2,…, stop when offset% strictly exceeds the largest tier
-    ///     UpToPercent. For each k pick the first tier whose UpToPercent ≥ offset%.
+    /// and is excluded. Each tier walks INDEPENDENTLY with its own effective DCA step:
+    ///
+    ///   tier 1: offsets step₁, 2·step₁, …, up to UpTo₁
+    ///   tier 2: offsets UpTo₁ + step₂, UpTo₁ + 2·step₂, …, up to UpTo₂
+    ///   tier 3: offsets UpTo₂ + step₃, …, up to UpTo₃
+    ///
+    /// (step_n = tier_n.DcaStepPercent ?? config.DcaStepPercent.) So a misalignment between
+    /// a tier's step and the previous tier's UpTo boundary "restarts" the walk from the
+    /// boundary — placing the first level of tier N at UpTo_{N-1} + step_N regardless of
+    /// where tier N-1's last level happened to land.
+    ///
+    /// Range modes:
+    ///   - Dynamic: walk strictly inside each tier; stop at the outermost tier's UpToPercent.
     ///   - Static (Long): same plus the additional price-floor check against StaticLowerBound.
     ///   - Static (Short): mirror image with StaticUpperBound as ceiling.
     ///
@@ -1004,45 +1042,69 @@ public class GridFloatHandler : IStrategyHandler
         var list = new List<(int idx, decimal price, GridFloatTier tier)>();
         if (state.AnchorPrice <= 0 || config.Tiers.Count == 0) return list;
 
-        var stepPct = config.DcaStepPercent;
-        var stepFrac = stepPct / 100m;
-        var maxTierPct = config.Tiers[^1].UpToPercent;
-        var dynamicMaxN = (int)Math.Floor(maxTierPct / stepPct);
-        if (dynamicMaxN < 1) return list;
+        // Safety cap on total levels — keeps a misconfigured static bound or absurdly small
+        // tier step from generating thousands of orders.
+        const int safetyCeiling = 500;
 
-        // Static mode places however many fit before crossing the frozen bound. Cap with a
-        // safety ceiling so a misconfigured static bound (e.g. set far away from anchor)
-        // doesn't generate hundreds of orders.
-        const int safetyCeiling = 200;
-        var maxN = config.UseStaticRange && state.StaticBoundsInitialized ? safetyCeiling : dynamicMaxN;
+        int k = 0;
+        decimal prevTopPct = 0m;
 
-        for (int k = 1; k <= maxN; k++)
+        foreach (var tier in config.Tiers)
         {
-            var offsetPct = k * stepPct;
-            decimal price = state.IsLong
-                ? state.AnchorPrice * (1m - k * stepFrac)
-                : state.AnchorPrice * (1m + k * stepFrac);
+            var stepPct = EffectiveDcaStep(config, tier);
+            if (stepPct <= 0) continue;
 
-            if (price <= 0) break;
+            // Strict-greater tolerance: 1e-9 lets the loop emit a level exactly at the tier
+            // boundary (e.g. step=1%, UpTo=5% → last level at 5%) without floating-point
+            // jitter dropping it.
+            const decimal eps = 1e-9m;
 
-            if (config.UseStaticRange && state.StaticBoundsInitialized)
+            var offsetPct = prevTopPct + stepPct;
+            while (offsetPct <= tier.UpToPercent + eps && k < safetyCeiling)
             {
-                if (state.IsLong && price < state.StaticLowerBound) break;
-                if (!state.IsLong && price > state.StaticUpperBound) break;
+                decimal price = state.IsLong
+                    ? state.AnchorPrice * (1m - offsetPct / 100m)
+                    : state.AnchorPrice * (1m + offsetPct / 100m);
+
+                if (price <= 0) return list;
+
+                if (config.UseStaticRange && state.StaticBoundsInitialized)
+                {
+                    if (state.IsLong && price < state.StaticLowerBound) return list;
+                    if (!state.IsLong && price > state.StaticUpperBound) return list;
+                }
+
+                k++;
+                list.Add((k, price, tier));
+                offsetPct += stepPct;
             }
 
-            // Find first tier whose UpToPercent covers this offset%. Tiers are sorted ascending.
-            var tier = config.Tiers.FirstOrDefault(t => offsetPct <= t.UpToPercent);
-            if (tier == null)
-            {
-                // Beyond the outermost tier — in dynamic mode loop bound already prevents this,
-                // but in static mode we may walk past it; stop placing.
-                break;
-            }
-
-            list.Add((k, price, tier));
+            prevTopPct = tier.UpToPercent;
+            if (k >= safetyCeiling) break;
         }
+
         return list;
+    }
+
+    /// <summary>
+    /// Effective DCA step% for a tier: the tier-level override if set, otherwise the global
+    /// DcaStepPercent from the config root.
+    /// </summary>
+    private static decimal EffectiveDcaStep(GridFloatConfig config, GridFloatTier tier)
+        => tier.DcaStepPercent is > 0 ? tier.DcaStepPercent.Value : config.DcaStepPercent;
+
+    /// <summary>
+    /// Effective TP step% for a fill at <paramref name="fillPrice"/> against the current
+    /// anchor. The tier is the first tier whose UpToPercent ≥ |fillPrice - anchor| / anchor %;
+    /// the tier's TpStepPercent override is used when set, otherwise config.TpStepPercent.
+    /// Defaults to config.TpStepPercent when anchor is 0 or tiers are empty.
+    /// </summary>
+    private static decimal EffectiveTpStep(GridFloatConfig config, decimal anchorPrice, decimal fillPrice)
+    {
+        if (anchorPrice <= 0 || config.Tiers.Count == 0) return config.TpStepPercent;
+        var offsetPct = Math.Abs(fillPrice - anchorPrice) / anchorPrice * 100m;
+        var tier = config.Tiers.FirstOrDefault(t => offsetPct <= t.UpToPercent) ?? config.Tiers[^1];
+        return tier.TpStepPercent is > 0 ? tier.TpStepPercent.Value : config.TpStepPercent;
     }
 
     /// <summary>

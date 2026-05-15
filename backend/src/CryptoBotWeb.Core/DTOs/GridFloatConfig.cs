@@ -23,6 +23,15 @@ public class GridFloatTier
     // Notional sent to the exchange for every fill inside this tier — both the DCA limit and
     // the matching reduce-only TP close that exact qty.
     public decimal SizeUsdt { get; set; }
+
+    // Optional per-tier DCA step override. When null, falls back to GridFloatConfig.DcaStepPercent.
+    // Tiers walk independently: tier N's DCA levels start at the previous tier's UpToPercent
+    // boundary and stride by this step until the tier's own UpToPercent is exceeded.
+    public decimal? DcaStepPercent { get; set; }
+
+    // Optional per-tier TP step override. When null, falls back to GridFloatConfig.TpStepPercent.
+    // A batch's TP step is determined by the tier in which its fill offset% (from anchor) lies.
+    public decimal? TpStepPercent { get; set; }
 }
 
 public class GridFloatConfig
@@ -37,12 +46,15 @@ public class GridFloatConfig
     // the total grid width (replaces the old RangePercent). Anchor uses Tiers[0].SizeUsdt.
     public List<GridFloatTier> Tiers { get; set; } = new();
 
-    // Distance between adjacent DCA levels, as a % of the anchor (long: anchor·(1−k·step)).
-    // Shared across every tier — only the per-fill size changes between tiers.
+    // Default distance between adjacent DCA levels (% of anchor). Used for any tier that
+    // does NOT define its own DcaStepPercent. Each tier walks independently: levels inside
+    // tier N start at the previous tier's UpToPercent boundary and stride by the tier's
+    // effective step until reaching its own UpToPercent.
     public decimal DcaStepPercent { get; set; } = 1m;
 
-    // Per-batch TP offset from THAT batch's individual fill price (NOT the average). Each
-    // batch has its own reduce-only limit at fill_price ± TpStepPercent. Shared across tiers.
+    // Default per-batch TP offset from THAT batch's individual fill price (NOT the average).
+    // Used for any tier that does NOT define its own TpStepPercent. The TP step for a fill
+    // is determined by the tier in which the fill's offset% from the anchor lies.
     public decimal TpStepPercent { get; set; } = 1m;
 
     // false → dynamic range: each new anchor recenters the grid (slot count = floor(maxTier/Step)).

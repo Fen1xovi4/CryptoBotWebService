@@ -572,6 +572,9 @@ public class StrategiesController : ControllerBase
         if (request.Tiers.Any(t => t.UpToPercent <= 0 || t.SizeUsdt <= 0))
             return BadRequest(new { message = "Каждый ярус: upToPercent > 0 и sizeUsdt > 0." });
 
+        if (request.Tiers.Any(t => t.DcaStepPercent is <= 0 || t.TpStepPercent is <= 0))
+            return BadRequest(new { message = "Если указан per-tier шаг DCA / TP, он должен быть > 0." });
+
         var sorted = request.Tiers.OrderBy(t => t.UpToPercent).ToList();
         for (int i = 1; i < sorted.Count; i++)
         {
@@ -584,8 +587,12 @@ public class StrategiesController : ControllerBase
         if (config == null)
             return BadRequest(new { message = "Не удалось прочитать ConfigJson стратегии." });
 
-        if (sorted[^1].UpToPercent < config.DcaStepPercent)
-            return BadRequest(new { message = $"Внешняя граница тиров ({sorted[^1].UpToPercent}%) должна быть ≥ DcaStepPercent ({config.DcaStepPercent}%)." });
+        // Outermost tier must accommodate at least one DCA level at its own effective step
+        // (per-tier override or global default).
+        var outerStep = sorted[^1].DcaStepPercent is > 0 ? sorted[^1].DcaStepPercent!.Value : config.DcaStepPercent;
+        var outerSpan = sorted[^1].UpToPercent - (sorted.Count > 1 ? sorted[^2].UpToPercent : 0m);
+        if (outerSpan < outerStep)
+            return BadRequest(new { message = $"Внешний ярус ({outerSpan}% от предыдущей границы) должен быть ≥ его шага DCA ({outerStep}%)." });
 
         // Compute old outer-tier extent before mutation so we can detect widening below.
         // Mirrors NormalizeTiers fallback: if Tiers is empty/null, use legacy RangePercent.
@@ -637,7 +644,17 @@ public class StrategiesController : ControllerBase
 
         await _db.SaveChangesAsync();
 
-        var newLevels = (int)Math.Floor(newMaxTierPct / config.DcaStepPercent);
+        // Per-tier walk: each tier produces floor((tier.UpTo - prevTop) / effectiveStep) levels.
+        // Mirrors GridFloatHandler.ComputeDcaLevels so the UI preview matches reality.
+        int newLevels = 0;
+        decimal prevTop = 0m;
+        foreach (var t in sorted)
+        {
+            var step = t.DcaStepPercent is > 0 ? t.DcaStepPercent!.Value : config.DcaStepPercent;
+            if (step > 0)
+                newLevels += (int)Math.Floor((t.UpToPercent - prevTop) / step);
+            prevTop = t.UpToPercent;
+        }
         return Ok(new
         {
             message = "Tiers updated",
