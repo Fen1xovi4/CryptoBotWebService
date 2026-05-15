@@ -395,6 +395,7 @@ export default function ActiveBotsPage() {
             <option value="SmaDca">SMA DCA</option>
             <option value="FundingClaim">FundingClaim</option>
             <option value="GridFloat">Grid Float</option>
+            <option value="GridHedge">Grid Hedge</option>
           </select>
         </div>
 
@@ -573,6 +574,13 @@ export default function ActiveBotsPage() {
             <div className="h-6 w-px bg-border" />
             <p className="text-sm text-text-secondary italic">
               Размер батча, диапазон, шаги DCA/TP, плечо и режим диапазона задаются в каждом боте.
+            </p>
+          </>
+        ) : activeWorkspace?.strategyType === 'GridHedge' ? (
+          <>
+            <div className="h-6 w-px bg-border" />
+            <p className="text-sm text-text-secondary italic">
+              Режим (Spot+Futures vs Cross-Ticker), диапазон, шаги DCA/TP, размер хеджа (ratio × β) и плечи задаются в каждом боте.
             </p>
           </>
         ) : (
@@ -863,6 +871,27 @@ export default function ActiveBotsPage() {
                   onResume={() => resumeMutation.mutate(s.id)}
                   onUpdateTiers={(tiers) => updateGridFloatTiersMutation.mutate({ id: s.id, tiers })}
                   updateTiersPending={updateGridFloatTiersMutation.isPending}
+                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
+                  onEdit={() => setEditingStrategy(s)}
+                  onLogs={() => setLogStrategy(s)}
+                  onClosePosition={() => closePositionMutation.mutate(s.id)}
+                  closePositionPending={closePositionMutation.isPending}
+                  telegramBots={telegramBots}
+                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                />
+              );
+            }
+
+            if (s.type === 'GridHedge') {
+              return (
+                <GridHedgeCard
+                  key={s.id}
+                  s={s}
+                  cfg={cfg}
+                  state={state}
+                  isRunning={isRunning}
+                  onStart={() => startMutation.mutate(s.id)}
+                  onStop={() => stopMutation.mutate(s.id)}
                   onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
                   onEdit={() => setEditingStrategy(s)}
                   onLogs={() => setLogStrategy(s)}
@@ -2957,6 +2986,421 @@ function GridFloatCard({
               Стоп
             </button>
           </>
+        ) : (
+          <>
+            <button
+              onClick={onStart}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+            >
+              Старт
+            </button>
+            <button
+              onClick={onEdit}
+              title="Редактировать"
+              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        <button
+          onClick={onDelete}
+          title="Удалить"
+          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Grid Hedge Card ─────────────────────────────────────── */
+
+interface GridHedgeCfg {
+  mode: 1 | 2;
+  gridSymbol: string;
+  hedgeSymbol: string;
+  rangePercent: number;
+  upperExitPercent: number;
+  tiers: GridFloatTier[];
+  dcaStepPercent: number;
+  tpStepPercent: number;
+  hedgeRatio: number;
+  beta: number;
+  hedgeLeverage: number;
+  gridLeverage: number;
+}
+
+interface GridHedgeBatchData {
+  buyOrderId: string;
+  tpOrderId: string | null;
+  levelPercent: number;
+  filledPrice: number;
+  filledQty: number;
+  tpPrice: number;
+  closed: boolean;
+  realizedPnl: number;
+  filledAt: string;
+}
+
+interface GridHedgePendingBuyData {
+  orderId: string;
+  price: number;
+  qty: number;
+  levelPercent: number;
+}
+
+// phase: 0=NotStarted, 1=HedgeOpening, 2=GridArming, 3=Active,
+//        4=ExitingUp, 5=ExitingDown, 6=Done
+// Backend serializes this enum as a number (not a string).
+interface GridHedgeStateData {
+  phase: number;
+  anchor: number;
+  hedgeAnchor: number;
+  hedgeQty: number;
+  hedgeAvgEntry: number;
+  hedgeOpenOrderId: string | null;
+  batches: GridHedgeBatchData[];
+  pendingBuys: GridHedgePendingBuyData[];
+  gridRealizedPnl: number;
+  hedgeRealizedPnl: number;
+  completedCycles: number;
+  lastPrice: number | null;
+  placementCooldownUntil: string | null;
+}
+
+const GRID_HEDGE_PHASE_LABELS: Record<number, string> = {
+  0: 'NotStarted',
+  1: 'HedgeOpening',
+  2: 'GridArming',
+  3: 'Active',
+  4: 'ExitingUp',
+  5: 'ExitingDown',
+  6: 'Done',
+};
+
+function gridHedgePhaseColor(phase: number): string {
+  if (phase === 3) return 'bg-accent-green/15 text-accent-green';
+  if (phase === 4) return 'bg-accent-blue/15 text-accent-blue';
+  if (phase === 5) return 'bg-accent-red/15 text-accent-red';
+  if (phase === 6) return 'bg-bg-tertiary text-text-secondary';
+  return 'bg-accent-yellow/15 text-accent-yellow';
+}
+
+function GridHedgeCard({
+  s,
+  cfg,
+  state,
+  isRunning,
+  onStart,
+  onStop,
+  onDelete,
+  onEdit,
+  onLogs,
+  onClosePosition,
+  closePositionPending,
+  telegramBots,
+  onSetTelegramBot,
+}: {
+  s: Strategy;
+  cfg: GridHedgeCfg | null;
+  state: GridHedgeStateData | null;
+  isRunning: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onLogs: () => void;
+  onClosePosition: () => void;
+  closePositionPending: boolean;
+  telegramBots: TelegramBotOption[] | undefined;
+  onSetTelegramBot: (botId: string | null) => void;
+}) {
+  const phase = state?.phase ?? 0;
+  const batches = state?.batches ?? [];
+  const pendingBuys = state?.pendingBuys ?? [];
+  const openBatches = batches.filter((b) => !b.closed);
+  const hasPosition = openBatches.length > 0 || (state?.hedgeQty ?? 0) > 0;
+
+  // Border accent based on phase / running state
+  const borderAccent = !isRunning
+    ? 'border-l-border'
+    : phase === 3
+      ? 'border-l-accent-green'
+      : phase === 4
+        ? 'border-l-accent-blue'
+        : phase === 5
+          ? 'border-l-accent-red'
+          : phase === 6
+            ? 'border-l-border'
+            : 'border-l-accent-yellow';
+
+  // Price-in-band visualisation
+  const anchor = state?.anchor ?? 0;
+  const lastPrice = state?.lastPrice ?? null;
+  const rangePercent = cfg?.rangePercent ?? 0;
+  const upperExitPercent = cfg?.upperExitPercent ?? 0;
+  let bandPct: number | null = null;
+  if (anchor > 0 && lastPrice != null && (rangePercent + upperExitPercent) > 0) {
+    const lowerBound = anchor * (1 - rangePercent / 100);
+    const upperBound = anchor * (1 + upperExitPercent / 100);
+    const total = upperBound - lowerBound;
+    bandPct = total > 0 ? Math.max(0, Math.min(100, ((lastPrice - lowerBound) / total) * 100)) : null;
+  }
+
+  const modeLabel = cfg
+    ? cfg.mode === 1
+      ? 'Spot+Futures'
+      : `Cross: ${cfg.gridSymbol?.replace(/USDT$/i, '')}/${cfg.hedgeSymbol?.replace(/USDT$/i, '')}`
+    : null;
+
+  return (
+    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
+      {/* Header */}
+      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-mono font-semibold text-text-primary truncate">
+              {cfg?.gridSymbol || '—'}
+            </span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400">
+              GH
+            </span>
+            {modeLabel && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+                {modeLabel}
+              </span>
+            )}
+            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${gridHedgePhaseColor(phase)}`}>
+              {GRID_HEDGE_PHASE_LABELS[phase] ?? String(phase)}
+            </span>
+          </div>
+          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
+            {s.name} · {s.accountName}
+          </div>
+        </div>
+        <StatusBadge status={s.status} />
+      </div>
+
+      {/* Config chips */}
+      {cfg && (
+        <div className="px-4 pb-2 flex flex-wrap gap-1">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            -{cfg.rangePercent}% ↔ +{cfg.upperExitPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            dca {cfg.dcaStepPercent}% tp {cfg.tpStepPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            ratio {cfg.hedgeRatio} β {cfg.beta}
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            hedge ×{cfg.hedgeLeverage}
+          </span>
+          {cfg.mode === 2 && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+              grid ×{cfg.gridLeverage}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Tier table */}
+      {cfg && cfg.tiers.length > 0 && (
+        <div className="px-4 pb-2">
+          <div className="flex flex-wrap gap-1">
+            {cfg.tiers.map((t, i) => {
+              const prevUp = i === 0 ? 0 : cfg.tiers[i - 1].upToPercent;
+              return (
+                <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-300">
+                  T{i + 1}: {prevUp}%–{t.upToPercent}% · ${t.sizeUsdt}
+                  {(t.dcaStepPercent != null || t.tpStepPercent != null) && (
+                    <span className="ml-1 text-violet-200/70">
+                      ·dca{t.dcaStepPercent ?? cfg.dcaStepPercent}%·tp{t.tpStepPercent ?? cfg.tpStepPercent}%
+                    </span>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* State block */}
+      <div className="px-4 py-2.5 min-h-[52px]">
+        {!isRunning ? (
+          <span className="text-text-secondary text-xs">Остановлен</span>
+        ) : state == null ? (
+          <span className="text-text-secondary text-xs">Ожидание состояния...</span>
+        ) : (
+          <div className="w-full space-y-1.5">
+            {/* Anchor + band */}
+            {anchor > 0 && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] text-text-secondary">
+                  Якорь: <span className="text-text-primary font-mono">{anchor}</span>
+                </span>
+                <span className="text-[10px] text-text-secondary">
+                  Диапазон: −{cfg?.rangePercent}% ↔ +{cfg?.upperExitPercent}%
+                </span>
+                {lastPrice != null && (
+                  <span className="text-[10px] text-text-secondary">
+                    Цена: <span className="text-text-primary font-mono">{lastPrice}</span>
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Price band visualisation */}
+            {bandPct != null && (
+              <div className="relative h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-accent-blue rounded-full"
+                  style={{ left: `${bandPct}%`, transform: 'translateX(-50%)' }}
+                />
+                <div
+                  className="absolute top-0 bottom-0 w-px bg-text-secondary/40"
+                  style={{ left: `${(cfg!.rangePercent / (cfg!.rangePercent + cfg!.upperExitPercent)) * 100}%` }}
+                />
+              </div>
+            )}
+
+            {/* Hedge row */}
+            <div className="text-[10px] text-text-secondary">
+              {state.hedgeQty > 0
+                ? (
+                  <span>
+                    HEDGE SHORT {cfg?.hedgeSymbol || cfg?.gridSymbol}:{' '}
+                    <span className="text-accent-red font-mono">{state.hedgeQty}</span>
+                    {' @ '}
+                    <span className="text-text-primary font-mono">{state.hedgeAvgEntry}</span>
+                  </span>
+                )
+                : 'Hedge: —'
+              }
+            </div>
+
+            {/* Grid summary */}
+            <div className="text-[10px] text-text-secondary flex items-center gap-2 flex-wrap">
+              <span>
+                Лимитов: <span className="text-text-primary font-medium">{pendingBuys.length}</span>
+              </span>
+              <span>
+                Открытых батчей: <span className="text-text-primary font-medium">{openBatches.length}</span>
+              </span>
+              <span>
+                Циклов: <span className="text-text-primary font-medium">{state.completedCycles}</span>
+              </span>
+            </div>
+
+            {/* PnL */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className={`text-[10px] font-medium ${state.gridRealizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                Grid: {state.gridRealizedPnl >= 0 ? '+' : ''}${state.gridRealizedPnl.toFixed(2)}
+              </span>
+              <span className={`text-[10px] font-medium ${state.hedgeRealizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                Hedge: {state.hedgeRealizedPnl >= 0 ? '+' : ''}${state.hedgeRealizedPnl.toFixed(2)}
+              </span>
+            </div>
+
+            {/* Done hint */}
+            {phase === 6 && (
+              <div className="text-[10px] italic text-text-secondary/70">
+                Цикл завершён. Stop → Start чтобы начать новый.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Actions */}
+      <div className="px-3 py-2 flex items-center gap-1">
+        <button
+          onClick={onLogs}
+          title="Логи"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+        </button>
+
+        {telegramBots && telegramBots.length > 0 && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                if (s.telegramBotId) {
+                  onSetTelegramBot(null);
+                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
+                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
+                }
+              }}
+              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
+              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                s.telegramBotId
+                  ? 'bg-accent-blue/15 text-accent-blue'
+                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
+              }`}
+            >
+              TG
+            </button>
+            {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                value=""
+                onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
+              >
+                <option value="">Select bot...</option>
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+            {s.telegramBotId && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                value={s.telegramBotId}
+                onChange={(e) => onSetTelegramBot(e.target.value || null)}
+              >
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {hasPosition && isRunning && (
+          <button
+            onClick={() => { if (confirm('Закрыть все позиции по рынку?')) onClosePosition(); }}
+            disabled={closePositionPending}
+            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
+          >
+            {closePositionPending ? '...' : 'Закрыть'}
+          </button>
+        )}
+
+        {isRunning ? (
+          <button
+            onClick={onStop}
+            className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+          >
+            Стоп
+          </button>
         ) : (
           <>
             <button
