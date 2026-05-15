@@ -413,6 +413,38 @@ public class StrategiesController : ControllerBase
             };
             strategy.StateJson = JsonSerializer.Serialize(freshFcState, jsonOpts);
         }
+        else if (strategy.Type == StrategyTypes.GridHedge)
+        {
+            // GridHedge Start semantics:
+            //   - Empty state OR Phase == Done → fresh cycle (preserve cumulative cycle stats).
+            //   - Phase is mid-cycle (NotStarted/HedgeOpening/GridArming/Active/Exiting*) →
+            //     keep state as-is so the handler resumes where it left off; just clear the
+            //     transient placement-cooldown so retries fire on the next tick.
+            var prevGhState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
+                ? new GridHedgeState()
+                : JsonSerializer.Deserialize<GridHedgeState>(strategy.StateJson, jsonOpts) ?? new GridHedgeState();
+
+            GridHedgeState freshGhState;
+            var midCycle = prevGhState.Phase is not (GridHedgePhase.NotStarted or GridHedgePhase.Done)
+                && (prevGhState.HedgeQty > 0 || prevGhState.Batches.Count > 0 || prevGhState.PendingBuys.Count > 0);
+
+            if (midCycle)
+            {
+                freshGhState = prevGhState;
+                freshGhState.PlacementCooldownUntil = null;
+            }
+            else
+            {
+                freshGhState = new GridHedgeState
+                {
+                    Phase = GridHedgePhase.NotStarted,
+                    GridRealizedPnl = prevGhState.GridRealizedPnl,
+                    HedgeRealizedPnl = prevGhState.HedgeRealizedPnl,
+                    CompletedCycles = prevGhState.CompletedCycles
+                };
+            }
+            strategy.StateJson = JsonSerializer.Serialize(freshGhState, jsonOpts);
+        }
         else
         {
             // Preserve martingale state across restarts; clear counters so handler recalculates from history
