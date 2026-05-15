@@ -262,6 +262,34 @@ export default function ActiveBotsPage() {
     onSuccess: () => invalidateAll(queryClient),
   });
 
+  const pauseMutation = useMutation({
+    mutationFn: (id: string) => api.post(`/strategies/${id}/pause`),
+    onSuccess: () => invalidateAll(queryClient),
+    onError: (err: unknown) => {
+      const e = err as { response?: { data?: { message?: string } } };
+      alert(e.response?.data?.message || 'Не удалось поставить на паузу');
+    },
+  });
+
+  const resumeMutation = useMutation({
+    mutationFn: (id: string) => api.post(`/strategies/${id}/resume`),
+    onSuccess: () => invalidateAll(queryClient),
+    onError: (err: unknown) => {
+      const e = err as { response?: { data?: { message?: string } } };
+      alert(e.response?.data?.message || 'Не удалось возобновить');
+    },
+  });
+
+  const updateGridFloatTiersMutation = useMutation({
+    mutationFn: ({ id, tiers }: { id: string; tiers: GridFloatTier[] }) =>
+      api.patch(`/strategies/${id}/grid-float/tiers`, { tiers }),
+    onSuccess: () => invalidateAll(queryClient),
+    onError: (err: unknown) => {
+      const e = err as { response?: { data?: { message?: string } } };
+      alert(e.response?.data?.message || 'Не удалось обновить ярусы');
+    },
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/strategies/${id}`),
     onSuccess: () => invalidateAll(queryClient),
@@ -366,6 +394,7 @@ export default function ActiveBotsPage() {
             <option value="HuntingFunding">HuntingFunding</option>
             <option value="SmaDca">SMA DCA</option>
             <option value="FundingClaim">FundingClaim</option>
+            <option value="GridFloat">Grid Float</option>
           </select>
         </div>
 
@@ -537,6 +566,13 @@ export default function ActiveBotsPage() {
             <div className="h-6 w-px bg-border" />
             <p className="text-sm text-text-secondary italic">
               Остальные настройки (авторотация, макс. циклов, проверка перед фандингом) задаются в каждом боте.
+            </p>
+          </>
+        ) : activeWorkspace?.strategyType === 'GridFloat' ? (
+          <>
+            <div className="h-6 w-px bg-border" />
+            <p className="text-sm text-text-secondary italic">
+              Размер батча, диапазон, шаги DCA/TP, плечо и режим диапазона задаются в каждом боте.
             </p>
           </>
         ) : (
@@ -802,6 +838,31 @@ export default function ActiveBotsPage() {
                   isRunning={isRunning}
                   onStart={() => startMutation.mutate(s.id)}
                   onStop={() => stopMutation.mutate(s.id)}
+                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
+                  onEdit={() => setEditingStrategy(s)}
+                  onLogs={() => setLogStrategy(s)}
+                  onClosePosition={() => closePositionMutation.mutate(s.id)}
+                  closePositionPending={closePositionMutation.isPending}
+                  telegramBots={telegramBots}
+                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                />
+              );
+            }
+
+            if (s.type === 'GridFloat') {
+              return (
+                <GridFloatCard
+                  key={s.id}
+                  s={s}
+                  cfg={cfg}
+                  state={state}
+                  isRunning={isRunning}
+                  onStart={() => startMutation.mutate(s.id)}
+                  onStop={() => stopMutation.mutate(s.id)}
+                  onPause={() => pauseMutation.mutate(s.id)}
+                  onResume={() => resumeMutation.mutate(s.id)}
+                  onUpdateTiers={(tiers) => updateGridFloatTiersMutation.mutate({ id: s.id, tiers })}
+                  updateTiersPending={updateGridFloatTiersMutation.isPending}
                   onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
                   onEdit={() => setEditingStrategy(s)}
                   onLogs={() => setLogStrategy(s)}
@@ -2318,6 +2379,528 @@ function SmaDcaCard({
   );
 }
 
+/* ── Grid Float Card ───────────────────────────────────── */
+
+interface GridFloatTier {
+  upToPercent: number;
+  sizeUsdt: number;
+}
+
+interface GridFloatCfg {
+  symbol: string;
+  timeframe: string;
+  direction: string;
+  // New-format expanding tiers. Auto-derived from legacy baseSizeUsdt/rangePercent if missing.
+  tiers: GridFloatTier[];
+  dcaStepPercent: number;
+  tpStepPercent: number;
+  leverage: number;
+  useStaticRange: boolean;
+  // Legacy fields (read-only, kept for back-compat when reading old strategies from API).
+  baseSizeUsdt?: number;
+  rangePercent?: number;
+}
+
+// Normalize a raw config payload — server may send pre-tier (baseSizeUsdt + rangePercent) or
+// new (tiers) shape. Always returns a populated `tiers` array. Mutates a shallow copy.
+function normalizeGridFloatCfg(raw: Partial<GridFloatCfg> & Record<string, unknown>): GridFloatCfg {
+  const cfg = { ...raw } as GridFloatCfg;
+  const rawTiers = Array.isArray(raw.tiers) ? raw.tiers : [];
+  let tiers: GridFloatTier[] = rawTiers
+    .filter((t) => t && typeof t === 'object'
+      && typeof (t as GridFloatTier).upToPercent === 'number' && (t as GridFloatTier).upToPercent > 0
+      && typeof (t as GridFloatTier).sizeUsdt === 'number' && (t as GridFloatTier).sizeUsdt > 0)
+    .map((t) => ({ upToPercent: (t as GridFloatTier).upToPercent, sizeUsdt: (t as GridFloatTier).sizeUsdt }));
+
+  if (tiers.length === 0
+    && typeof raw.baseSizeUsdt === 'number' && raw.baseSizeUsdt > 0
+    && typeof raw.rangePercent === 'number' && raw.rangePercent > 0) {
+    tiers = [{ upToPercent: raw.rangePercent, sizeUsdt: raw.baseSizeUsdt }];
+  }
+
+  tiers.sort((a, b) => a.upToPercent - b.upToPercent);
+  cfg.tiers = tiers;
+  return cfg;
+}
+
+interface GridFloatBatchData {
+  levelIdx: number;
+  fillPrice: number;
+  qty: number;
+  tpPrice: number;
+  tpOrderId: string | null;
+}
+
+interface GridFloatDcaOrderData {
+  levelIdx: number;
+  price: number;
+  qty: number;
+  orderId: string;
+}
+
+interface GridFloatStateData {
+  isLong: boolean;
+  anchorPrice: number;
+  staticLowerBound: number;
+  staticUpperBound: number;
+  staticBoundsInitialized: boolean;
+  batches: GridFloatBatchData[];
+  dcaOrders: GridFloatDcaOrderData[];
+  openAfterTime: string | null;
+  lastPrice: number | null;
+  realizedPnlDollar: number;
+}
+
+function GridFloatCard({
+  s,
+  cfg,
+  state,
+  isRunning,
+  onStart,
+  onStop,
+  onPause,
+  onResume,
+  onUpdateTiers,
+  updateTiersPending,
+  onDelete,
+  onEdit,
+  onLogs,
+  onClosePosition,
+  closePositionPending,
+  telegramBots,
+  onSetTelegramBot,
+}: {
+  s: Strategy;
+  cfg: GridFloatCfg | null;
+  state: GridFloatStateData | null;
+  isRunning: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onUpdateTiers: (tiers: GridFloatTier[]) => void;
+  updateTiersPending: boolean;
+  onDelete: () => void;
+  onEdit: () => void;
+  onLogs: () => void;
+  onClosePosition: () => void;
+  closePositionPending: boolean;
+  telegramBots: TelegramBotOption[] | undefined;
+  onSetTelegramBot: (botId: string | null) => void;
+}) {
+  const isPaused = s.status.toLowerCase() === 'paused';
+  const batches = state?.batches ?? [];
+  const dcas = state?.dcaOrders ?? [];
+  const hasPosition = batches.length > 0;
+  const totalQty = batches.reduce((sum, b) => sum + b.qty, 0);
+  const totalCost = batches.reduce((sum, b) => sum + b.fillPrice * b.qty, 0);
+  const avgEntry = totalQty > 0 ? totalCost / totalQty : 0;
+
+  // Normalize raw config — legacy bots (baseSizeUsdt + rangePercent) get auto-converted to a
+  // single-tier list so the UI doesn't have to branch on shape.
+  const normalizedCfg = useMemo(
+    () => cfg ? normalizeGridFloatCfg(cfg as unknown as Partial<GridFloatCfg> & Record<string, unknown>) : null,
+    [cfg],
+  );
+  const tiers = normalizedCfg?.tiers ?? [];
+  const maxRangePct = tiers.length > 0 ? tiers[tiers.length - 1].upToPercent : 0;
+  const anchorSize = tiers.length > 0 ? tiers[0].sizeUsdt : 0;
+
+  // Inline Tiers editor — visible only when paused. Each tier row has its own upToPercent +
+  // sizeUsdt input. Add/remove tier buttons mutate the list locally; "Apply" sends the full
+  // sorted list to the API.
+  const [tierDraft, setTierDraft] = useState<Array<{ upTo: string; size: string }>>([]);
+  // Build a stable signature of the persisted tiers so the effect only re-syncs the draft
+  // when the actual tier values change (not on every refetch's new object identity).
+  const persistedSig = useMemo(
+    () => tiers.map((t) => `${t.upToPercent}:${t.sizeUsdt}`).join('|'),
+    [tiers],
+  );
+  useEffect(() => {
+    if (isPaused) {
+      setTierDraft(tiers.map((t) => ({ upTo: String(t.upToPercent), size: String(t.sizeUsdt) })));
+    }
+  }, [isPaused, persistedSig]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const parsedDraft = tierDraft.map((t) => ({
+    upToPercent: parseFloat(t.upTo),
+    sizeUsdt: parseFloat(t.size),
+  }));
+  const draftValid = parsedDraft.length > 0
+    && parsedDraft.every((t) => !isNaN(t.upToPercent) && t.upToPercent > 0 && !isNaN(t.sizeUsdt) && t.sizeUsdt > 0)
+    && normalizedCfg != null
+    && parsedDraft.every((t) => t.upToPercent >= normalizedCfg.dcaStepPercent)
+    && parsedDraft.every((t, i, a) => i === 0 || t.upToPercent > a[i - 1].upToPercent);
+  const draftChanged = draftValid
+    && tierDraft.map((t) => `${t.upTo}:${t.size}`).join('|') !== persistedSig;
+  const previewSlots = draftValid && normalizedCfg
+    ? Math.floor(parsedDraft[parsedDraft.length - 1].upToPercent / normalizedCfg.dcaStepPercent)
+    : 0;
+  const currentSlots = normalizedCfg && maxRangePct > 0
+    ? Math.floor(maxRangePct / normalizedCfg.dcaStepPercent)
+    : 0;
+
+  const addTierRow = () => {
+    setTierDraft((prev) => {
+      const last = prev[prev.length - 1];
+      const nextUpTo = last && parseFloat(last.upTo) > 0 ? parseFloat(last.upTo) * 2 : 10;
+      const nextSize = last && parseFloat(last.size) > 0 ? parseFloat(last.size) * 2 : 100;
+      return [...prev, { upTo: String(nextUpTo), size: String(nextSize) }];
+    });
+  };
+  const removeTierRow = (i: number) => setTierDraft((prev) => prev.filter((_, idx) => idx !== i));
+  const updateTierRow = (i: number, field: 'upTo' | 'size', value: string) =>
+    setTierDraft((prev) => prev.map((t, idx) => idx === i ? { ...t, [field]: value } : t));
+
+  // Mark-to-market unrealized PnL — uses state.lastPrice (refreshed by handler each tick).
+  let unrealUsd = 0;
+  let unrealPct = 0;
+  if (hasPosition && state?.lastPrice && state.lastPrice > 0 && avgEntry > 0) {
+    unrealPct = state.isLong
+      ? (state.lastPrice - avgEntry) / avgEntry * 100
+      : (avgEntry - state.lastPrice) / avgEntry * 100;
+    unrealUsd = (unrealPct / 100) * totalCost;
+  }
+
+  const borderAccent = isPaused
+    ? 'border-l-accent-yellow'
+    : isRunning
+      ? hasPosition
+        ? state?.isLong ? 'border-l-accent-green' : 'border-l-accent-red'
+        : 'border-l-accent-yellow'
+      : 'border-l-border';
+
+  return (
+    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
+      {/* Header */}
+      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-mono font-semibold text-text-primary truncate">
+              {cfg?.symbol || '—'}
+            </span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-400">
+              GF
+            </span>
+            {cfg && (
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${cfg.direction === 'Long' ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'}`}>
+                {cfg.direction.toUpperCase()}
+              </span>
+            )}
+            {cfg?.useStaticRange && (
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400">
+                STATIC
+              </span>
+            )}
+          </div>
+          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
+            {s.name} · {s.accountName}
+          </div>
+        </div>
+        <StatusBadge status={s.status} />
+      </div>
+
+      {/* Config chips */}
+      {normalizedCfg && (
+        <div className="px-4 pb-2 flex flex-wrap gap-1">
+          {tiers.length === 1 ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+              ${anchorSize}/батч, range ±{maxRangePct}%
+            </span>
+          ) : (
+            tiers.map((t, i) => {
+              const prevUp = i === 0 ? 0 : tiers[i - 1].upToPercent;
+              return (
+                <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300">
+                  T{i + 1}: {prevUp}%–{t.upToPercent}% · ${t.sizeUsdt}
+                </span>
+              );
+            })
+          )}
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            step {normalizedCfg.dcaStepPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            tp +{normalizedCfg.tpStepPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            ×{normalizedCfg.leverage}
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            {normalizedCfg.timeframe}
+          </span>
+        </div>
+      )}
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* State block */}
+      <div className="px-4 py-2.5 min-h-[52px] flex items-center">
+        {!isRunning && !isPaused ? (
+          <span className="text-text-secondary text-xs">Остановлен</span>
+        ) : !hasPosition ? (
+          <div className="text-xs text-text-secondary">
+            {isPaused
+              ? 'Пауза (нет позиции)'
+              : state?.openAfterTime
+                ? 'Кулдаун (ждём следующий бар)'
+                : 'Ожидание входа на закрытии бара'}
+          </div>
+        ) : (
+          <div className="w-full space-y-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] text-text-secondary">
+                Якорь: <span className="text-text-primary">{state?.anchorPrice ? state.anchorPrice.toFixed(6) : '—'}</span>
+              </span>
+              <span className="text-[10px] text-text-secondary">
+                Avg: <span className="text-text-primary">{avgEntry ? avgEntry.toFixed(6) : '—'}</span>
+              </span>
+              {state?.lastPrice != null && (
+                <span className="text-[10px] text-text-secondary">
+                  Цена: <span className="text-text-primary">{state.lastPrice.toFixed(6)}</span>
+                </span>
+              )}
+              {avgEntry > 0 && state?.lastPrice != null && (
+                <span className={`text-[10px] font-semibold ${unrealUsd >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  {unrealUsd >= 0 ? '+' : ''}${unrealUsd.toFixed(2)} ({unrealPct >= 0 ? '+' : ''}{unrealPct.toFixed(2)}%)
+                </span>
+              )}
+            </div>
+            <div className="text-[10px] text-text-secondary flex items-center gap-2 flex-wrap">
+              <span>
+                Батчей: <span className="text-text-primary font-medium">{batches.length}</span>
+              </span>
+              <span>
+                Живых DCA: <span className="text-text-primary font-medium">{dcas.length}</span>
+              </span>
+              <span>
+                Qty: <span className="text-text-primary font-mono">{totalQty.toFixed(6)}</span>
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Bottom realized PnL */}
+      {state != null && state.realizedPnlDollar != null && (
+        <div className="px-4 pb-2 flex items-center gap-3">
+          <span className={`text-[10px] font-medium ${state.realizedPnlDollar >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+            Realized: {state.realizedPnlDollar >= 0 ? '+' : ''}${state.realizedPnlDollar.toFixed(2)}
+          </span>
+        </div>
+      )}
+
+      {/* Inline Tiers editor — only when paused */}
+      {isPaused && normalizedCfg && (
+        <>
+          <div className="border-t border-border/50" />
+          <div className="px-4 py-2.5 bg-accent-yellow/5">
+            <div className="text-[10px] font-medium text-accent-yellow mb-1.5">
+              Расширить сетку (ярусы)
+            </div>
+            <div className="space-y-1">
+              {tierDraft.map((t, i) => {
+                const prevUp = i === 0 ? 0 : parseFloat(tierDraft[i - 1].upTo);
+                return (
+                  <div key={i} className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] text-text-secondary w-7 shrink-0">T{i + 1}</span>
+                    <span className="text-[10px] text-text-secondary">от {isNaN(prevUp) ? '?' : prevUp}% до</span>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min={normalizedCfg.dcaStepPercent}
+                      value={t.upTo}
+                      onChange={(e) => updateTierRow(i, 'upTo', e.target.value)}
+                      className="w-14 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary"
+                    />
+                    <span className="text-[10px] text-text-secondary">%, ставка $</span>
+                    <input
+                      type="number"
+                      step="1"
+                      min="1"
+                      value={t.size}
+                      onChange={(e) => updateTierRow(i, 'size', e.target.value)}
+                      className="w-16 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary"
+                    />
+                    {tierDraft.length > 1 && (
+                      <button
+                        onClick={() => removeTierRow(i)}
+                        className="ml-auto px-1.5 py-0.5 text-[10px] text-accent-red hover:bg-accent-red/10 rounded"
+                        title="Удалить ярус"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-2 mt-2 flex-wrap">
+              <button
+                onClick={addTierRow}
+                className="px-2 py-1 text-[10px] font-medium bg-bg-tertiary text-text-secondary rounded-md hover:bg-bg-tertiary/70 transition-colors"
+              >
+                + Ярус
+              </button>
+              <span className="text-[10px] text-text-secondary">
+                {draftValid
+                  ? <>будет <span className="text-text-primary font-medium">{previewSlots}</span> уровней (сейчас {currentSlots})</>
+                  : <span className="text-accent-red">upTo должен быть ≥ step ({normalizedCfg.dcaStepPercent}%) и возрастать</span>}
+              </span>
+              <button
+                onClick={() => { if (draftChanged) onUpdateTiers(parsedDraft); }}
+                disabled={!draftChanged || updateTiersPending}
+                className="ml-auto px-2 py-1 text-[10px] font-medium bg-accent-yellow/15 text-accent-yellow rounded-md hover:bg-accent-yellow/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {updateTiersPending ? '...' : 'Применить'}
+              </button>
+            </div>
+            <div className="text-[10px] text-text-secondary/70 mt-1.5 leading-tight">
+              После «Применить» нажми ▶ Возобновить — HealMissingDcas поставит лимиты на новые свободные уровни с размером своего яруса. Уже стоящие лимитки не пересчитываются.
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Actions */}
+      <div className="px-3 py-2 flex items-center gap-1">
+        <button
+          onClick={onLogs}
+          title="Логи"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+        </button>
+
+        {telegramBots && telegramBots.length > 0 && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                if (s.telegramBotId) {
+                  onSetTelegramBot(null);
+                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
+                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
+                }
+              }}
+              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
+              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                s.telegramBotId
+                  ? 'bg-accent-blue/15 text-accent-blue'
+                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
+              }`}
+            >
+              TG
+            </button>
+            {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                value=""
+                onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
+              >
+                <option value="">Select bot...</option>
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+            {s.telegramBotId && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                value={s.telegramBotId}
+                onChange={(e) => onSetTelegramBot(e.target.value || null)}
+              >
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {hasPosition && (isRunning || isPaused) && (
+          <button
+            onClick={() => { if (confirm('Закрыть всю позицию по рынку?')) onClosePosition(); }}
+            disabled={closePositionPending}
+            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
+          >
+            {closePositionPending ? '...' : 'Закрыть'}
+          </button>
+        )}
+
+        {isPaused ? (
+          <>
+            <button
+              onClick={onResume}
+              title="Возобновить"
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+            >
+              ▶ Возобновить
+            </button>
+            <button
+              onClick={onStop}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+            >
+              Стоп
+            </button>
+          </>
+        ) : isRunning ? (
+          <>
+            <button
+              onClick={onPause}
+              title="Пауза — остановить тик handler'а, но оставить позицию и лимиты живыми. На паузе можно расширить Range."
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors"
+            >
+              ⏸ Пауза
+            </button>
+            <button
+              onClick={onStop}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+            >
+              Стоп
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={onStart}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+            >
+              Старт
+            </button>
+            <button
+              onClick={onEdit}
+              title="Редактировать"
+              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        <button
+          onClick={onDelete}
+          title="Удалить"
+          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── Stat Card ─────────────────────────────────────────── */
 
 function StatCard({
@@ -2425,6 +3008,20 @@ function AddStrategyModal({
   });
   const [fcAutoRotate, setFcAutoRotate] = useState(true);
 
+  // GridFloat fields. `tiers` is the dynamic expanding-grid list; start with one tier so the
+  // default config matches the legacy single-zone behaviour ($100 in the first 10%).
+  const [gfForm, setGfForm] = useState({
+    timeframe: '1h',
+    direction: 'Long',
+    dcaStepPercent: '1',
+    tpStepPercent: '1',
+    leverage: '1',
+    useStaticRange: false,
+  });
+  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string }>>(
+    [{ upTo: '10', size: '100' }],
+  );
+
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
     queryKey: ['symbols', accountId],
     queryFn: () => api.get(`/exchange/${accountId}/symbols`).then((r) => r.data),
@@ -2502,6 +3099,31 @@ function AddStrategyModal({
         maxCycles: Number(fcForm.maxCycles),
         autoRotateTicker: fcAutoRotate,
         checkBeforeFundingMinutes: Number(fcForm.checkBeforeFundingMinutes),
+      });
+    } else if (strategyType === 'GridFloat') {
+      const tiers = gfTiers
+        .map((t) => ({ upToPercent: Number(t.upTo), sizeUsdt: Number(t.size) }))
+        .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
+        .sort((a, b) => a.upToPercent - b.upToPercent);
+      if (tiers.length === 0) {
+        setError('Добавьте хотя бы один ярус с upTo% > 0 и ставкой > 0');
+        return;
+      }
+      for (let i = 1; i < tiers.length; i++) {
+        if (tiers[i].upToPercent <= tiers[i - 1].upToPercent) {
+          setError('Ярусы должны идти со строго возрастающим upTo%');
+          return;
+        }
+      }
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        timeframe: gfForm.timeframe,
+        direction: gfForm.direction,
+        tiers,
+        dcaStepPercent: Number(gfForm.dcaStepPercent),
+        tpStepPercent: Number(gfForm.tpStepPercent),
+        leverage: Number(gfForm.leverage),
+        useStaticRange: gfForm.useStaticRange,
       });
     } else {
       configJson = JSON.stringify({
@@ -2854,6 +3476,186 @@ function AddStrategyModal({
                 Позиция открывается маркет-ордером и держится для сбора фандинговых выплат.
               </p>
             </>
+          ) : strategyType === 'GridFloat' ? (
+            <>
+              {/* Timeframe */}
+              <div>
+                <label className={labelCls}>Таймфрейм</label>
+                <select
+                  value={gfForm.timeframe}
+                  onChange={(e) => setGfForm({ ...gfForm, timeframe: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="30m">30m</option>
+                  <option value="1h">1h</option>
+                  <option value="4h">4h</option>
+                  <option value="1d">1D</option>
+                </select>
+              </div>
+
+              {/* Direction + Leverage */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Направление</label>
+                  <select
+                    value={gfForm.direction}
+                    onChange={(e) => setGfForm({ ...gfForm, direction: e.target.value })}
+                    className={inputCls}
+                  >
+                    <option value="Long">Long</option>
+                    <option value="Short">Short</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Плечо</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={gfForm.leverage}
+                    onChange={(e) => setGfForm({ ...gfForm, leverage: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* TP step + DCA step */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Шаг TP, %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.01"
+                    value={gfForm.tpStepPercent}
+                    onChange={(e) => setGfForm({ ...gfForm, tpStepPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">От цены каждого фила, не от средней</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Шаг DCA, %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.01"
+                    value={gfForm.dcaStepPercent}
+                    onChange={(e) => setGfForm({ ...gfForm, dcaStepPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">Расстояние между DCA-уровнями</p>
+                </div>
+              </div>
+
+              {/* Tiers — expanding zones */}
+              <div>
+                <label className={labelCls}>Ярусы сетки</label>
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
+                        <th className="px-3 py-2 text-left font-medium w-12">#</th>
+                        <th className="px-3 py-2 text-left font-medium">От %</th>
+                        <th className="px-3 py-2 text-left font-medium">До %</th>
+                        <th className="px-3 py-2 text-left font-medium">Ставка $</th>
+                        <th className="px-3 py-2 w-8" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gfTiers.map((t, i) => {
+                        const prevUp = i === 0 ? '0' : gfTiers[i - 1].upTo || '?';
+                        return (
+                          <tr key={i} className="border-t border-border/50">
+                            <td className="px-3 py-1.5 text-xs text-text-secondary">T{i + 1}</td>
+                            <td className="px-3 py-1.5 text-xs text-text-secondary">{prevUp}</td>
+                            <td className="px-3 py-1.5">
+                              <input
+                                type="number"
+                                step="0.5"
+                                min="0.1"
+                                value={t.upTo}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
+                                className="w-20 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                              />
+                            </td>
+                            <td className="px-3 py-1.5">
+                              <input
+                                type="number"
+                                step="1"
+                                min="1"
+                                value={t.size}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
+                                className="w-24 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                              />
+                            </td>
+                            <td className="px-3 py-1.5 text-right">
+                              {gfTiers.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setGfTiers((prev) => prev.filter((_, idx) => idx !== i))}
+                                  className="px-2 py-0.5 text-xs text-accent-red hover:bg-accent-red/10 rounded"
+                                  title="Удалить ярус"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGfTiers((prev) => {
+                    const last = prev[prev.length - 1];
+                    const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
+                    const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize) }];
+                  })}
+                  className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
+                >
+                  + Добавить ярус
+                </button>
+                <p className="text-xs text-text-secondary mt-1.5">
+                  Каждый ярус задаёт верхнюю границу (% от якоря) и ставку для всех филов в этом диапазоне.
+                  Якорь использует ставку первого яруса.
+                </p>
+              </div>
+
+              {/* Static range toggle */}
+              <label className="flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={gfForm.useStaticRange}
+                  onChange={(e) => setGfForm({ ...gfForm, useStaticRange: e.target.checked })}
+                  className="w-4 h-4 mt-0.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                />
+                <div>
+                  <span className="text-sm font-medium text-text-primary">Статический диапазон</span>
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    Граница фиксируется на первом якоре. На новых якорях число DCA-уровней
+                    меняется (например 9, 10, 11) — сетка не "плавает" вместе с ценой. По
+                    умолчанию (выключено) — динамический диапазон: каждый новый якорь пересчитывает сетку.
+                  </p>
+                </div>
+              </label>
+
+              <p className="text-xs text-text-secondary italic">
+                Уровней DCA на старте: ~{Math.max(0, Math.floor(Number(gfTiers[gfTiers.length - 1]?.upTo) / Math.max(0.0001, Number(gfForm.dcaStepPercent)))) || '?'}.
+                Каждый фил (якорь и доборы) получает свой собственный reduce-only лимит на закрытие
+                в плюс {gfForm.tpStepPercent}% от ЦЕНЫ этого фила. Размер фила берётся из яруса,
+                в который попадает offset от якоря. Когда срабатывает TP — DCA-слот на этом
+                уровне переустанавливается. Полное закрытие всех батчей → отмена всех лимиток
+                → ожидание следующего бара → новый якорь. Стоп-лосса нет.
+              </p>
+            </>
           ) : strategyType === 'HuntingFunding' ? (
             <>
               {/* Auto-rotate ticker */}
@@ -3161,6 +3963,7 @@ function EditStrategyModal({
   const isHF = strategy.type === 'HuntingFunding';
   const isSD = strategy.type === 'SmaDca';
   const isFC = strategy.type === 'FundingClaim';
+  const isGF = strategy.type === 'GridFloat';
 
   const [name, setName] = useState(strategy.name);
   const [symbol, setSymbol] = useState(cfg.symbol || 'BTCUSDT');
@@ -3225,6 +4028,34 @@ function EditStrategyModal({
     checkBeforeFundingMinutes: String(cfg.checkBeforeFundingMinutes ?? 10),
   });
   const [fcAutoRotate, setFcAutoRotate] = useState(cfg.autoRotateTicker !== false);
+
+  // GridFloat form state. Auto-migrate legacy single-zone config (baseSizeUsdt+rangePercent)
+  // into a single-tier list so the editor always works against the new shape.
+  const [gfForm, setGfForm] = useState({
+    timeframe: cfg.timeframe || '1h',
+    direction: cfg.direction || 'Long',
+    dcaStepPercent: String(cfg.dcaStepPercent ?? 1),
+    tpStepPercent: String(cfg.tpStepPercent ?? 1),
+    leverage: String(cfg.leverage ?? 1),
+    useStaticRange: cfg.useStaticRange ?? false,
+  });
+  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string }>>(() => {
+    if (Array.isArray(cfg.tiers) && cfg.tiers.length > 0) {
+      const sorted = [...cfg.tiers]
+        .filter((t: { upToPercent: number; sizeUsdt: number }) =>
+          Number(t.upToPercent) > 0 && Number(t.sizeUsdt) > 0)
+        .sort((a: { upToPercent: number }, b: { upToPercent: number }) => a.upToPercent - b.upToPercent);
+      if (sorted.length > 0) {
+        return sorted.map((t: { upToPercent: number; sizeUsdt: number }) =>
+          ({ upTo: String(t.upToPercent), size: String(t.sizeUsdt) }));
+      }
+    }
+    // Legacy bot — synthesise a single tier from the old fields.
+    return [{
+      upTo: String(cfg.rangePercent ?? 10),
+      size: String(cfg.baseSizeUsdt ?? 100),
+    }];
+  });
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
     queryKey: ['symbols', strategy.accountId],
@@ -3301,6 +4132,31 @@ function EditStrategyModal({
         maxCycles: Number(fcForm.maxCycles),
         autoRotateTicker: fcAutoRotate,
         checkBeforeFundingMinutes: Number(fcForm.checkBeforeFundingMinutes),
+      });
+    } else if (isGF) {
+      const tiers = gfTiers
+        .map((t) => ({ upToPercent: Number(t.upTo), sizeUsdt: Number(t.size) }))
+        .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
+        .sort((a, b) => a.upToPercent - b.upToPercent);
+      if (tiers.length === 0) {
+        setError('Добавьте хотя бы один ярус с upTo% > 0 и ставкой > 0');
+        return;
+      }
+      for (let i = 1; i < tiers.length; i++) {
+        if (tiers[i].upToPercent <= tiers[i - 1].upToPercent) {
+          setError('Ярусы должны идти со строго возрастающим upTo%');
+          return;
+        }
+      }
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        timeframe: gfForm.timeframe,
+        direction: gfForm.direction,
+        tiers,
+        dcaStepPercent: Number(gfForm.dcaStepPercent),
+        tpStepPercent: Number(gfForm.tpStepPercent),
+        leverage: Number(gfForm.leverage),
+        useStaticRange: gfForm.useStaticRange,
       });
     } else {
       configJson = JSON.stringify({
@@ -3602,6 +4458,170 @@ function EditStrategyModal({
                 Бот автоматически определяет направление по знаку фандинга: шорт при положительном, лонг при отрицательном.
                 Позиция открывается маркет-ордером и держится для сбора фандинговых выплат.
               </p>
+            </>
+          ) : isGF ? (
+            <>
+              <div>
+                <label className={labelCls}>Таймфрейм</label>
+                <select
+                  value={gfForm.timeframe}
+                  onChange={(e) => setGfForm({ ...gfForm, timeframe: e.target.value })}
+                  className={inputCls}
+                >
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                  <option value="15m">15m</option>
+                  <option value="30m">30m</option>
+                  <option value="1h">1h</option>
+                  <option value="4h">4h</option>
+                  <option value="1d">1D</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Направление</label>
+                  <select
+                    value={gfForm.direction}
+                    onChange={(e) => setGfForm({ ...gfForm, direction: e.target.value })}
+                    className={inputCls}
+                  >
+                    <option value="Long">Long</option>
+                    <option value="Short">Short</option>
+                  </select>
+                </div>
+                <div>
+                  <label className={labelCls}>Плечо</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={gfForm.leverage}
+                    onChange={(e) => setGfForm({ ...gfForm, leverage: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Шаг TP, %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.01"
+                    value={gfForm.tpStepPercent}
+                    onChange={(e) => setGfForm({ ...gfForm, tpStepPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Шаг DCA, %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0.01"
+                    value={gfForm.dcaStepPercent}
+                    onChange={(e) => setGfForm({ ...gfForm, dcaStepPercent: e.target.value })}
+                    className={inputCls}
+                  />
+                </div>
+              </div>
+
+              {/* Tiers — expanding zones */}
+              <div>
+                <label className={labelCls}>Ярусы сетки</label>
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
+                        <th className="px-3 py-2 text-left font-medium w-12">#</th>
+                        <th className="px-3 py-2 text-left font-medium">От %</th>
+                        <th className="px-3 py-2 text-left font-medium">До %</th>
+                        <th className="px-3 py-2 text-left font-medium">Ставка $</th>
+                        <th className="px-3 py-2 w-8" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gfTiers.map((t, i) => {
+                        const prevUp = i === 0 ? '0' : gfTiers[i - 1].upTo || '?';
+                        return (
+                          <tr key={i} className="border-t border-border/50">
+                            <td className="px-3 py-1.5 text-xs text-text-secondary">T{i + 1}</td>
+                            <td className="px-3 py-1.5 text-xs text-text-secondary">{prevUp}</td>
+                            <td className="px-3 py-1.5">
+                              <input
+                                type="number"
+                                step="0.5"
+                                min="0.1"
+                                value={t.upTo}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
+                                className="w-20 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                              />
+                            </td>
+                            <td className="px-3 py-1.5">
+                              <input
+                                type="number"
+                                step="1"
+                                min="1"
+                                value={t.size}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
+                                className="w-24 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                              />
+                            </td>
+                            <td className="px-3 py-1.5 text-right">
+                              {gfTiers.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setGfTiers((prev) => prev.filter((_, idx) => idx !== i))}
+                                  className="px-2 py-0.5 text-xs text-accent-red hover:bg-accent-red/10 rounded"
+                                  title="Удалить ярус"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGfTiers((prev) => {
+                    const last = prev[prev.length - 1];
+                    const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
+                    const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize) }];
+                  })}
+                  className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
+                >
+                  + Добавить ярус
+                </button>
+                <p className="text-xs text-text-secondary mt-1.5">
+                  Каждый ярус задаёт верхнюю границу (% от якоря) и ставку для всех филов в этом диапазоне.
+                  Якорь использует ставку первого яруса.
+                </p>
+              </div>
+
+              <label className="flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={gfForm.useStaticRange}
+                  onChange={(e) => setGfForm({ ...gfForm, useStaticRange: e.target.checked })}
+                  className="w-4 h-4 mt-0.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                />
+                <div>
+                  <span className="text-sm font-medium text-text-primary">Статический диапазон</span>
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    Граница фиксируется на первом якоре после старта (число DCA-уровней дрейфует на новых якорях).
+                    По умолчанию (выключено) — динамический диапазон: каждый новый якорь пересчитывает сетку.
+                  </p>
+                </div>
+              </label>
             </>
           ) : isHF ? (
             <>

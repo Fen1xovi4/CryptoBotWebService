@@ -365,6 +365,38 @@ public class StrategiesController : ControllerBase
             };
             strategy.StateJson = JsonSerializer.Serialize(freshHfState, jsonOpts);
         }
+        else if (strategy.Type == StrategyTypes.GridFloat)
+        {
+            // GridFloat Start: preserve positional state (Batches, DcaOrders, anchor,
+            // static bound) when something is still live — Stop is a freeze, not a wipe.
+            // Then force SyncFromExchangeOnStartup on the next worker tick by clearing
+            // StateInitialized. Sync will either drop state (if the position has been
+            // closed manually in the meantime) or re-place missing TPs/DCAs against the
+            // existing position. Heal flows on the same tick fill any remaining gaps.
+            //
+            // Only a truly empty state collapses to fresh, preserving realized PnL.
+            var prevGfState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
+                ? new GridFloatState()
+                : JsonSerializer.Deserialize<GridFloatState>(strategy.StateJson, jsonOpts) ?? new GridFloatState();
+
+            var hasLiveState = prevGfState.Batches.Count > 0 || prevGfState.DcaOrders.Count > 0;
+            GridFloatState freshGfState;
+            if (hasLiveState)
+            {
+                freshGfState = prevGfState;
+                freshGfState.StateInitialized = false;      // force restart-sync next tick
+                freshGfState.PlacementCooldownUntil = null; // transient cooldowns are stale
+                freshGfState.OpenAfterTime = null;          // ditto for one-bar gate
+            }
+            else
+            {
+                freshGfState = new GridFloatState
+                {
+                    RealizedPnlDollar = prevGfState.RealizedPnlDollar
+                };
+            }
+            strategy.StateJson = JsonSerializer.Serialize(freshGfState, jsonOpts);
+        }
         else if (strategy.Type == StrategyTypes.FundingClaim)
         {
             // FundingClaim: preserve cycle stats across restarts, reset phase to Idle
@@ -455,6 +487,167 @@ public class StrategiesController : ControllerBase
         return Ok(new { message = "Strategy stopped", status = strategy.Status.ToString() });
     }
 
+    // Pause: Running → Paused. Worker dispatch filters Status == Running so the handler tick
+    // stops naturally; nothing is cancelled on the exchange (TP and DCA limits keep living).
+    // State (Batches, DcaOrders, AnchorPrice…) is left intact — critical difference vs Stop+Start
+    // which would have Start clear Batches/DcaOrders and then trip SyncFromExchangeOnStartup.
+    [HttpPost("{id:guid}/pause")]
+    public async Task<IActionResult> Pause(Guid id)
+    {
+        var strategy = await _db.Strategies
+            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
+
+        if (strategy == null) return NotFound();
+
+        if (strategy.Status == StrategyStatus.Paused)
+            return Ok(new { message = "Strategy already paused", status = strategy.Status.ToString() });
+
+        if (strategy.Status != StrategyStatus.Running)
+            return BadRequest(new { message = "Можно ставить на паузу только запущенного бота." });
+
+        strategy.Status = StrategyStatus.Paused;
+        await _db.SaveChangesAsync();
+
+        return Ok(new { message = "Strategy paused", status = strategy.Status.ToString() });
+    }
+
+    // Resume: Paused → Running. Unlike Start, does NOT reset StateJson — the same grid
+    // (batches + anchor + per-batch TPs) continues from where Pause stopped. On the next
+    // handler tick, HealMissingDcas re-reads ConfigJson and places DCAs for any free slot
+    // inside the (possibly widened) range; HealMissingTps does the same for TPs.
+    [HttpPost("{id:guid}/resume")]
+    public async Task<IActionResult> Resume(Guid id)
+    {
+        var strategy = await _db.Strategies
+            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
+
+        if (strategy == null) return NotFound();
+
+        if (strategy.Status == StrategyStatus.Running)
+            return Ok(new { message = "Strategy already running", status = strategy.Status.ToString() });
+
+        if (strategy.Status != StrategyStatus.Paused)
+            return BadRequest(new { message = "Возобновить можно только бота на паузе." });
+
+        strategy.Status = StrategyStatus.Running;
+        await _db.SaveChangesAsync();
+
+        return Ok(new { message = "Strategy resumed", status = strategy.Status.ToString() });
+    }
+
+    // Live-tune GridFloat Tiers while paused. Only the tier list is mutable here —
+    // changing Symbol/Direction/DcaStepPercent/Timeframe mid-grid would break the
+    // LevelIdx↔fillPrice correspondence of existing batches and is therefore disallowed
+    // (use Stop → Edit → Start for a fresh start with new params).
+    //
+    // Widening the outermost tier (or appending new tiers) adds slots beyond the existing
+    // ones — HealMissingDcas places them on the next tick after Resume. Narrowing is allowed
+    // too: existing batches outside the new range stay alive with their TPs, but no fresh
+    // DCAs get placed past the new bound. Changing a tier's SizeUsdt only affects new fills
+    // — already-placed limits keep their original qty until they get cancelled/refilled.
+    //
+    // Static-range bound is re-anchored on widening: when the new outermost tier's
+    // UpToPercent exceeds the old one and the bot is in static mode with an initialized
+    // bound, recompute StaticLowerBound/StaticUpperBound against the *current* anchor and
+    // the new maxTierPct so HealMissingDcas can actually reach the new outer levels.
+    // Without this, the frozen bound from the first anchor of the session caps the ladder
+    // at the old depth no matter how many new tiers are added.
+    [HttpPatch("{id:guid}/grid-float/tiers")]
+    public async Task<IActionResult> UpdateGridFloatTiers(Guid id, [FromBody] UpdateGridFloatTiersRequest request)
+    {
+        var strategy = await _db.Strategies
+            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
+
+        if (strategy == null) return NotFound();
+
+        if (strategy.Type != StrategyTypes.GridFloat)
+            return BadRequest(new { message = "Эта операция доступна только для стратегий GridFloat." });
+
+        if (strategy.Status != StrategyStatus.Paused)
+            return BadRequest(new { message = "Бот должен быть на паузе для изменения параметров." });
+
+        if (request.Tiers == null || request.Tiers.Count == 0)
+            return BadRequest(new { message = "Должен быть хотя бы один ярус." });
+
+        if (request.Tiers.Any(t => t.UpToPercent <= 0 || t.SizeUsdt <= 0))
+            return BadRequest(new { message = "Каждый ярус: upToPercent > 0 и sizeUsdt > 0." });
+
+        var sorted = request.Tiers.OrderBy(t => t.UpToPercent).ToList();
+        for (int i = 1; i < sorted.Count; i++)
+        {
+            if (sorted[i].UpToPercent <= sorted[i - 1].UpToPercent)
+                return BadRequest(new { message = "Ярусы должны иметь строго возрастающие upToPercent." });
+        }
+
+        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var config = JsonSerializer.Deserialize<GridFloatConfig>(strategy.ConfigJson, jsonOpts);
+        if (config == null)
+            return BadRequest(new { message = "Не удалось прочитать ConfigJson стратегии." });
+
+        if (sorted[^1].UpToPercent < config.DcaStepPercent)
+            return BadRequest(new { message = $"Внешняя граница тиров ({sorted[^1].UpToPercent}%) должна быть ≥ DcaStepPercent ({config.DcaStepPercent}%)." });
+
+        // Compute old outer-tier extent before mutation so we can detect widening below.
+        // Mirrors NormalizeTiers fallback: if Tiers is empty/null, use legacy RangePercent.
+        var oldMaxTierPct = (config.Tiers != null && config.Tiers.Count > 0)
+            ? config.Tiers.Max(t => t.UpToPercent)
+            : (config.RangePercent ?? 0m);
+        var newMaxTierPct = sorted[^1].UpToPercent;
+
+        // Mutate only Tiers — everything else stays exactly as user configured it. Clear any
+        // legacy single-tier fields so they can't shadow the new list on the next read.
+        var configDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(strategy.ConfigJson, jsonOpts)
+                         ?? new Dictionary<string, JsonElement>();
+        configDict["tiers"] = JsonSerializer.SerializeToElement(sorted, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        });
+        configDict.Remove("baseSizeUsdt");
+        configDict.Remove("rangePercent");
+        strategy.ConfigJson = JsonSerializer.Serialize(configDict);
+
+        // Re-anchor the static bound on widening. Skip narrowing — existing batches outside
+        // the new outer tier stay alive (per the comment above) and a tighter bound would
+        // never benefit them.
+        bool boundRecomputed = false;
+        decimal? newBound = null;
+        if (config.UseStaticRange && newMaxTierPct > oldMaxTierPct
+            && !string.IsNullOrEmpty(strategy.StateJson) && strategy.StateJson != "{}")
+        {
+            var state = JsonSerializer.Deserialize<GridFloatState>(strategy.StateJson, jsonOpts);
+            if (state != null && state.StaticBoundsInitialized && state.AnchorPrice > 0)
+            {
+                if (state.IsLong)
+                {
+                    state.StaticLowerBound = state.AnchorPrice * (1m - newMaxTierPct / 100m);
+                    newBound = state.StaticLowerBound;
+                }
+                else
+                {
+                    state.StaticUpperBound = state.AnchorPrice * (1m + newMaxTierPct / 100m);
+                    newBound = state.StaticUpperBound;
+                }
+                strategy.StateJson = JsonSerializer.Serialize(state, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+                });
+                boundRecomputed = true;
+            }
+        }
+
+        await _db.SaveChangesAsync();
+
+        var newLevels = (int)Math.Floor(newMaxTierPct / config.DcaStepPercent);
+        return Ok(new
+        {
+            message = "Tiers updated",
+            tiers = sorted,
+            dcaSlots = newLevels,
+            boundRecomputed,
+            newBound
+        });
+    }
+
     [HttpPut("{id:guid}")]
     public async Task<IActionResult> Update(Guid id, [FromBody] UpdateStrategyRequest request)
     {
@@ -465,8 +658,8 @@ public class StrategiesController : ControllerBase
         if (strategy == null)
             return NotFound();
 
-        if (strategy.Status == StrategyStatus.Running)
-            return BadRequest(new { message = "Нельзя редактировать запущенного бота. Сначала остановите его." });
+        if (strategy.Status == StrategyStatus.Running || strategy.Status == StrategyStatus.Paused)
+            return BadRequest(new { message = "Нельзя редактировать запущенного бота или бота на паузе. Сначала остановите его." });
 
         strategy.Name = request.Name;
         strategy.ConfigJson = request.ConfigJson ?? strategy.ConfigJson;
@@ -734,6 +927,102 @@ public class StrategiesController : ControllerBase
                 details = new[]
                 {
                     $"{smaDirection} closed: qty={Math.Round(smaClosedQty, 6)}, price={Math.Round(smaClosePrice, 6)}, PnL=${Math.Round(smaNetPnl, 2)}"
+                }
+            });
+        }
+
+        // --- GridFloat path ---
+        if (strategy.Type == StrategyTypes.GridFloat)
+        {
+            var gfState = JsonSerializer.Deserialize<GridFloatState>(strategy.StateJson, jsonOpts);
+            if (gfState == null || gfState.Batches == null || gfState.Batches.Count == 0)
+                return BadRequest(new { message = "Нет открытой позиции" });
+
+            var gfConfig = JsonSerializer.Deserialize<GridFloatConfig>(strategy.ConfigJson, jsonOpts);
+            if (gfConfig == null || string.IsNullOrEmpty(gfConfig.Symbol))
+                return BadRequest(new { message = "Некорректная конфигурация (symbol пуст)" });
+
+            using var gfExchange = _exchangeFactory.CreateFutures(strategy.Account);
+
+            // Cancel every limit (TPs + DCAs) before market-closing the aggregate position.
+            try { await gfExchange.CancelAllOrdersAsync(gfConfig.Symbol); } catch { }
+
+            var totalQty = gfState.Batches.Sum(b => b.Qty);
+            var totalCost = gfState.Batches.Sum(b => b.FillPrice * b.Qty);
+            var avgEntry = totalQty > 0 ? totalCost / totalQty : 0m;
+            var gfCurrentPrice = await gfExchange.GetTickerPriceAsync(gfConfig.Symbol);
+
+            OrderResultDto gfResult;
+            string gfCloseSide;
+            if (gfState.IsLong)
+            {
+                gfResult = await gfExchange.CloseLongAsync(gfConfig.Symbol, totalQty);
+                gfCloseSide = "Sell";
+            }
+            else
+            {
+                gfResult = await gfExchange.CloseShortAsync(gfConfig.Symbol, totalQty);
+                gfCloseSide = "Buy";
+            }
+
+            var gfClosePrice = gfCurrentPrice ?? avgEntry;
+            var gfPnlPct = avgEntry > 0
+                ? (gfState.IsLong
+                    ? (gfClosePrice - avgEntry) / avgEntry * 100m
+                    : (avgEntry - gfClosePrice) / avgEntry * 100m)
+                : 0m;
+            var gfGrossPnl = totalCost * gfPnlPct / 100m;
+            var gfCommission = totalCost * 2m * 0.0005m;
+            var gfNetPnl = gfGrossPnl - gfCommission;
+            var gfDirection = gfState.IsLong ? "Long" : "Short";
+
+            _db.Trades.Add(new Trade
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                AccountId = strategy.AccountId,
+                ExchangeOrderId = gfResult.OrderId ?? "",
+                Symbol = gfConfig.Symbol,
+                Side = gfCloseSide,
+                Quantity = totalQty,
+                Price = gfClosePrice,
+                Status = "ManualClose",
+                ExecutedAt = DateTime.UtcNow,
+                PnlDollar = gfNetPnl,
+                Commission = gfCommission
+            });
+
+            _db.StrategyLogs.Add(new StrategyLog
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                Level = "Info",
+                Message = $"{gfDirection.ToUpper()} закрыт вручную (GridFloat): " +
+                          $"qty={Math.Round(totalQty, 6)} @ {Math.Round(gfClosePrice, 6)}, " +
+                          $"avg={Math.Round(avgEntry, 6)}, батчей={gfState.Batches.Count}, " +
+                          $"PnL={Math.Round(gfPnlPct, 4)}% (${Math.Round(gfNetPnl, 2)}, комиссия≈${Math.Round(gfCommission, 4)})",
+                CreatedAt = DateTime.UtcNow
+            });
+
+            // Reset position state — mirrors GridFloatHandler.OnFullClose. SkipNextCandle
+            // prevents an instant re-entry on the same bar; StateInitialized is preserved so
+            // restart-sync doesn't fire again.
+            gfState.RealizedPnlDollar += gfNetPnl;
+            gfState.Batches.Clear();
+            gfState.DcaOrders.Clear();
+            gfState.AnchorPrice = 0;
+            gfState.OpenAfterTime = DateTime.UtcNow;
+            gfState.PlacementCooldownUntil = null;
+
+            strategy.StateJson = JsonSerializer.Serialize(gfState, saveOpts);
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = "Позиция закрыта по рынку",
+                details = new[]
+                {
+                    $"{gfDirection} closed: qty={Math.Round(totalQty, 6)}, price={Math.Round(gfClosePrice, 6)}, PnL=${Math.Round(gfNetPnl, 2)}"
                 }
             });
         }
@@ -1027,4 +1316,9 @@ public class UpdateStrategyRequest
 public class SetTelegramBotRequest
 {
     public Guid? TelegramBotId { get; set; }
+}
+
+public class UpdateGridFloatTiersRequest
+{
+    public List<GridFloatTier> Tiers { get; set; } = new();
 }

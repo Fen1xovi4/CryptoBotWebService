@@ -61,4 +61,12 @@ public interface IFuturesExchangeService : IDisposable
 
     Task<bool> SetLeverageAsync(string symbol, int leverage) =>
         throw new NotSupportedException("SetLeverageAsync not implemented");
+
+    /// <summary>
+    /// Returns the symbol's lot-size step and minimum order quantity for futures.
+    /// Default: (0, 0) — caller should treat zero values as "exchange doesn't expose this info"
+    /// and skip the minimum-notional pre-check.
+    /// </summary>
+    Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string symbol) =>
+        Task.FromResult((0m, 0m));
 }

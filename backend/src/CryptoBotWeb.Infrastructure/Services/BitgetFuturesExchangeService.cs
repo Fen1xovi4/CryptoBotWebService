@@ -420,12 +420,26 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<bool> CancelAllOrdersAsync(string symbol)
     {
+        // Bitget V2 cancel-all-orders endpoint cancels every USDT-futures order on the
+        // account even when a per-symbol filter is supplied — verified twice in production
+        // (a single-symbol full-close nuked DCAs/TPs on unrelated bots' symbols within
+        // 9 seconds). Cause is either the SDK dropping the symbol param from the request
+        // body or the API ignoring it when productType is also passed. Either way, the
+        // safe substitute is to enumerate this symbol's open orders and cancel each
+        // individually — no cross-symbol blast radius.
         try
         {
-            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
-            var result = await _client.FuturesApiV2.Trading.CancelAllOrdersAsync(
-                BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT");
-            return result.Success;
+            var openOrders = await GetOpenOrdersAsync(symbol);
+            if (openOrders.Count == 0) return true;
+
+            var allOk = true;
+            foreach (var order in openOrders)
+            {
+                if (string.IsNullOrEmpty(order.OrderId)) continue;
+                var ok = await CancelOrderAsync(symbol, order.OrderId);
+                if (!ok) allOk = false;
+            }
+            return allOk;
         }
         catch (Exception)
         {
@@ -494,6 +508,12 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         "1w" => TimeSpan.FromDays(7),
         _ => TimeSpan.FromHours(1)
     };
+
+    async Task<(decimal qtyStep, decimal minQty)> IFuturesExchangeService.GetSymbolInfoAsync(string symbol)
+    {
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+        return await GetSymbolInfoAsync(bitgetSymbol);
+    }
 
     private async Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string bitgetSymbol)
     {

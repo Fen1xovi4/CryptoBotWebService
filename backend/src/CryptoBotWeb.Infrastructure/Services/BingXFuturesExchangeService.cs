@@ -461,6 +461,12 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         _ => TimeSpan.FromHours(1)
     };
 
+    async Task<(decimal qtyStep, decimal minQty)> IFuturesExchangeService.GetSymbolInfoAsync(string symbol)
+    {
+        var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+        return await GetSymbolInfoAsync(bingxSymbol);
+    }
+
     private async Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string bingxSymbol)
     {
         var result = await _client.PerpetualFuturesApi.ExchangeData.GetContractsAsync();

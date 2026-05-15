@@ -16,12 +16,15 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     private readonly BybitRestClient _client;
 
-    public BybitFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null)
+    // Bybit Broker Program: our broker code "Ty001081" must be sent as the Referer header
+    // on every REST call. Bybit.Net forwards options.Referer to all requests automatically.
+    public BybitFuturesExchangeService(string apiKey, string apiSecret, ApiProxy? proxy = null, string? brokerId = null)
     {
         _client = new BybitRestClient(options =>
         {
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret);
             if (proxy != null) options.Proxy = proxy;
+            if (!string.IsNullOrWhiteSpace(brokerId)) options.Referer = brokerId;
         });
     }
 
@@ -271,6 +274,66 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    public async Task<bool> CancelOrderAsync(string symbol, string orderId)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var result = await _client.V5Api.Trading.CancelOrderAsync(
+                Category.Linear, bybitSymbol, orderId: orderId);
+            return result.Success;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public async Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+
+            // Real-time endpoint covers open / recently-finalized orders.
+            var open = await _client.V5Api.Trading.GetOrdersAsync(
+                Category.Linear, bybitSymbol, orderId: orderId);
+            var order = open.Success ? open.Data?.List?.FirstOrDefault() : null;
+
+            // Fall back to history for fully-finalized orders past the real-time window.
+            if (order == null)
+            {
+                var hist = await _client.V5Api.Trading.GetOrderHistoryAsync(
+                    Category.Linear, bybitSymbol, orderId: orderId);
+                order = hist.Success ? hist.Data?.List?.FirstOrDefault() : null;
+            }
+
+            if (order == null) return null;
+
+            return new OrderStatusDto
+            {
+                OrderId = order.OrderId ?? orderId,
+                Status = MapOrderStatus(order.Status),
+                FilledQuantity = order.QuantityFilled ?? 0m,
+                AverageFilledPrice = order.AveragePrice ?? 0m
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static OrderLifecycleStatus MapOrderStatus(OrderStatus s) => s switch
+    {
+        OrderStatus.New or OrderStatus.Created or OrderStatus.Active or OrderStatus.Untriggered => OrderLifecycleStatus.Open,
+        OrderStatus.PartiallyFilled => OrderLifecycleStatus.PartiallyFilled,
+        OrderStatus.Filled => OrderLifecycleStatus.Filled,
+        OrderStatus.Cancelled or OrderStatus.PartiallyFilledCanceled or OrderStatus.Deactivated => OrderLifecycleStatus.Cancelled,
+        OrderStatus.Rejected => OrderLifecycleStatus.Rejected,
+        _ => OrderLifecycleStatus.Unknown
+    };
+
     public async Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol)
     {
         try
@@ -345,6 +408,15 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             return (info.LotSizeFilter?.QuantityStep ?? 0.001m, info.LotSizeFilter?.MinOrderQuantity ?? 0m);
         }
         return (0.001m, 0m);
+    }
+
+    // Public interface implementation: takes canonical symbol, applies exchange-specific
+    // mapping, defers to the internal helper. Used by GridFloat for the pre-placement
+    // minimum-notional guard.
+    async Task<(decimal qtyStep, decimal minQty)> IFuturesExchangeService.GetSymbolInfoAsync(string symbol)
+    {
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        return await GetSymbolInfoAsync(bybitSymbol);
     }
 
     private async Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolInfoWithPriceAsync(string bybitSymbol)
