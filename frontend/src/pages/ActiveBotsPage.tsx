@@ -3028,11 +3028,10 @@ interface GridHedgeCfg {
   hedgeSymbol: string;
   rangePercent: number;
   upperExitPercent: number;
-  tiers: GridFloatTier[];
   dcaStepPercent: number;
   tpStepPercent: number;
-  hedgeRatio: number;
-  beta: number;
+  betUsdt: number;
+  hedgeNotionalUsdt: number;
   hedgeLeverage: number;
   gridLeverage: number;
 }
@@ -3073,6 +3072,16 @@ interface GridHedgeStateData {
   completedCycles: number;
   lastPrice: number | null;
   placementCooldownUntil: string | null;
+}
+
+function gridHedgeRecommendation(R: number, step: number, G: number): { hedge: number; maxLoss: number } | null {
+  if (!(R > 0) || !(step > 0) || !(G > 0)) return null;
+  const COEF = 0.88;
+  const executions = (2 * R - 1) / step;
+  const gridWorstLoss = G * executions * (R / 100) * COEF;
+  const hedge = gridWorstLoss / (2 * R / 100);
+  const maxLoss = gridWorstLoss / 2;
+  return { hedge, maxLoss };
 }
 
 const GRID_HEDGE_PHASE_LABELS: Record<number, string> = {
@@ -3192,13 +3201,13 @@ function GridHedgeCard({
       {cfg && (
         <div className="px-4 pb-2 flex flex-wrap gap-1">
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-            -{cfg.rangePercent}% ↔ +{cfg.upperExitPercent}%
+            range −{cfg.rangePercent}% ↔ +{cfg.upperExitPercent}%
           </span>
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-            dca {cfg.dcaStepPercent}% tp {cfg.tpStepPercent}%
+            step dca {cfg.dcaStepPercent}% tp {cfg.tpStepPercent}%
           </span>
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-            ratio {cfg.hedgeRatio} β {cfg.beta}
+            ${cfg.betUsdt}/уровень
           </span>
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
             hedge ×{cfg.hedgeLeverage}
@@ -3208,27 +3217,6 @@ function GridHedgeCard({
               grid ×{cfg.gridLeverage}
             </span>
           )}
-        </div>
-      )}
-
-      {/* Tier table */}
-      {cfg && cfg.tiers.length > 0 && (
-        <div className="px-4 pb-2">
-          <div className="flex flex-wrap gap-1">
-            {cfg.tiers.map((t, i) => {
-              const prevUp = i === 0 ? 0 : cfg.tiers[i - 1].upToPercent;
-              return (
-                <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-300">
-                  T{i + 1}: {prevUp}%–{t.upToPercent}% · ${t.sizeUsdt}
-                  {(t.dcaStepPercent != null || t.tpStepPercent != null) && (
-                    <span className="ml-1 text-violet-200/70">
-                      ·dca{t.dcaStepPercent ?? cfg.dcaStepPercent}%·tp{t.tpStepPercent ?? cfg.tpStepPercent}%
-                    </span>
-                  )}
-                </span>
-              );
-            })}
-          </div>
         </div>
       )}
 
@@ -3562,17 +3550,14 @@ function AddStrategyModal({
     mode: 1 as 1 | 2,
     hedgeSymbol: '',
     rangePercent: '10',
-    upperExitPercent: '2',
+    upperExitPercent: '10',
     dcaStepPercent: '1',
     tpStepPercent: '1',
-    hedgeRatio: '1.0',
-    beta: '1.0',
+    betUsdt: '100',
+    hedgeNotionalUsdt: '836',
     hedgeLeverage: '5',
     gridLeverage: '1',
   });
-  const [ghTiers, setGhTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>([
-    { upTo: '10', size: '100', dca: '', tp: '' },
-  ]);
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
     queryKey: ['symbols', accountId],
@@ -3702,55 +3687,36 @@ function AddStrategyModal({
         useStaticRange: gfForm.useStaticRange,
       });
     } else if (strategyType === 'GridHedge') {
-      const tiers = ghTiers
-        .map((t) => {
-          const upToPercent = Number(t.upTo);
-          const sizeUsdt = Number(t.size);
-          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
-          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
-          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
-        })
-        .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
-        .sort((a, b) => a.upToPercent - b.upToPercent);
-      if (tiers.length === 0) {
-        setError('Добавьте хотя бы один ярус с upTo% > 0 и размером > 0');
+      if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
+        setError('Диапазоны вниз/вверх должны быть > 0');
         return;
       }
-      for (let i = 1; i < tiers.length; i++) {
-        if (tiers[i].upToPercent <= tiers[i - 1].upToPercent) {
-          setError('Ярусы должны идти со строго возрастающим upTo%');
-          return;
-        }
+      if (Number(ghForm.dcaStepPercent) <= 0 || Number(ghForm.tpStepPercent) <= 0) {
+        setError('Шаги DCA / TP должны быть > 0');
+        return;
       }
-      for (const t of tiers) {
-        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) { setError('Per-tier шаг DCA должен быть > 0 (или пусто)'); return; }
-        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) { setError('Per-tier шаг TP должен быть > 0 (или пусто)'); return; }
+      if (Number(ghForm.betUsdt) <= 0) {
+        setError('Ставка на уровень должна быть > 0');
+        return;
       }
-      if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
-        setError('rangePercent и upperExitPercent должны быть > 0');
+      if (Number(ghForm.hedgeNotionalUsdt) < 0) {
+        setError('Размер хеджа не может быть отрицательным');
         return;
       }
       if (ghForm.mode === 2 && !ghForm.hedgeSymbol.trim()) {
         setError('Cross-Ticker режим требует hedgeSymbol (например BTCUSDT)');
         return;
       }
-      const tiersPayload = tiers.map((t) => ({
-        upToPercent: t.upToPercent,
-        sizeUsdt: t.sizeUsdt,
-        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
-        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
-      }));
       configJson = JSON.stringify({
         mode: ghForm.mode,
         gridSymbol: symbol.replace(/\s+/g, '').toUpperCase(),
         hedgeSymbol: ghForm.mode === 2 ? ghForm.hedgeSymbol.replace(/\s+/g, '').toUpperCase() : '',
         rangePercent: Number(ghForm.rangePercent),
         upperExitPercent: Number(ghForm.upperExitPercent),
-        tiers: tiersPayload,
         dcaStepPercent: Number(ghForm.dcaStepPercent),
         tpStepPercent: Number(ghForm.tpStepPercent),
-        hedgeRatio: Number(ghForm.hedgeRatio),
-        beta: Number(ghForm.beta),
+        betUsdt: Number(ghForm.betUsdt),
+        hedgeNotionalUsdt: Number(ghForm.hedgeNotionalUsdt),
         hedgeLeverage: Number(ghForm.hedgeLeverage),
         gridLeverage: Number(ghForm.gridLeverage),
       });
@@ -4356,10 +4322,10 @@ function AddStrategyModal({
                 </div>
               )}
 
-              {/* Range + UpperExit */}
+              {/* Диапазон вниз / вверх */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className={labelCls}>Range вниз, %</label>
+                  <label className={labelCls}>Диапазон вниз %</label>
                   <input type="number" step="0.5" min="0.1"
                     value={ghForm.rangePercent}
                     onChange={(e) => setGhForm({ ...ghForm, rangePercent: e.target.value })}
@@ -4367,7 +4333,7 @@ function AddStrategyModal({
                   <p className="text-xs text-text-secondary mt-0.5">Стоп-лосс при цене ниже anchor × (1 − R%)</p>
                 </div>
                 <div>
-                  <label className={labelCls}>UpperExit вверх, %</label>
+                  <label className={labelCls}>Диапазон вверх %</label>
                   <input type="number" step="0.5" min="0.1"
                     value={ghForm.upperExitPercent}
                     onChange={(e) => setGhForm({ ...ghForm, upperExitPercent: e.target.value })}
@@ -4376,24 +4342,83 @@ function AddStrategyModal({
                 </div>
               </div>
 
-              {/* Hedge sizing */}
+              {/* DCA + TP steps */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className={labelCls}>HedgeRatio</label>
-                  <input type="number" step="0.1" min="0" max="5"
-                    value={ghForm.hedgeRatio}
-                    onChange={(e) => setGhForm({ ...ghForm, hedgeRatio: e.target.value })}
+                  <label className={labelCls}>Шаг DCA %</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.dcaStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, dcaStepPercent: e.target.value })}
                     className={inputCls} />
-                  <p className="text-xs text-text-secondary mt-0.5">0..5; SameTicker обычно 1.0</p>
                 </div>
                 <div>
-                  <label className={labelCls}>Beta (β)</label>
-                  <input type="number" step="0.1" min="0.1" max="10"
-                    value={ghForm.beta}
-                    onChange={(e) => setGhForm({ ...ghForm, beta: e.target.value })}
+                  <label className={labelCls}>Шаг TP %</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.tpStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, tpStepPercent: e.target.value })}
                     className={inputCls} />
-                  <p className="text-xs text-text-secondary mt-0.5">Корреляция; CrossTicker — на сколько β хеджа отличается от грида</p>
                 </div>
+              </div>
+
+              {/* Ставка на уровень */}
+              <div>
+                <label className={labelCls}>Ставка на уровень, USDT</label>
+                <input type="number" step="1" min="1"
+                  value={ghForm.betUsdt}
+                  onChange={(e) => setGhForm({ ...ghForm, betUsdt: e.target.value })}
+                  className={inputCls} />
+              </div>
+
+              {/* Recommendation panel */}
+              {(() => {
+                const R = Number(ghForm.rangePercent);
+                const step = Number(ghForm.dcaStepPercent);
+                const G = Number(ghForm.betUsdt);
+                const rec = gridHedgeRecommendation(R, step, G);
+                if (!rec) return null;
+                const hedgeR = Math.round(rec.hedge);
+                const maxL = Math.round(rec.maxLoss);
+                return (
+                  <div className="rounded-lg border border-accent-blue/30 bg-accent-blue/5 p-3 text-xs space-y-1">
+                    <div className="font-medium text-accent-blue">
+                      Рекомендуемый хедж: ~${hedgeR}
+                    </div>
+                    <div className="text-text-secondary">
+                      Максимальный убыток (при просадке до −{R}%): ~${maxL}
+                    </div>
+                    <div className="text-text-secondary/70 italic">
+                      Расчёт: ставка ${G} × ({(2*R-1).toFixed(0)}/{step}) исполнений × коэф. 0.88. При меньшем шаге уровней больше — хедж и убыток растут пропорционально.
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Размер хеджа */}
+              <div>
+                <label className={labelCls}>Размер хеджа, USDT</label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    step="1"
+                    min="0"
+                    value={ghForm.hedgeNotionalUsdt}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeNotionalUsdt: e.target.value })}
+                    className={inputCls + ' flex-1'}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const rec = gridHedgeRecommendation(Number(ghForm.rangePercent), Number(ghForm.dcaStepPercent), Number(ghForm.betUsdt));
+                      if (rec) setGhForm({ ...ghForm, hedgeNotionalUsdt: String(Math.round(rec.hedge)) });
+                    }}
+                    className="px-3 py-2 text-xs font-medium bg-accent-blue/15 text-accent-blue rounded-lg hover:bg-accent-blue/25 transition-colors whitespace-nowrap"
+                  >
+                    Применить рекомендацию
+                  </button>
+                </div>
+                <p className="text-xs text-text-secondary mt-0.5">
+                  0 = без хеджа. Бот откроет SHORT на эту сумму одной маркет-сделкой при старте.
+                </p>
               </div>
 
               {/* Leverages */}
@@ -4416,146 +4441,10 @@ function AddStrategyModal({
                 </div>
               </div>
 
-              {/* Default DCA + TP steps */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
-                  <input type="number" step="0.1" min="0.01"
-                    value={ghForm.dcaStepPercent}
-                    onChange={(e) => setGhForm({ ...ghForm, dcaStepPercent: e.target.value })}
-                    className={inputCls} />
-                </div>
-                <div>
-                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
-                  <input type="number" step="0.1" min="0.01"
-                    value={ghForm.tpStepPercent}
-                    onChange={(e) => setGhForm({ ...ghForm, tpStepPercent: e.target.value })}
-                    className={inputCls} />
-                </div>
-              </div>
-
-              {/* Tiers */}
-              <div>
-                <label className={labelCls}>Ярусы сетки</label>
-                <div className="rounded-lg border border-border overflow-hidden">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="bg-bg-tertiary text-text-secondary">
-                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
-                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
-                        <th className="px-2 py-2 text-left font-medium">До %</th>
-                        <th className="px-2 py-2 text-left font-medium">$</th>
-                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
-                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
-                        <th className="px-2 py-2 w-6" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {ghTiers.map((t, i) => {
-                        const prevUp = i === 0 ? '0' : ghTiers[i - 1].upTo || '?';
-                        return (
-                          <tr key={i} className="border-t border-border/50">
-                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
-                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
-                            <td className="px-2 py-1.5">
-                              <input
-                                type="number"
-                                step="0.5"
-                                min="0.1"
-                                value={t.upTo}
-                                onChange={(e) => setGhTiers((prev) =>
-                                  prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
-                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
-                              />
-                            </td>
-                            <td className="px-2 py-1.5">
-                              <input
-                                type="number"
-                                step="1"
-                                min="1"
-                                value={t.size}
-                                onChange={(e) => setGhTiers((prev) =>
-                                  prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
-                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
-                              />
-                            </td>
-                            <td className="px-2 py-1.5">
-                              <input
-                                type="number"
-                                step="0.1"
-                                min="0.01"
-                                value={t.dca}
-                                placeholder={ghForm.dcaStepPercent}
-                                onChange={(e) => setGhTiers((prev) =>
-                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
-                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
-                              />
-                            </td>
-                            <td className="px-2 py-1.5">
-                              <input
-                                type="number"
-                                step="0.1"
-                                min="0.01"
-                                value={t.tp}
-                                placeholder={ghForm.tpStepPercent}
-                                onChange={(e) => setGhTiers((prev) =>
-                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
-                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
-                              />
-                            </td>
-                            <td className="px-2 py-1.5 text-right">
-                              {ghTiers.length > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => setGhTiers((prev) => prev.filter((_, idx) => idx !== i))}
-                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
-                                  title="Удалить ярус"
-                                >
-                                  ×
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setGhTiers((prev) => {
-                    const last = prev[prev.length - 1];
-                    const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
-                    const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
-                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
-                  })}
-                  className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
-                >
-                  + Добавить ярус
-                </button>
-                <p className="text-xs text-text-secondary mt-1.5">
-                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
-                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
-                </p>
-              </div>
-
               <p className="text-xs text-text-secondary italic">
-                ~{(() => {
-                  const fallback = Math.max(0.0001, Number(ghForm.dcaStepPercent));
-                  let total = 0;
-                  let prev = 0;
-                  for (const row of ghTiers) {
-                    const upTo = Number(row.upTo);
-                    if (!(upTo > 0)) continue;
-                    const tierStep = row.dca.trim() === '' ? fallback : Number(row.dca);
-                    if (tierStep > 0 && upTo > prev) total += Math.floor((upTo - prev) / tierStep);
-                    prev = upTo;
-                  }
-                  return total > 0 ? total : '?';
-                })()} DCA-уровней.
-                Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой
-                на полный объём сетки × HedgeRatio × β. Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь
-                бот. После Done — Stop → Start чтобы начать новый цикл.
+                Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой.
+                Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь бот.
+                После Done — Stop → Start чтобы начать новый цикл.
               </p>
             </>
           ) : strategyType === 'HuntingFunding' ? (
@@ -4971,30 +4860,13 @@ function EditStrategyModal({
     mode: (cfg.mode ?? 1) as 1 | 2,
     hedgeSymbol: cfg.hedgeSymbol || '',
     rangePercent: String(cfg.rangePercent ?? 10),
-    upperExitPercent: String(cfg.upperExitPercent ?? 2),
+    upperExitPercent: String(cfg.upperExitPercent ?? 10),
     dcaStepPercent: String(cfg.dcaStepPercent ?? 1),
     tpStepPercent: String(cfg.tpStepPercent ?? 1),
-    hedgeRatio: String(cfg.hedgeRatio ?? 1.0),
-    beta: String(cfg.beta ?? 1.0),
+    betUsdt: String(cfg.betUsdt ?? 100),
+    hedgeNotionalUsdt: String(cfg.hedgeNotionalUsdt ?? 836),
     hedgeLeverage: String(cfg.hedgeLeverage ?? 5),
     gridLeverage: String(cfg.gridLeverage ?? 1),
-  });
-  const [ghTiers, setGhTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(() => {
-    if (Array.isArray(cfg.tiers) && cfg.tiers.length > 0) {
-      const sorted = [...cfg.tiers]
-        .filter((t: { upToPercent: number; sizeUsdt: number }) =>
-          Number(t.upToPercent) > 0 && Number(t.sizeUsdt) > 0)
-        .sort((a: { upToPercent: number }, b: { upToPercent: number }) => a.upToPercent - b.upToPercent);
-      if (sorted.length > 0) {
-        return sorted.map((t: { upToPercent: number; sizeUsdt: number; dcaStepPercent?: number | null; tpStepPercent?: number | null }) => ({
-          upTo: String(t.upToPercent),
-          size: String(t.sizeUsdt),
-          dca: typeof t.dcaStepPercent === 'number' && t.dcaStepPercent > 0 ? String(t.dcaStepPercent) : '',
-          tp: typeof t.tpStepPercent === 'number' && t.tpStepPercent > 0 ? String(t.tpStepPercent) : '',
-        }));
-      }
-    }
-    return [{ upTo: '10', size: '100', dca: '', tp: '' }];
   });
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
@@ -5121,55 +4993,36 @@ function EditStrategyModal({
         useStaticRange: gfForm.useStaticRange,
       });
     } else if (isGH) {
-      const tiers = ghTiers
-        .map((t) => {
-          const upToPercent = Number(t.upTo);
-          const sizeUsdt = Number(t.size);
-          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
-          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
-          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
-        })
-        .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
-        .sort((a, b) => a.upToPercent - b.upToPercent);
-      if (tiers.length === 0) {
-        setError('Добавьте хотя бы один ярус с upTo% > 0 и размером > 0');
+      if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
+        setError('Диапазоны вниз/вверх должны быть > 0');
         return;
       }
-      for (let i = 1; i < tiers.length; i++) {
-        if (tiers[i].upToPercent <= tiers[i - 1].upToPercent) {
-          setError('Ярусы должны идти со строго возрастающим upTo%');
-          return;
-        }
+      if (Number(ghForm.dcaStepPercent) <= 0 || Number(ghForm.tpStepPercent) <= 0) {
+        setError('Шаги DCA / TP должны быть > 0');
+        return;
       }
-      for (const t of tiers) {
-        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) { setError('Per-tier шаг DCA должен быть > 0 (или пусто)'); return; }
-        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) { setError('Per-tier шаг TP должен быть > 0 (или пусто)'); return; }
+      if (Number(ghForm.betUsdt) <= 0) {
+        setError('Ставка на уровень должна быть > 0');
+        return;
       }
-      if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
-        setError('rangePercent и upperExitPercent должны быть > 0');
+      if (Number(ghForm.hedgeNotionalUsdt) < 0) {
+        setError('Размер хеджа не может быть отрицательным');
         return;
       }
       if (ghForm.mode === 2 && !ghForm.hedgeSymbol.trim()) {
         setError('Cross-Ticker режим требует hedgeSymbol (например BTCUSDT)');
         return;
       }
-      const tiersPayload = tiers.map((t) => ({
-        upToPercent: t.upToPercent,
-        sizeUsdt: t.sizeUsdt,
-        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
-        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
-      }));
       configJson = JSON.stringify({
         mode: ghForm.mode,
         gridSymbol: symbol.replace(/\s+/g, '').toUpperCase(),
         hedgeSymbol: ghForm.mode === 2 ? ghForm.hedgeSymbol.replace(/\s+/g, '').toUpperCase() : '',
         rangePercent: Number(ghForm.rangePercent),
         upperExitPercent: Number(ghForm.upperExitPercent),
-        tiers: tiersPayload,
         dcaStepPercent: Number(ghForm.dcaStepPercent),
         tpStepPercent: Number(ghForm.tpStepPercent),
-        hedgeRatio: Number(ghForm.hedgeRatio),
-        beta: Number(ghForm.beta),
+        betUsdt: Number(ghForm.betUsdt),
+        hedgeNotionalUsdt: Number(ghForm.hedgeNotionalUsdt),
         hedgeLeverage: Number(ghForm.hedgeLeverage),
         gridLeverage: Number(ghForm.gridLeverage),
       });
@@ -5697,10 +5550,10 @@ function EditStrategyModal({
                 </div>
               )}
 
-              {/* Range + UpperExit */}
+              {/* Диапазон вниз / вверх */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className={labelCls}>Range вниз, %</label>
+                  <label className={labelCls}>Диапазон вниз %</label>
                   <input type="number" step="0.5" min="0.1"
                     value={ghForm.rangePercent}
                     onChange={(e) => setGhForm({ ...ghForm, rangePercent: e.target.value })}
@@ -5708,7 +5561,7 @@ function EditStrategyModal({
                   <p className="text-xs text-text-secondary mt-0.5">Стоп-лосс при цене ниже anchor × (1 − R%)</p>
                 </div>
                 <div>
-                  <label className={labelCls}>UpperExit вверх, %</label>
+                  <label className={labelCls}>Диапазон вверх %</label>
                   <input type="number" step="0.5" min="0.1"
                     value={ghForm.upperExitPercent}
                     onChange={(e) => setGhForm({ ...ghForm, upperExitPercent: e.target.value })}
@@ -5717,24 +5570,83 @@ function EditStrategyModal({
                 </div>
               </div>
 
-              {/* Hedge sizing */}
+              {/* DCA + TP steps */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className={labelCls}>HedgeRatio</label>
-                  <input type="number" step="0.1" min="0" max="5"
-                    value={ghForm.hedgeRatio}
-                    onChange={(e) => setGhForm({ ...ghForm, hedgeRatio: e.target.value })}
+                  <label className={labelCls}>Шаг DCA %</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.dcaStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, dcaStepPercent: e.target.value })}
                     className={inputCls} />
-                  <p className="text-xs text-text-secondary mt-0.5">0..5; SameTicker обычно 1.0</p>
                 </div>
                 <div>
-                  <label className={labelCls}>Beta (β)</label>
-                  <input type="number" step="0.1" min="0.1" max="10"
-                    value={ghForm.beta}
-                    onChange={(e) => setGhForm({ ...ghForm, beta: e.target.value })}
+                  <label className={labelCls}>Шаг TP %</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.tpStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, tpStepPercent: e.target.value })}
                     className={inputCls} />
-                  <p className="text-xs text-text-secondary mt-0.5">Корреляция; CrossTicker — на сколько β хеджа отличается от грида</p>
                 </div>
+              </div>
+
+              {/* Ставка на уровень */}
+              <div>
+                <label className={labelCls}>Ставка на уровень, USDT</label>
+                <input type="number" step="1" min="1"
+                  value={ghForm.betUsdt}
+                  onChange={(e) => setGhForm({ ...ghForm, betUsdt: e.target.value })}
+                  className={inputCls} />
+              </div>
+
+              {/* Recommendation panel */}
+              {(() => {
+                const R = Number(ghForm.rangePercent);
+                const step = Number(ghForm.dcaStepPercent);
+                const G = Number(ghForm.betUsdt);
+                const rec = gridHedgeRecommendation(R, step, G);
+                if (!rec) return null;
+                const hedgeR = Math.round(rec.hedge);
+                const maxL = Math.round(rec.maxLoss);
+                return (
+                  <div className="rounded-lg border border-accent-blue/30 bg-accent-blue/5 p-3 text-xs space-y-1">
+                    <div className="font-medium text-accent-blue">
+                      Рекомендуемый хедж: ~${hedgeR}
+                    </div>
+                    <div className="text-text-secondary">
+                      Максимальный убыток (при просадке до −{R}%): ~${maxL}
+                    </div>
+                    <div className="text-text-secondary/70 italic">
+                      Расчёт: ставка ${G} × ({(2*R-1).toFixed(0)}/{step}) исполнений × коэф. 0.88. При меньшем шаге уровней больше — хедж и убыток растут пропорционально.
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Размер хеджа */}
+              <div>
+                <label className={labelCls}>Размер хеджа, USDT</label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    step="1"
+                    min="0"
+                    value={ghForm.hedgeNotionalUsdt}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeNotionalUsdt: e.target.value })}
+                    className={inputCls + ' flex-1'}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const rec = gridHedgeRecommendation(Number(ghForm.rangePercent), Number(ghForm.dcaStepPercent), Number(ghForm.betUsdt));
+                      if (rec) setGhForm({ ...ghForm, hedgeNotionalUsdt: String(Math.round(rec.hedge)) });
+                    }}
+                    className="px-3 py-2 text-xs font-medium bg-accent-blue/15 text-accent-blue rounded-lg hover:bg-accent-blue/25 transition-colors whitespace-nowrap"
+                  >
+                    Применить рекомендацию
+                  </button>
+                </div>
+                <p className="text-xs text-text-secondary mt-0.5">
+                  0 = без хеджа. Бот откроет SHORT на эту сумму одной маркет-сделкой при старте.
+                </p>
               </div>
 
               {/* Leverages */}
@@ -5757,133 +5669,10 @@ function EditStrategyModal({
                 </div>
               </div>
 
-              {/* Default DCA + TP steps */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
-                  <input type="number" step="0.1" min="0.01"
-                    value={ghForm.dcaStepPercent}
-                    onChange={(e) => setGhForm({ ...ghForm, dcaStepPercent: e.target.value })}
-                    className={inputCls} />
-                </div>
-                <div>
-                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
-                  <input type="number" step="0.1" min="0.01"
-                    value={ghForm.tpStepPercent}
-                    onChange={(e) => setGhForm({ ...ghForm, tpStepPercent: e.target.value })}
-                    className={inputCls} />
-                </div>
-              </div>
-
-              {/* Tiers */}
-              <div>
-                <label className={labelCls}>Ярусы сетки</label>
-                <div className="rounded-lg border border-border overflow-hidden">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr className="bg-bg-tertiary text-text-secondary">
-                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
-                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
-                        <th className="px-2 py-2 text-left font-medium">До %</th>
-                        <th className="px-2 py-2 text-left font-medium">$</th>
-                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
-                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
-                        <th className="px-2 py-2 w-6" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {ghTiers.map((t, i) => {
-                        const prevUp = i === 0 ? '0' : ghTiers[i - 1].upTo || '?';
-                        return (
-                          <tr key={i} className="border-t border-border/50">
-                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
-                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
-                            <td className="px-2 py-1.5">
-                              <input
-                                type="number"
-                                step="0.5"
-                                min="0.1"
-                                value={t.upTo}
-                                onChange={(e) => setGhTiers((prev) =>
-                                  prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
-                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
-                              />
-                            </td>
-                            <td className="px-2 py-1.5">
-                              <input
-                                type="number"
-                                step="1"
-                                min="1"
-                                value={t.size}
-                                onChange={(e) => setGhTiers((prev) =>
-                                  prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
-                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
-                              />
-                            </td>
-                            <td className="px-2 py-1.5">
-                              <input
-                                type="number"
-                                step="0.1"
-                                min="0.01"
-                                value={t.dca}
-                                placeholder={ghForm.dcaStepPercent}
-                                onChange={(e) => setGhTiers((prev) =>
-                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
-                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
-                              />
-                            </td>
-                            <td className="px-2 py-1.5">
-                              <input
-                                type="number"
-                                step="0.1"
-                                min="0.01"
-                                value={t.tp}
-                                placeholder={ghForm.tpStepPercent}
-                                onChange={(e) => setGhTiers((prev) =>
-                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
-                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
-                              />
-                            </td>
-                            <td className="px-2 py-1.5 text-right">
-                              {ghTiers.length > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => setGhTiers((prev) => prev.filter((_, idx) => idx !== i))}
-                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
-                                  title="Удалить ярус"
-                                >
-                                  ×
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setGhTiers((prev) => {
-                    const last = prev[prev.length - 1];
-                    const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
-                    const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
-                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
-                  })}
-                  className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
-                >
-                  + Добавить ярус
-                </button>
-                <p className="text-xs text-text-secondary mt-1.5">
-                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
-                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
-                </p>
-              </div>
-
               <p className="text-xs text-text-secondary italic">
-                Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой
-                на полный объём сетки × HedgeRatio × β. Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь
-                бот. После Done — Stop → Start чтобы начать новый цикл.
+                Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой.
+                Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь бот.
+                После Done — Stop → Start чтобы начать новый цикл.
               </p>
             </>
           ) : isHF ? (
