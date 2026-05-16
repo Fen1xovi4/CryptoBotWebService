@@ -42,6 +42,23 @@ public class GridHedgeHandler : IStrategyHandler
     private const int InterOrderDelayMs = 75;
     private const int PlacementCooldownMinutes = 5;
 
+    // After this many consecutive ArmGrid ticks without ANY successful placement, the handler
+    // assumes the grid leg is permanently refusing (Bybit Spot regulatory restriction, missing
+    // scope, invalid symbol, etc.) and rolls back the hedge so the user isn't left with a
+    // naked short on the exchange. 3 ticks ≈ 15 minutes given the 5-minute cooldown.
+    private const int MaxConsecutiveArmFailures = 3;
+
+    // Substrings in exchange error messages that indicate a permanent refusal — abort
+    // immediately on the first occurrence instead of waiting for the failure counter to fill.
+    private static readonly string[] FatalErrorSubstrings =
+    [
+        "regulatory restriction",
+        "regulatory restrictions",
+        "not available to you",
+        "API key permission",
+        "invalid api key",
+    ];
+
     public string StrategyType => StrategyTypes.GridHedge;
 
     private readonly AppDbContext _db;
@@ -280,6 +297,8 @@ public class GridHedgeHandler : IStrategyHandler
             $"(якорь={state.Anchor}, Range={config.RangePercent}%, step={config.DcaStepPercent}%, bet=${config.BetUsdt})");
 
         var placedThisTick = 0;
+        string? lastErrorMessage = null;
+
         foreach (var (offsetPct, price) in toPlace)
         {
             if (placedThisTick > 0) await Task.Delay(InterOrderDelayMs, ct);
@@ -298,6 +317,7 @@ public class GridHedgeHandler : IStrategyHandler
             catch (Exception ex)
             {
                 state.PlacementCooldownUntil = DateTime.UtcNow.AddMinutes(PlacementCooldownMinutes);
+                lastErrorMessage = ex.Message;
                 _logger.LogError(ex, "GridHedge: PlaceLimitBuy threw for {Symbol} @-{Pct}%", config.GridSymbol, offsetPct);
                 Log(strategy, "Error", $"Уровень -{offsetPct}% исключение (cooldown {PlacementCooldownMinutes}мин): {ex.Message}");
                 break;
@@ -319,6 +339,7 @@ public class GridHedgeHandler : IStrategyHandler
             else
             {
                 state.PlacementCooldownUntil = DateTime.UtcNow.AddMinutes(PlacementCooldownMinutes);
+                lastErrorMessage = result.ErrorMessage;
                 Log(strategy, "Warning",
                     $"Уровень -{offsetPct}% не выставлен (cooldown {PlacementCooldownMinutes}мин): {result.ErrorMessage}");
                 _logger.LogWarning("Strategy {Id}: GridHedge level -{Pct}% placement failed: {Error}",
@@ -327,12 +348,44 @@ public class GridHedgeHandler : IStrategyHandler
             }
         }
 
+        // ───────── Auto-rollback safety ─────────
+        // If this tick placed nothing, increment the consecutive-failure counter. When the
+        // exchange returned a "fatal" error (regulatory restriction / permission denied /
+        // similar) abort immediately on the first occurrence — otherwise let the counter run
+        // up to MaxConsecutiveArmFailures. In either case we transition to ExitingDown so the
+        // next tick force-closes the hedge — the user is never left with a naked short.
+        if (placedThisTick == 0 && toPlace.Count > 0)
+        {
+            state.GridArmingFailureCount++;
+            var isFatalError = !string.IsNullOrEmpty(lastErrorMessage)
+                && FatalErrorSubstrings.Any(s => lastErrorMessage!.Contains(s, StringComparison.OrdinalIgnoreCase));
+
+            if (isFatalError || state.GridArmingFailureCount >= MaxConsecutiveArmFailures)
+            {
+                Log(strategy, "Error",
+                    isFatalError
+                        ? $"🚨 Фатальная ошибка биржи при расстановке сетки: \"{lastErrorMessage}\". " +
+                          "Откатываю хедж и останавливаю бота."
+                        : $"🚨 Сетка не выставляется {state.GridArmingFailureCount} тика подряд. " +
+                          $"Откатываю хедж и останавливаю бота. Последняя ошибка: \"{lastErrorMessage}\".");
+                state.Phase = GridHedgePhase.ExitingDown;
+                state.PlacementCooldownUntil = null; // clear so ExitingDown runs immediately next tick
+                return;
+            }
+        }
+        else if (placedThisTick > 0)
+        {
+            // Any progress this tick clears the failure counter — partial-success is fine.
+            state.GridArmingFailureCount = 0;
+        }
+
         // Advance to Active only when every level we expected has a placed ID. Otherwise the
         // next tick will retry the remaining ones once the cooldown clears.
         var totalCovered = state.PendingBuys.Count + state.Batches.Count;
         if (totalCovered >= levels.Count)
         {
             state.Phase = GridHedgePhase.Active;
+            state.GridArmingFailureCount = 0;
             Log(strategy, "Info",
                 $"🟢 Сетка готова: {totalCovered}/{levels.Count} уровней. Phase=Active.");
         }
@@ -678,15 +731,25 @@ public class GridHedgeHandler : IStrategyHandler
         }
 
         // 4. Finalize cycle.
+        var wasRollback = state.GridArmingFailureCount > 0;
         state.CompletedCycles += 1;
         state.Phase = GridHedgePhase.Done;
         state.Anchor = 0;
         state.HedgeAnchor = 0;
+        state.GridArmingFailureCount = 0;
+
         Log(strategy, "Info",
             $"🏁 Цикл #{state.CompletedCycles} завершён. " +
             $"Grid PnL за цикл (накопленный): ${Math.Round(state.GridRealizedPnl, 2)}, " +
             $"Hedge PnL (накопленный): ${Math.Round(state.HedgeRealizedPnl, 2)}. " +
-            $"Чтобы запустить новый цикл — Stop → Start.");
+            (wasRollback ? "Бот остановлен из-за невозможности выставить сетку." : "Чтобы запустить новый цикл — Stop → Start."));
+
+        if (wasRollback)
+        {
+            // Rollback path — don't leave the bot in Running state spinning on Done; the user
+            // needs to fix whatever blocked the grid (API scope, region, etc.) before retrying.
+            strategy.Status = Core.Enums.StrategyStatus.Stopped;
+        }
     }
 
     // ────────────────────────── Helpers: grid math ──────────────────────────

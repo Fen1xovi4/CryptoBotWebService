@@ -79,4 +79,10 @@ public class GridHedgeState
 
     // On placement failure, throttle the next attempt to avoid hammering the exchange.
     public DateTime? PlacementCooldownUntil { get; set; }
+
+    // Counts consecutive GridArming ticks where placement failed. Reset to 0 when a tick
+    // successfully places at least one limit. When this hits the limit (see handler), the
+    // hedge is rolled back via a forced ExitingDown — prevents a naked hedge from sitting on
+    // the exchange when the grid leg refuses (e.g. Bybit Spot regulatory restriction).
+    public int GridArmingFailureCount { get; set; }
 }
