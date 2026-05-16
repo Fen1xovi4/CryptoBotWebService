@@ -241,9 +241,12 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             if (roundedQty < minQty)
                 return new OrderResultDto { Success = false, ErrorMessage = $"Qty {roundedQty} < min {minQty} for {symbol}" };
 
+            // reduceOnly must be propagated — TP/SL limits rely on it to safely close the existing
+            // position without flipping into the opposite side if the order outlives the position.
             var result = await _client.V5Api.Trading.PlaceOrderAsync(
                 Category.Linear, bybitSymbol, orderSide, NewOrderType.Limit, roundedQty,
-                price: roundedPrice, timeInForce: TimeInForce.GoodTillCanceled);
+                price: roundedPrice, timeInForce: TimeInForce.GoodTillCanceled,
+                reduceOnly: reduceOnly);
 
             return new OrderResultDto
             {

@@ -64,4 +64,7 @@ public class SmaDcaState
     // to the position rather than placed as a reduce-only limit, and the exchange may fail to
     // trigger it. Cleared when the price falls back behind the TP or the position closes.
     public DateTime? TpCrossedAt { get; set; }
+
+    // Last time ReconcileOrphanOrders ran (throttle — no need to poll open orders every 5s tick).
+    public DateTime? LastReconcileAt { get; set; }
 }
