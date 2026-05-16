@@ -3557,6 +3557,23 @@ function AddStrategyModal({
     [{ upTo: '10', size: '100', dca: '', tp: '' }],
   );
 
+  // GridHedge fields
+  const [ghForm, setGhForm] = useState({
+    mode: 1 as 1 | 2,
+    hedgeSymbol: '',
+    rangePercent: '10',
+    upperExitPercent: '2',
+    dcaStepPercent: '1',
+    tpStepPercent: '1',
+    hedgeRatio: '1.0',
+    beta: '1.0',
+    hedgeLeverage: '5',
+    gridLeverage: '1',
+  });
+  const [ghTiers, setGhTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>([
+    { upTo: '10', size: '100', dca: '', tp: '' },
+  ]);
+
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
     queryKey: ['symbols', accountId],
     queryFn: () => api.get(`/exchange/${accountId}/symbols`).then((r) => r.data),
@@ -3683,6 +3700,59 @@ function AddStrategyModal({
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
         useStaticRange: gfForm.useStaticRange,
+      });
+    } else if (strategyType === 'GridHedge') {
+      const tiers = ghTiers
+        .map((t) => {
+          const upToPercent = Number(t.upTo);
+          const sizeUsdt = Number(t.size);
+          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
+          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
+          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
+        })
+        .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
+        .sort((a, b) => a.upToPercent - b.upToPercent);
+      if (tiers.length === 0) {
+        setError('Добавьте хотя бы один ярус с upTo% > 0 и размером > 0');
+        return;
+      }
+      for (let i = 1; i < tiers.length; i++) {
+        if (tiers[i].upToPercent <= tiers[i - 1].upToPercent) {
+          setError('Ярусы должны идти со строго возрастающим upTo%');
+          return;
+        }
+      }
+      for (const t of tiers) {
+        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) { setError('Per-tier шаг DCA должен быть > 0 (или пусто)'); return; }
+        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) { setError('Per-tier шаг TP должен быть > 0 (или пусто)'); return; }
+      }
+      if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
+        setError('rangePercent и upperExitPercent должны быть > 0');
+        return;
+      }
+      if (ghForm.mode === 2 && !ghForm.hedgeSymbol.trim()) {
+        setError('Cross-Ticker режим требует hedgeSymbol (например BTCUSDT)');
+        return;
+      }
+      const tiersPayload = tiers.map((t) => ({
+        upToPercent: t.upToPercent,
+        sizeUsdt: t.sizeUsdt,
+        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
+      }));
+      configJson = JSON.stringify({
+        mode: ghForm.mode,
+        gridSymbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        hedgeSymbol: ghForm.mode === 2 ? ghForm.hedgeSymbol.replace(/\s+/g, '').toUpperCase() : '',
+        rangePercent: Number(ghForm.rangePercent),
+        upperExitPercent: Number(ghForm.upperExitPercent),
+        tiers: tiersPayload,
+        dcaStepPercent: Number(ghForm.dcaStepPercent),
+        tpStepPercent: Number(ghForm.tpStepPercent),
+        hedgeRatio: Number(ghForm.hedgeRatio),
+        beta: Number(ghForm.beta),
+        hedgeLeverage: Number(ghForm.hedgeLeverage),
+        gridLeverage: Number(ghForm.gridLeverage),
       });
     } else {
       configJson = JSON.stringify({
@@ -4254,6 +4324,240 @@ function AddStrategyModal({
                 → ожидание следующего бара → новый якорь. Стоп-лосса нет.
               </p>
             </>
+          ) : strategyType === 'GridHedge' ? (
+            <>
+              {/* Mode selector */}
+              <div>
+                <label className={labelCls}>Режим</label>
+                <select
+                  value={ghForm.mode}
+                  onChange={(e) => setGhForm({ ...ghForm, mode: Number(e.target.value) as 1 | 2 })}
+                  className={inputCls}
+                >
+                  <option value={1}>SameTicker — Spot grid + same-symbol futures short (Bybit-only)</option>
+                  <option value={2}>CrossTicker — Futures grid + correlated-ticker futures short</option>
+                </select>
+              </div>
+
+              {/* HedgeSymbol — only shown for CrossTicker */}
+              {ghForm.mode === 2 && (
+                <div>
+                  <label className={labelCls}>Тикер хеджа</label>
+                  <input
+                    type="text"
+                    value={ghForm.hedgeSymbol}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeSymbol: e.target.value })}
+                    placeholder="BTCUSDT"
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    Коррелированный тикер для шорт-хеджа (например BTCUSDT при гриде на ETHUSDT).
+                  </p>
+                </div>
+              )}
+
+              {/* Range + UpperExit */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Range вниз, %</label>
+                  <input type="number" step="0.5" min="0.1"
+                    value={ghForm.rangePercent}
+                    onChange={(e) => setGhForm({ ...ghForm, rangePercent: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">Стоп-лосс при цене ниже anchor × (1 − R%)</p>
+                </div>
+                <div>
+                  <label className={labelCls}>UpperExit вверх, %</label>
+                  <input type="number" step="0.5" min="0.1"
+                    value={ghForm.upperExitPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, upperExitPercent: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">TP всего бота при цене выше anchor × (1 + U%)</p>
+                </div>
+              </div>
+
+              {/* Hedge sizing */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>HedgeRatio</label>
+                  <input type="number" step="0.1" min="0" max="5"
+                    value={ghForm.hedgeRatio}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeRatio: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">0..5; SameTicker обычно 1.0</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Beta (β)</label>
+                  <input type="number" step="0.1" min="0.1" max="10"
+                    value={ghForm.beta}
+                    onChange={(e) => setGhForm({ ...ghForm, beta: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">Корреляция; CrossTicker — на сколько β хеджа отличается от грида</p>
+                </div>
+              </div>
+
+              {/* Leverages */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Плечо хеджа</label>
+                  <input type="number" step="1" min="1"
+                    value={ghForm.hedgeLeverage}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeLeverage: e.target.value })}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Плечо грида (CrossTicker)</label>
+                  <input type="number" step="1" min="1"
+                    value={ghForm.gridLeverage}
+                    disabled={ghForm.mode === 1}
+                    onChange={(e) => setGhForm({ ...ghForm, gridLeverage: e.target.value })}
+                    className={inputCls + (ghForm.mode === 1 ? ' opacity-40' : '')} />
+                  <p className="text-xs text-text-secondary mt-0.5">Игнорируется в SameTicker (грид на споте — без плеча)</p>
+                </div>
+              </div>
+
+              {/* Default DCA + TP steps */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.dcaStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, dcaStepPercent: e.target.value })}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.tpStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, tpStepPercent: e.target.value })}
+                    className={inputCls} />
+                </div>
+              </div>
+
+              {/* Tiers */}
+              <div>
+                <label className={labelCls}>Ярусы сетки</label>
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-bg-tertiary text-text-secondary">
+                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
+                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
+                        <th className="px-2 py-2 text-left font-medium">До %</th>
+                        <th className="px-2 py-2 text-left font-medium">$</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
+                        <th className="px-2 py-2 w-6" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ghTiers.map((t, i) => {
+                        const prevUp = i === 0 ? '0' : ghTiers[i - 1].upTo || '?';
+                        return (
+                          <tr key={i} className="border-t border-border/50">
+                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
+                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.5"
+                                min="0.1"
+                                value={t.upTo}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="1"
+                                min="1"
+                                value={t.size}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.dca}
+                                placeholder={ghForm.dcaStepPercent}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.tp}
+                                placeholder={ghForm.tpStepPercent}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5 text-right">
+                              {ghTiers.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setGhTiers((prev) => prev.filter((_, idx) => idx !== i))}
+                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
+                                  title="Удалить ярус"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGhTiers((prev) => {
+                    const last = prev[prev.length - 1];
+                    const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
+                    const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
+                  })}
+                  className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
+                >
+                  + Добавить ярус
+                </button>
+                <p className="text-xs text-text-secondary mt-1.5">
+                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
+                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
+                </p>
+              </div>
+
+              <p className="text-xs text-text-secondary italic">
+                ~{(() => {
+                  const fallback = Math.max(0.0001, Number(ghForm.dcaStepPercent));
+                  let total = 0;
+                  let prev = 0;
+                  for (const row of ghTiers) {
+                    const upTo = Number(row.upTo);
+                    if (!(upTo > 0)) continue;
+                    const tierStep = row.dca.trim() === '' ? fallback : Number(row.dca);
+                    if (tierStep > 0 && upTo > prev) total += Math.floor((upTo - prev) / tierStep);
+                    prev = upTo;
+                  }
+                  return total > 0 ? total : '?';
+                })()} DCA-уровней.
+                Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой
+                на полный объём сетки × HedgeRatio × β. Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь
+                бот. После Done — Stop → Start чтобы начать новый цикл.
+              </p>
+            </>
           ) : strategyType === 'HuntingFunding' ? (
             <>
               {/* Auto-rotate ticker */}
@@ -4562,6 +4866,7 @@ function EditStrategyModal({
   const isSD = strategy.type === 'SmaDca';
   const isFC = strategy.type === 'FundingClaim';
   const isGF = strategy.type === 'GridFloat';
+  const isGH = strategy.type === 'GridHedge';
 
   const [name, setName] = useState(strategy.name);
   const [symbol, setSymbol] = useState(cfg.symbol || 'BTCUSDT');
@@ -4659,6 +4964,37 @@ function EditStrategyModal({
       dca: '',
       tp: '',
     }];
+  });
+
+  // GridHedge form state — initialise from existing configJson
+  const [ghForm, setGhForm] = useState({
+    mode: (cfg.mode ?? 1) as 1 | 2,
+    hedgeSymbol: cfg.hedgeSymbol || '',
+    rangePercent: String(cfg.rangePercent ?? 10),
+    upperExitPercent: String(cfg.upperExitPercent ?? 2),
+    dcaStepPercent: String(cfg.dcaStepPercent ?? 1),
+    tpStepPercent: String(cfg.tpStepPercent ?? 1),
+    hedgeRatio: String(cfg.hedgeRatio ?? 1.0),
+    beta: String(cfg.beta ?? 1.0),
+    hedgeLeverage: String(cfg.hedgeLeverage ?? 5),
+    gridLeverage: String(cfg.gridLeverage ?? 1),
+  });
+  const [ghTiers, setGhTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(() => {
+    if (Array.isArray(cfg.tiers) && cfg.tiers.length > 0) {
+      const sorted = [...cfg.tiers]
+        .filter((t: { upToPercent: number; sizeUsdt: number }) =>
+          Number(t.upToPercent) > 0 && Number(t.sizeUsdt) > 0)
+        .sort((a: { upToPercent: number }, b: { upToPercent: number }) => a.upToPercent - b.upToPercent);
+      if (sorted.length > 0) {
+        return sorted.map((t: { upToPercent: number; sizeUsdt: number; dcaStepPercent?: number | null; tpStepPercent?: number | null }) => ({
+          upTo: String(t.upToPercent),
+          size: String(t.sizeUsdt),
+          dca: typeof t.dcaStepPercent === 'number' && t.dcaStepPercent > 0 ? String(t.dcaStepPercent) : '',
+          tp: typeof t.tpStepPercent === 'number' && t.tpStepPercent > 0 ? String(t.tpStepPercent) : '',
+        }));
+      }
+    }
+    return [{ upTo: '10', size: '100', dca: '', tp: '' }];
   });
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
@@ -4783,6 +5119,59 @@ function EditStrategyModal({
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
         useStaticRange: gfForm.useStaticRange,
+      });
+    } else if (isGH) {
+      const tiers = ghTiers
+        .map((t) => {
+          const upToPercent = Number(t.upTo);
+          const sizeUsdt = Number(t.size);
+          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
+          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
+          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
+        })
+        .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
+        .sort((a, b) => a.upToPercent - b.upToPercent);
+      if (tiers.length === 0) {
+        setError('Добавьте хотя бы один ярус с upTo% > 0 и размером > 0');
+        return;
+      }
+      for (let i = 1; i < tiers.length; i++) {
+        if (tiers[i].upToPercent <= tiers[i - 1].upToPercent) {
+          setError('Ярусы должны идти со строго возрастающим upTo%');
+          return;
+        }
+      }
+      for (const t of tiers) {
+        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) { setError('Per-tier шаг DCA должен быть > 0 (или пусто)'); return; }
+        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) { setError('Per-tier шаг TP должен быть > 0 (или пусто)'); return; }
+      }
+      if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
+        setError('rangePercent и upperExitPercent должны быть > 0');
+        return;
+      }
+      if (ghForm.mode === 2 && !ghForm.hedgeSymbol.trim()) {
+        setError('Cross-Ticker режим требует hedgeSymbol (например BTCUSDT)');
+        return;
+      }
+      const tiersPayload = tiers.map((t) => ({
+        upToPercent: t.upToPercent,
+        sizeUsdt: t.sizeUsdt,
+        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
+      }));
+      configJson = JSON.stringify({
+        mode: ghForm.mode,
+        gridSymbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        hedgeSymbol: ghForm.mode === 2 ? ghForm.hedgeSymbol.replace(/\s+/g, '').toUpperCase() : '',
+        rangePercent: Number(ghForm.rangePercent),
+        upperExitPercent: Number(ghForm.upperExitPercent),
+        tiers: tiersPayload,
+        dcaStepPercent: Number(ghForm.dcaStepPercent),
+        tpStepPercent: Number(ghForm.tpStepPercent),
+        hedgeRatio: Number(ghForm.hedgeRatio),
+        beta: Number(ghForm.beta),
+        hedgeLeverage: Number(ghForm.hedgeLeverage),
+        gridLeverage: Number(ghForm.gridLeverage),
       });
     } else {
       configJson = JSON.stringify({
@@ -5275,6 +5664,227 @@ function EditStrategyModal({
                   </p>
                 </div>
               </label>
+            </>
+          ) : isGH ? (
+            <>
+              {/* Mode selector */}
+              <div>
+                <label className={labelCls}>Режим</label>
+                <select
+                  value={ghForm.mode}
+                  onChange={(e) => setGhForm({ ...ghForm, mode: Number(e.target.value) as 1 | 2 })}
+                  className={inputCls}
+                >
+                  <option value={1}>SameTicker — Spot grid + same-symbol futures short (Bybit-only)</option>
+                  <option value={2}>CrossTicker — Futures grid + correlated-ticker futures short</option>
+                </select>
+              </div>
+
+              {/* HedgeSymbol — only for CrossTicker */}
+              {ghForm.mode === 2 && (
+                <div>
+                  <label className={labelCls}>Тикер хеджа</label>
+                  <input
+                    type="text"
+                    value={ghForm.hedgeSymbol}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeSymbol: e.target.value })}
+                    placeholder="BTCUSDT"
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    Коррелированный тикер для шорт-хеджа (например BTCUSDT при гриде на ETHUSDT).
+                  </p>
+                </div>
+              )}
+
+              {/* Range + UpperExit */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Range вниз, %</label>
+                  <input type="number" step="0.5" min="0.1"
+                    value={ghForm.rangePercent}
+                    onChange={(e) => setGhForm({ ...ghForm, rangePercent: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">Стоп-лосс при цене ниже anchor × (1 − R%)</p>
+                </div>
+                <div>
+                  <label className={labelCls}>UpperExit вверх, %</label>
+                  <input type="number" step="0.5" min="0.1"
+                    value={ghForm.upperExitPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, upperExitPercent: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">TP всего бота при цене выше anchor × (1 + U%)</p>
+                </div>
+              </div>
+
+              {/* Hedge sizing */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>HedgeRatio</label>
+                  <input type="number" step="0.1" min="0" max="5"
+                    value={ghForm.hedgeRatio}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeRatio: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">0..5; SameTicker обычно 1.0</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Beta (β)</label>
+                  <input type="number" step="0.1" min="0.1" max="10"
+                    value={ghForm.beta}
+                    onChange={(e) => setGhForm({ ...ghForm, beta: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">Корреляция; CrossTicker — на сколько β хеджа отличается от грида</p>
+                </div>
+              </div>
+
+              {/* Leverages */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Плечо хеджа</label>
+                  <input type="number" step="1" min="1"
+                    value={ghForm.hedgeLeverage}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeLeverage: e.target.value })}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Плечо грида (CrossTicker)</label>
+                  <input type="number" step="1" min="1"
+                    value={ghForm.gridLeverage}
+                    disabled={ghForm.mode === 1}
+                    onChange={(e) => setGhForm({ ...ghForm, gridLeverage: e.target.value })}
+                    className={inputCls + (ghForm.mode === 1 ? ' opacity-40' : '')} />
+                  <p className="text-xs text-text-secondary mt-0.5">Игнорируется в SameTicker (грид на споте — без плеча)</p>
+                </div>
+              </div>
+
+              {/* Default DCA + TP steps */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.dcaStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, dcaStepPercent: e.target.value })}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.tpStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, tpStepPercent: e.target.value })}
+                    className={inputCls} />
+                </div>
+              </div>
+
+              {/* Tiers */}
+              <div>
+                <label className={labelCls}>Ярусы сетки</label>
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-bg-tertiary text-text-secondary">
+                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
+                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
+                        <th className="px-2 py-2 text-left font-medium">До %</th>
+                        <th className="px-2 py-2 text-left font-medium">$</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
+                        <th className="px-2 py-2 w-6" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ghTiers.map((t, i) => {
+                        const prevUp = i === 0 ? '0' : ghTiers[i - 1].upTo || '?';
+                        return (
+                          <tr key={i} className="border-t border-border/50">
+                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
+                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.5"
+                                min="0.1"
+                                value={t.upTo}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="1"
+                                min="1"
+                                value={t.size}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.dca}
+                                placeholder={ghForm.dcaStepPercent}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.tp}
+                                placeholder={ghForm.tpStepPercent}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5 text-right">
+                              {ghTiers.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setGhTiers((prev) => prev.filter((_, idx) => idx !== i))}
+                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
+                                  title="Удалить ярус"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGhTiers((prev) => {
+                    const last = prev[prev.length - 1];
+                    const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
+                    const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
+                  })}
+                  className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
+                >
+                  + Добавить ярус
+                </button>
+                <p className="text-xs text-text-secondary mt-1.5">
+                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
+                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
+                </p>
+              </div>
+
+              <p className="text-xs text-text-secondary italic">
+                Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой
+                на полный объём сетки × HedgeRatio × β. Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь
+                бот. После Done — Stop → Start чтобы начать новый цикл.
+              </p>
             </>
           ) : isHF ? (
             <>
