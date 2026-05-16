@@ -24,6 +24,7 @@ import SupportPage from './pages/SupportPage';
 import SupportChatPage from './pages/SupportChatPage';
 import AdminSupportPage from './pages/AdminSupportPage';
 import AdminSupportChatPage from './pages/AdminSupportChatPage';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -78,7 +79,7 @@ export default function App() {
           <Route path="/accounts" element={<AccountsPage />} />
           <Route path="/accounts/:id" element={<AccountDetailPage />} />
           <Route path="/strategies" element={<StrategiesPage />} />
-          <Route path="/active-bots" element={<ActiveBotsPage />} />
+          <Route path="/active-bots" element={<ErrorBoundary label="ActiveBotsPage"><ActiveBotsPage /></ErrorBoundary>} />
           <Route path="/trades" element={<TradeHistoryPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/payment" element={<PaymentPage />} />
