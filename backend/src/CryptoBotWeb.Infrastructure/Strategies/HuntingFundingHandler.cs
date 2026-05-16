@@ -308,19 +308,66 @@ public class HuntingFundingHandler : IStrategyHandler
             state.AvgEntryPrice = state.TotalFilledUsdt / state.TotalFilledQuantity;
         }
 
+        // Early TP/SL: a funding spike can blow through our take-profit during the
+        // postFundingWait window itself (e.g. spike → revert in <60s). Without this
+        // check, the bot would sit in OrdersPlaced ignoring price, wake up at
+        // funding+60s, transition to InPosition with an avgEntry the price has
+        // already moved away from, and miss the exit. Check on every tick once we
+        // have at least one fill.
+        if (currentPrice.HasValue && state.AvgEntryPrice.HasValue && filledOrders.Count > 0)
+        {
+            decimal earlyAvgEntry = state.AvgEntryPrice.Value;
+            decimal earlyTp = state.Direction == "Long"
+                ? earlyAvgEntry * (1 + config.TakeProfitPercent / 100m)
+                : earlyAvgEntry * (1 - config.TakeProfitPercent / 100m);
+            decimal earlySl = state.Direction == "Long"
+                ? earlyAvgEntry * (1 - config.StopLossPercent / 100m)
+                : earlyAvgEntry * (1 + config.StopLossPercent / 100m);
+
+            bool tpHit = state.Direction == "Long"
+                ? currentPrice.Value >= earlyTp
+                : currentPrice.Value <= earlyTp;
+            bool slHit = state.Direction == "Long"
+                ? currentPrice.Value <= earlySl
+                : currentPrice.Value >= earlySl;
+
+            if (tpHit || slHit)
+            {
+                string earlyReason = tpHit ? "TakeProfit" : "StopLoss";
+                state.TakeProfit = earlyTp;
+                state.StopLoss = earlySl;
+                state.PositionOpenedAt ??= DateTime.UtcNow;
+
+                // Cancel remaining limit orders BEFORE closing so they can't keep
+                // filling into a position we're about to flatten.
+                if (openOrders.Count > 0)
+                {
+                    await exchange.CancelAllOrdersAsync(config.Symbol);
+                    Log(strategy, "Info",
+                        $"Early {earlyReason}: cancelled {openOrders.Count} remaining limit orders");
+                }
+
+                Log(strategy, "Info",
+                    $"Early {earlyReason} during OrdersPlaced: price={Math.Round(currentPrice.Value, 6)} " +
+                    $"vs {(tpHit ? "TP" : "SL")}={Math.Round(tpHit ? earlyTp : earlySl, 6)}, " +
+                    $"avgEntry={Math.Round(earlyAvgEntry, 6)} (skipped postFundingWait)");
+
+                await ClosePosition(strategy, config, state, exchange, currentPrice.Value, earlyReason, ct);
+                return;
+            }
+        }
+
         // Transition to InPosition early when all levels are filled — there are no
         // more fills to wait for, and keeping the bot in OrdersPlaced just hides the
         // real position from the UI (no PnL, no close button).
         bool allFilled = state.PlacedOrders.Count > 0 && state.PlacedOrders.All(o => o.IsFilled);
 
-        // Post-funding wait varies by exchange. BingX blocks order placement in the
-        // last ~60s before funding (settlement window), so fills can land late after
-        // settlement — wait the full minute. Bybit/Bitget/Dzengi have no such window:
-        // orders fill instantly when price hits the limit, so no extra wait after
-        // funding is needed.
-        var postFundingWait = strategy.Account.ExchangeType == ExchangeType.BingX
-            ? TimeSpan.FromSeconds(60)
-            : TimeSpan.Zero;
+        // Post-funding wait: give the funding spike time to push price through the
+        // outer levels. Spikes typically persist for several seconds AFTER settlement,
+        // and limit orders sitting at deeper offsets only fill if the wick reaches
+        // them. Cancelling at funding+0s (previous Bybit behaviour) systematically
+        // missed late fills.
+        var postFundingWait = TimeSpan.FromSeconds(60);
         bool postFundingReady = state.NextFundingTime.HasValue &&
                                 DateTime.UtcNow > state.NextFundingTime.Value.Add(postFundingWait);
 
@@ -334,29 +381,53 @@ public class HuntingFundingHandler : IStrategyHandler
             Log(strategy, "Info", $"Cancelled {openOrders.Count} remaining orders (post-funding cleanup)");
         }
 
-        if (filledOrders.Count == 0)
+        // Race-window guard: an order can fill in the gap between our GetOpenOrders
+        // read and CancelAllOrders, leaving a real position on the exchange that our
+        // tracking missed. ALWAYS verify position before declaring "no fills" —
+        // otherwise the bot drops to Cooldown with an orphan position the UI can't see.
+        var side = state.Direction ?? "Long";
+        var exchangePos = await exchange.GetPositionAsync(config.Symbol, side);
+        bool hasExchangePosition = exchangePos != null && exchangePos.Quantity > 0;
+
+        if (!hasExchangePosition)
         {
-            // No fills at all — go to cooldown
-            Log(strategy, "Warning", "No fills after funding+60s timeout");
+            if (filledOrders.Count > 0)
+            {
+                // Tracked fills but no exchange position — likely manually closed or
+                // detection was wrong (e.g. order cancelled externally counted as filled).
+                Log(strategy, "Warning",
+                    $"Tracked {filledOrders.Count} fills but no position on exchange — going to Cooldown");
+            }
+            else
+            {
+                Log(strategy, "Warning", "No fills after funding+postWait timeout (verified — no position on exchange)");
+            }
             state.Phase = HuntingFundingPhase.Cooldown;
             Log(strategy, "Info", "Phase → Cooldown (no fills timeout)");
             return;
         }
 
-        // Verify actual position on exchange
-        var side = state.Direction ?? "Long";
-        var exchangePos = await exchange.GetPositionAsync(config.Symbol, side);
+        // Position exists on exchange — use it as source of truth (covers the race
+        // case where tracking shows 0 fills but exchange actually filled an order
+        // before our cancel landed).
+        state.TotalFilledQuantity = exchangePos!.Quantity;
+        state.AvgEntryPrice = exchangePos.EntryPrice;
+        state.TotalFilledUsdt = exchangePos.Quantity * exchangePos.EntryPrice;
 
-        if (exchangePos != null && exchangePos.Quantity > 0)
+        Log(strategy, "Info",
+            $"Exchange position verified: qty={Math.Round(exchangePos.Quantity, 6)}, avgEntry={Math.Round(exchangePos.EntryPrice, 6)} " +
+            $"(tracked: {filledOrders.Count} fills, qty={Math.Round(filledOrders.Sum(o => o.Quantity), 6)})");
+
+        // Record an entry trade for the orphan-fill case so the UI has at least
+        // one entry to display PnL against.
+        if (filledOrders.Count == 0)
         {
-            // Use real exchange data as source of truth
-            state.TotalFilledQuantity = exchangePos.Quantity;
-            state.AvgEntryPrice = exchangePos.EntryPrice;
-            state.TotalFilledUsdt = exchangePos.Quantity * exchangePos.EntryPrice;
-
-            Log(strategy, "Info",
-                $"Exchange position verified: qty={Math.Round(exchangePos.Quantity, 6)}, avgEntry={Math.Round(exchangePos.EntryPrice, 6)} " +
-                $"(tracked: {filledOrders.Count} fills, qty={Math.Round(filledOrders.Sum(o => o.Quantity), 6)})");
+            var orphanSide = state.Direction == "Long" ? "Buy" : "Sell";
+            RecordTrade(strategy, config.Symbol, orphanSide,
+                exchangePos.Quantity, exchangePos.EntryPrice, null);
+            Log(strategy, "Warning",
+                $"Recorded orphan entry: {orphanSide} qty={Math.Round(exchangePos.Quantity, 6)} " +
+                $"at {Math.Round(exchangePos.EntryPrice, 6)} (filled during cancel race window)");
         }
 
         var avgEntry = state.AvgEntryPrice!.Value;
