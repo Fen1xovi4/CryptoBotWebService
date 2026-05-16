@@ -26,7 +26,7 @@ public class ExchangeServiceFactory : IExchangeServiceFactory
 
         return account.ExchangeType switch
         {
-            ExchangeType.Bybit => new BybitExchangeService(apiKey, apiSecret, proxy),
+            ExchangeType.Bybit => new BybitExchangeService(apiKey, apiSecret, proxy, _bybitBrokerId),
             ExchangeType.Bitget => new BitgetExchangeService(
                 apiKey, apiSecret,
                 account.PassphraseEncrypted != null ? _encryption.Decrypt(account.PassphraseEncrypted) : null,
@@ -34,6 +34,20 @@ public class ExchangeServiceFactory : IExchangeServiceFactory
             ExchangeType.BingX => new BingXExchangeService(apiKey, apiSecret, proxy),
             ExchangeType.Dzengi => new DzengiExchangeService(apiKey, apiSecret, account.DzengiAccountId, proxy),
             _ => throw new ArgumentException($"Unsupported exchange type: {account.ExchangeType}")
+        };
+    }
+
+    public ISpotExchangeService CreateSpot(ExchangeAccount account)
+    {
+        var apiKey = _encryption.Decrypt(account.ApiKeyEncrypted);
+        var apiSecret = _encryption.Decrypt(account.ApiSecretEncrypted);
+        var proxy = BuildProxy(account.Proxy);
+
+        return account.ExchangeType switch
+        {
+            ExchangeType.Bybit => new BybitSpotExchangeService(apiKey, apiSecret, proxy, _bybitBrokerId),
+            _ => throw new NotSupportedException(
+                $"Spot trading is not implemented for {account.ExchangeType}. V1 ships Bybit-only spot.")
         };
     }
 

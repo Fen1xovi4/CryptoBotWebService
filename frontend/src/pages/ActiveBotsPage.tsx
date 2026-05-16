@@ -395,6 +395,7 @@ export default function ActiveBotsPage() {
             <option value="SmaDca">SMA DCA</option>
             <option value="FundingClaim">FundingClaim</option>
             <option value="GridFloat">Grid Float</option>
+            <option value="GridHedge">Grid Hedge</option>
           </select>
         </div>
 
@@ -573,6 +574,13 @@ export default function ActiveBotsPage() {
             <div className="h-6 w-px bg-border" />
             <p className="text-sm text-text-secondary italic">
               Размер батча, диапазон, шаги DCA/TP, плечо и режим диапазона задаются в каждом боте.
+            </p>
+          </>
+        ) : activeWorkspace?.strategyType === 'GridHedge' ? (
+          <>
+            <div className="h-6 w-px bg-border" />
+            <p className="text-sm text-text-secondary italic">
+              Режим (Spot+Futures vs Cross-Ticker), диапазон, шаги DCA/TP, размер хеджа (ratio × β) и плечи задаются в каждом боте.
             </p>
           </>
         ) : (
@@ -863,6 +871,27 @@ export default function ActiveBotsPage() {
                   onResume={() => resumeMutation.mutate(s.id)}
                   onUpdateTiers={(tiers) => updateGridFloatTiersMutation.mutate({ id: s.id, tiers })}
                   updateTiersPending={updateGridFloatTiersMutation.isPending}
+                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
+                  onEdit={() => setEditingStrategy(s)}
+                  onLogs={() => setLogStrategy(s)}
+                  onClosePosition={() => closePositionMutation.mutate(s.id)}
+                  closePositionPending={closePositionMutation.isPending}
+                  telegramBots={telegramBots}
+                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                />
+              );
+            }
+
+            if (s.type === 'GridHedge') {
+              return (
+                <GridHedgeCard
+                  key={s.id}
+                  s={s}
+                  cfg={cfg}
+                  state={state}
+                  isRunning={isRunning}
+                  onStart={() => startMutation.mutate(s.id)}
+                  onStop={() => stopMutation.mutate(s.id)}
                   onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
                   onEdit={() => setEditingStrategy(s)}
                   onLogs={() => setLogStrategy(s)}
@@ -2384,6 +2413,10 @@ function SmaDcaCard({
 interface GridFloatTier {
   upToPercent: number;
   sizeUsdt: number;
+  // Optional per-tier overrides. When null/undefined, the bot uses the global
+  // dcaStepPercent / tpStepPercent from the root config.
+  dcaStepPercent?: number | null;
+  tpStepPercent?: number | null;
 }
 
 interface GridFloatCfg {
@@ -2410,7 +2443,17 @@ function normalizeGridFloatCfg(raw: Partial<GridFloatCfg> & Record<string, unkno
     .filter((t) => t && typeof t === 'object'
       && typeof (t as GridFloatTier).upToPercent === 'number' && (t as GridFloatTier).upToPercent > 0
       && typeof (t as GridFloatTier).sizeUsdt === 'number' && (t as GridFloatTier).sizeUsdt > 0)
-    .map((t) => ({ upToPercent: (t as GridFloatTier).upToPercent, sizeUsdt: (t as GridFloatTier).sizeUsdt }));
+    .map((t) => {
+      const tier = t as GridFloatTier;
+      return {
+        upToPercent: tier.upToPercent,
+        sizeUsdt: tier.sizeUsdt,
+        dcaStepPercent: typeof tier.dcaStepPercent === 'number' && tier.dcaStepPercent > 0
+          ? tier.dcaStepPercent : null,
+        tpStepPercent: typeof tier.tpStepPercent === 'number' && tier.tpStepPercent > 0
+          ? tier.tpStepPercent : null,
+      };
+    });
 
   if (tiers.length === 0
     && typeof raw.baseSizeUsdt === 'number' && raw.baseSizeUsdt > 0
@@ -2506,38 +2549,84 @@ function GridFloatCard({
   const maxRangePct = tiers.length > 0 ? tiers[tiers.length - 1].upToPercent : 0;
   const anchorSize = tiers.length > 0 ? tiers[0].sizeUsdt : 0;
 
-  // Inline Tiers editor — visible only when paused. Each tier row has its own upToPercent +
-  // sizeUsdt input. Add/remove tier buttons mutate the list locally; "Apply" sends the full
-  // sorted list to the API.
-  const [tierDraft, setTierDraft] = useState<Array<{ upTo: string; size: string }>>([]);
+  // Inline Tiers editor — visible only when paused. Each tier row has its own upToPercent,
+  // sizeUsdt, and optional per-tier dcaStep / tpStep overrides (blank = use global default).
+  // Add/remove tier buttons mutate the list locally; "Apply" sends the full sorted list to
+  // the API.
+  type TierDraftRow = { upTo: string; size: string; dca: string; tp: string };
+  const [tierDraft, setTierDraft] = useState<TierDraftRow[]>([]);
   // Build a stable signature of the persisted tiers so the effect only re-syncs the draft
   // when the actual tier values change (not on every refetch's new object identity).
   const persistedSig = useMemo(
-    () => tiers.map((t) => `${t.upToPercent}:${t.sizeUsdt}`).join('|'),
+    () => tiers.map((t) => `${t.upToPercent}:${t.sizeUsdt}:${t.dcaStepPercent ?? ''}:${t.tpStepPercent ?? ''}`).join('|'),
     [tiers],
   );
   useEffect(() => {
     if (isPaused) {
-      setTierDraft(tiers.map((t) => ({ upTo: String(t.upToPercent), size: String(t.sizeUsdt) })));
+      setTierDraft(tiers.map((t) => ({
+        upTo: String(t.upToPercent),
+        size: String(t.sizeUsdt),
+        dca: t.dcaStepPercent != null && t.dcaStepPercent > 0 ? String(t.dcaStepPercent) : '',
+        tp: t.tpStepPercent != null && t.tpStepPercent > 0 ? String(t.tpStepPercent) : '',
+      })));
     }
   }, [isPaused, persistedSig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const parsedDraft = tierDraft.map((t) => ({
     upToPercent: parseFloat(t.upTo),
     sizeUsdt: parseFloat(t.size),
+    dcaStepPercent: t.dca.trim() === '' ? null : parseFloat(t.dca),
+    tpStepPercent: t.tp.trim() === '' ? null : parseFloat(t.tp),
   }));
+  // Each tier with an override must parse to a positive number. Blank → null is valid (uses global).
+  const overridesValid = parsedDraft.every((t) =>
+    (t.dcaStepPercent === null || (!isNaN(t.dcaStepPercent) && t.dcaStepPercent > 0))
+    && (t.tpStepPercent === null || (!isNaN(t.tpStepPercent) && t.tpStepPercent > 0)));
+  const effectiveDca = (t: { dcaStepPercent: number | null }) =>
+    t.dcaStepPercent ?? normalizedCfg?.dcaStepPercent ?? 0;
   const draftValid = parsedDraft.length > 0
     && parsedDraft.every((t) => !isNaN(t.upToPercent) && t.upToPercent > 0 && !isNaN(t.sizeUsdt) && t.sizeUsdt > 0)
     && normalizedCfg != null
-    && parsedDraft.every((t) => t.upToPercent >= normalizedCfg.dcaStepPercent)
+    && overridesValid
+    // Outermost tier must accommodate at least one DCA at its effective step.
+    && (() => {
+      const outer = parsedDraft[parsedDraft.length - 1];
+      const prevUp = parsedDraft.length > 1 ? parsedDraft[parsedDraft.length - 2].upToPercent : 0;
+      return outer.upToPercent - prevUp >= effectiveDca(outer);
+    })()
     && parsedDraft.every((t, i, a) => i === 0 || t.upToPercent > a[i - 1].upToPercent);
-  const draftChanged = draftValid
-    && tierDraft.map((t) => `${t.upTo}:${t.size}`).join('|') !== persistedSig;
+  // Send each tier's payload — omit null overrides so the backend reads the global default.
+  const payloadDraft = parsedDraft.map((t) => ({
+    upToPercent: t.upToPercent,
+    sizeUsdt: t.sizeUsdt,
+    ...(t.dcaStepPercent != null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+    ...(t.tpStepPercent != null ? { tpStepPercent: t.tpStepPercent } : {}),
+  }));
+  const draftSig = tierDraft.map((t) => `${t.upTo}:${t.size}:${t.dca}:${t.tp}`).join('|');
+  const draftChanged = draftValid && draftSig !== persistedSig;
+  // Per-tier walk preview — matches GridFloatHandler.ComputeDcaLevels exactly.
+  const countSlots = (parsed: typeof parsedDraft, fallbackStep: number) => {
+    let total = 0;
+    let prev = 0;
+    for (const t of parsed) {
+      const step = t.dcaStepPercent ?? fallbackStep;
+      if (step > 0) total += Math.floor((t.upToPercent - prev) / step);
+      prev = t.upToPercent;
+    }
+    return total;
+  };
   const previewSlots = draftValid && normalizedCfg
-    ? Math.floor(parsedDraft[parsedDraft.length - 1].upToPercent / normalizedCfg.dcaStepPercent)
+    ? countSlots(parsedDraft, normalizedCfg.dcaStepPercent)
     : 0;
-  const currentSlots = normalizedCfg && maxRangePct > 0
-    ? Math.floor(maxRangePct / normalizedCfg.dcaStepPercent)
+  const currentSlots = normalizedCfg
+    ? countSlots(
+        tiers.map((t) => ({
+          upToPercent: t.upToPercent,
+          sizeUsdt: t.sizeUsdt,
+          dcaStepPercent: t.dcaStepPercent ?? null,
+          tpStepPercent: t.tpStepPercent ?? null,
+        })),
+        normalizedCfg.dcaStepPercent)
     : 0;
 
   const addTierRow = () => {
@@ -2545,11 +2634,11 @@ function GridFloatCard({
       const last = prev[prev.length - 1];
       const nextUpTo = last && parseFloat(last.upTo) > 0 ? parseFloat(last.upTo) * 2 : 10;
       const nextSize = last && parseFloat(last.size) > 0 ? parseFloat(last.size) * 2 : 100;
-      return [...prev, { upTo: String(nextUpTo), size: String(nextSize) }];
+      return [...prev, { upTo: String(nextUpTo), size: String(nextSize), dca: '', tp: '' }];
     });
   };
   const removeTierRow = (i: number) => setTierDraft((prev) => prev.filter((_, idx) => idx !== i));
-  const updateTierRow = (i: number, field: 'upTo' | 'size', value: string) =>
+  const updateTierRow = (i: number, field: keyof TierDraftRow, value: string) =>
     setTierDraft((prev) => prev.map((t, idx) => idx === i ? { ...t, [field]: value } : t));
 
   // Mark-to-market unrealized PnL — uses state.lastPrice (refreshed by handler each tick).
@@ -2610,9 +2699,18 @@ function GridFloatCard({
           ) : (
             tiers.map((t, i) => {
               const prevUp = i === 0 ? 0 : tiers[i - 1].upToPercent;
+              const dcaOverride = typeof t.dcaStepPercent === 'number' && t.dcaStepPercent > 0;
+              const tpOverride = typeof t.tpStepPercent === 'number' && t.tpStepPercent > 0;
+              const effDca = dcaOverride ? t.dcaStepPercent : normalizedCfg.dcaStepPercent;
+              const effTp = tpOverride ? t.tpStepPercent : normalizedCfg.tpStepPercent;
               return (
                 <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300">
                   T{i + 1}: {prevUp}%–{t.upToPercent}% · ${t.sizeUsdt}
+                  {(dcaOverride || tpOverride) && (
+                    <span className="ml-1 text-indigo-200/80">
+                      ·dca{effDca}%·tp{effTp}%
+                    </span>
+                  )}
                 </span>
               );
             })
@@ -2699,7 +2797,7 @@ function GridFloatCard({
             <div className="text-[10px] font-medium text-accent-yellow mb-1.5">
               Расширить сетку (ярусы)
             </div>
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               {tierDraft.map((t, i) => {
                 const prevUp = i === 0 ? 0 : parseFloat(tierDraft[i - 1].upTo);
                 return (
@@ -2709,12 +2807,12 @@ function GridFloatCard({
                     <input
                       type="number"
                       step="0.5"
-                      min={normalizedCfg.dcaStepPercent}
+                      min="0.1"
                       value={t.upTo}
                       onChange={(e) => updateTierRow(i, 'upTo', e.target.value)}
                       className="w-14 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary"
                     />
-                    <span className="text-[10px] text-text-secondary">%, ставка $</span>
+                    <span className="text-[10px] text-text-secondary">%, $</span>
                     <input
                       type="number"
                       step="1"
@@ -2723,6 +2821,27 @@ function GridFloatCard({
                       onChange={(e) => updateTierRow(i, 'size', e.target.value)}
                       className="w-16 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary"
                     />
+                    <span className="text-[10px] text-text-secondary">dca</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0.01"
+                      value={t.dca}
+                      placeholder={String(normalizedCfg.dcaStepPercent)}
+                      onChange={(e) => updateTierRow(i, 'dca', e.target.value)}
+                      className="w-12 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary placeholder:text-text-secondary/40"
+                    />
+                    <span className="text-[10px] text-text-secondary">% tp</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0.01"
+                      value={t.tp}
+                      placeholder={String(normalizedCfg.tpStepPercent)}
+                      onChange={(e) => updateTierRow(i, 'tp', e.target.value)}
+                      className="w-12 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary placeholder:text-text-secondary/40"
+                    />
+                    <span className="text-[10px] text-text-secondary">%</span>
                     {tierDraft.length > 1 && (
                       <button
                         onClick={() => removeTierRow(i)}
@@ -2746,10 +2865,10 @@ function GridFloatCard({
               <span className="text-[10px] text-text-secondary">
                 {draftValid
                   ? <>будет <span className="text-text-primary font-medium">{previewSlots}</span> уровней (сейчас {currentSlots})</>
-                  : <span className="text-accent-red">upTo должен быть ≥ step ({normalizedCfg.dcaStepPercent}%) и возрастать</span>}
+                  : <span className="text-accent-red">upTo возрастает, ширина внешнего тира ≥ его шага DCA, шаги &gt; 0</span>}
               </span>
               <button
-                onClick={() => { if (draftChanged) onUpdateTiers(parsedDraft); }}
+                onClick={() => { if (draftChanged) onUpdateTiers(payloadDraft as GridFloatTier[]); }}
                 disabled={!draftChanged || updateTiersPending}
                 className="ml-auto px-2 py-1 text-[10px] font-medium bg-accent-yellow/15 text-accent-yellow rounded-md hover:bg-accent-yellow/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
               >
@@ -2757,7 +2876,7 @@ function GridFloatCard({
               </button>
             </div>
             <div className="text-[10px] text-text-secondary/70 mt-1.5 leading-tight">
-              После «Применить» нажми ▶ Возобновить — HealMissingDcas поставит лимиты на новые свободные уровни с размером своего яруса. Уже стоящие лимитки не пересчитываются.
+              После «Применить» нажми ▶ Возобновить — HealMissingDcas поставит лимиты на новые свободные уровни с размером своего яруса. Уже стоящие лимитки не пересчитываются. Пустые dca/tp = глобальный шаг ({normalizedCfg.dcaStepPercent}% / {normalizedCfg.tpStepPercent}%).
             </div>
           </div>
         </>
@@ -2901,6 +3020,421 @@ function GridFloatCard({
   );
 }
 
+/* ── Grid Hedge Card ─────────────────────────────────────── */
+
+interface GridHedgeCfg {
+  mode: 1 | 2;
+  gridSymbol: string;
+  hedgeSymbol: string;
+  rangePercent: number;
+  upperExitPercent: number;
+  tiers: GridFloatTier[];
+  dcaStepPercent: number;
+  tpStepPercent: number;
+  hedgeRatio: number;
+  beta: number;
+  hedgeLeverage: number;
+  gridLeverage: number;
+}
+
+interface GridHedgeBatchData {
+  buyOrderId: string;
+  tpOrderId: string | null;
+  levelPercent: number;
+  filledPrice: number;
+  filledQty: number;
+  tpPrice: number;
+  closed: boolean;
+  realizedPnl: number;
+  filledAt: string;
+}
+
+interface GridHedgePendingBuyData {
+  orderId: string;
+  price: number;
+  qty: number;
+  levelPercent: number;
+}
+
+// phase: 0=NotStarted, 1=HedgeOpening, 2=GridArming, 3=Active,
+//        4=ExitingUp, 5=ExitingDown, 6=Done
+// Backend serializes this enum as a number (not a string).
+interface GridHedgeStateData {
+  phase: number;
+  anchor: number;
+  hedgeAnchor: number;
+  hedgeQty: number;
+  hedgeAvgEntry: number;
+  hedgeOpenOrderId: string | null;
+  batches: GridHedgeBatchData[];
+  pendingBuys: GridHedgePendingBuyData[];
+  gridRealizedPnl: number;
+  hedgeRealizedPnl: number;
+  completedCycles: number;
+  lastPrice: number | null;
+  placementCooldownUntil: string | null;
+}
+
+const GRID_HEDGE_PHASE_LABELS: Record<number, string> = {
+  0: 'NotStarted',
+  1: 'HedgeOpening',
+  2: 'GridArming',
+  3: 'Active',
+  4: 'ExitingUp',
+  5: 'ExitingDown',
+  6: 'Done',
+};
+
+function gridHedgePhaseColor(phase: number): string {
+  if (phase === 3) return 'bg-accent-green/15 text-accent-green';
+  if (phase === 4) return 'bg-accent-blue/15 text-accent-blue';
+  if (phase === 5) return 'bg-accent-red/15 text-accent-red';
+  if (phase === 6) return 'bg-bg-tertiary text-text-secondary';
+  return 'bg-accent-yellow/15 text-accent-yellow';
+}
+
+function GridHedgeCard({
+  s,
+  cfg,
+  state,
+  isRunning,
+  onStart,
+  onStop,
+  onDelete,
+  onEdit,
+  onLogs,
+  onClosePosition,
+  closePositionPending,
+  telegramBots,
+  onSetTelegramBot,
+}: {
+  s: Strategy;
+  cfg: GridHedgeCfg | null;
+  state: GridHedgeStateData | null;
+  isRunning: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onLogs: () => void;
+  onClosePosition: () => void;
+  closePositionPending: boolean;
+  telegramBots: TelegramBotOption[] | undefined;
+  onSetTelegramBot: (botId: string | null) => void;
+}) {
+  const phase = state?.phase ?? 0;
+  const batches = state?.batches ?? [];
+  const pendingBuys = state?.pendingBuys ?? [];
+  const openBatches = batches.filter((b) => !b.closed);
+  const hasPosition = openBatches.length > 0 || (state?.hedgeQty ?? 0) > 0;
+
+  // Border accent based on phase / running state
+  const borderAccent = !isRunning
+    ? 'border-l-border'
+    : phase === 3
+      ? 'border-l-accent-green'
+      : phase === 4
+        ? 'border-l-accent-blue'
+        : phase === 5
+          ? 'border-l-accent-red'
+          : phase === 6
+            ? 'border-l-border'
+            : 'border-l-accent-yellow';
+
+  // Price-in-band visualisation
+  const anchor = state?.anchor ?? 0;
+  const lastPrice = state?.lastPrice ?? null;
+  const rangePercent = cfg?.rangePercent ?? 0;
+  const upperExitPercent = cfg?.upperExitPercent ?? 0;
+  let bandPct: number | null = null;
+  if (anchor > 0 && lastPrice != null && (rangePercent + upperExitPercent) > 0) {
+    const lowerBound = anchor * (1 - rangePercent / 100);
+    const upperBound = anchor * (1 + upperExitPercent / 100);
+    const total = upperBound - lowerBound;
+    bandPct = total > 0 ? Math.max(0, Math.min(100, ((lastPrice - lowerBound) / total) * 100)) : null;
+  }
+
+  const modeLabel = cfg
+    ? cfg.mode === 1
+      ? 'Spot+Futures'
+      : `Cross: ${cfg.gridSymbol?.replace(/USDT$/i, '')}/${cfg.hedgeSymbol?.replace(/USDT$/i, '')}`
+    : null;
+
+  return (
+    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
+      {/* Header */}
+      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-mono font-semibold text-text-primary truncate">
+              {cfg?.gridSymbol || '—'}
+            </span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400">
+              GH
+            </span>
+            {modeLabel && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+                {modeLabel}
+              </span>
+            )}
+            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${gridHedgePhaseColor(phase)}`}>
+              {GRID_HEDGE_PHASE_LABELS[phase] ?? String(phase)}
+            </span>
+          </div>
+          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
+            {s.name} · {s.accountName}
+          </div>
+        </div>
+        <StatusBadge status={s.status} />
+      </div>
+
+      {/* Config chips */}
+      {cfg && (
+        <div className="px-4 pb-2 flex flex-wrap gap-1">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            -{cfg.rangePercent}% ↔ +{cfg.upperExitPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            dca {cfg.dcaStepPercent}% tp {cfg.tpStepPercent}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            ratio {cfg.hedgeRatio} β {cfg.beta}
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            hedge ×{cfg.hedgeLeverage}
+          </span>
+          {cfg.mode === 2 && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+              grid ×{cfg.gridLeverage}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Tier table */}
+      {cfg && cfg.tiers.length > 0 && (
+        <div className="px-4 pb-2">
+          <div className="flex flex-wrap gap-1">
+            {cfg.tiers.map((t, i) => {
+              const prevUp = i === 0 ? 0 : cfg.tiers[i - 1].upToPercent;
+              return (
+                <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-300">
+                  T{i + 1}: {prevUp}%–{t.upToPercent}% · ${t.sizeUsdt}
+                  {(t.dcaStepPercent != null || t.tpStepPercent != null) && (
+                    <span className="ml-1 text-violet-200/70">
+                      ·dca{t.dcaStepPercent ?? cfg.dcaStepPercent}%·tp{t.tpStepPercent ?? cfg.tpStepPercent}%
+                    </span>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* State block */}
+      <div className="px-4 py-2.5 min-h-[52px]">
+        {!isRunning ? (
+          <span className="text-text-secondary text-xs">Остановлен</span>
+        ) : state == null ? (
+          <span className="text-text-secondary text-xs">Ожидание состояния...</span>
+        ) : (
+          <div className="w-full space-y-1.5">
+            {/* Anchor + band */}
+            {anchor > 0 && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] text-text-secondary">
+                  Якорь: <span className="text-text-primary font-mono">{anchor}</span>
+                </span>
+                <span className="text-[10px] text-text-secondary">
+                  Диапазон: −{cfg?.rangePercent}% ↔ +{cfg?.upperExitPercent}%
+                </span>
+                {lastPrice != null && (
+                  <span className="text-[10px] text-text-secondary">
+                    Цена: <span className="text-text-primary font-mono">{lastPrice}</span>
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Price band visualisation */}
+            {bandPct != null && (
+              <div className="relative h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-accent-blue rounded-full"
+                  style={{ left: `${bandPct}%`, transform: 'translateX(-50%)' }}
+                />
+                <div
+                  className="absolute top-0 bottom-0 w-px bg-text-secondary/40"
+                  style={{ left: `${(cfg!.rangePercent / (cfg!.rangePercent + cfg!.upperExitPercent)) * 100}%` }}
+                />
+              </div>
+            )}
+
+            {/* Hedge row */}
+            <div className="text-[10px] text-text-secondary">
+              {state.hedgeQty > 0
+                ? (
+                  <span>
+                    HEDGE SHORT {cfg?.hedgeSymbol || cfg?.gridSymbol}:{' '}
+                    <span className="text-accent-red font-mono">{state.hedgeQty}</span>
+                    {' @ '}
+                    <span className="text-text-primary font-mono">{state.hedgeAvgEntry}</span>
+                  </span>
+                )
+                : 'Hedge: —'
+              }
+            </div>
+
+            {/* Grid summary */}
+            <div className="text-[10px] text-text-secondary flex items-center gap-2 flex-wrap">
+              <span>
+                Лимитов: <span className="text-text-primary font-medium">{pendingBuys.length}</span>
+              </span>
+              <span>
+                Открытых батчей: <span className="text-text-primary font-medium">{openBatches.length}</span>
+              </span>
+              <span>
+                Циклов: <span className="text-text-primary font-medium">{state.completedCycles}</span>
+              </span>
+            </div>
+
+            {/* PnL */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className={`text-[10px] font-medium ${state.gridRealizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                Grid: {state.gridRealizedPnl >= 0 ? '+' : ''}${state.gridRealizedPnl.toFixed(2)}
+              </span>
+              <span className={`text-[10px] font-medium ${state.hedgeRealizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                Hedge: {state.hedgeRealizedPnl >= 0 ? '+' : ''}${state.hedgeRealizedPnl.toFixed(2)}
+              </span>
+            </div>
+
+            {/* Done hint */}
+            {phase === 6 && (
+              <div className="text-[10px] italic text-text-secondary/70">
+                Цикл завершён. Stop → Start чтобы начать новый.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Actions */}
+      <div className="px-3 py-2 flex items-center gap-1">
+        <button
+          onClick={onLogs}
+          title="Логи"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+        </button>
+
+        {telegramBots && telegramBots.length > 0 && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                if (s.telegramBotId) {
+                  onSetTelegramBot(null);
+                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
+                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
+                }
+              }}
+              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
+              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                s.telegramBotId
+                  ? 'bg-accent-blue/15 text-accent-blue'
+                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
+              }`}
+            >
+              TG
+            </button>
+            {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                value=""
+                onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
+              >
+                <option value="">Select bot...</option>
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+            {s.telegramBotId && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                value={s.telegramBotId}
+                onChange={(e) => onSetTelegramBot(e.target.value || null)}
+              >
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {hasPosition && isRunning && (
+          <button
+            onClick={() => { if (confirm('Закрыть все позиции по рынку?')) onClosePosition(); }}
+            disabled={closePositionPending}
+            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
+          >
+            {closePositionPending ? '...' : 'Закрыть'}
+          </button>
+        )}
+
+        {isRunning ? (
+          <button
+            onClick={onStop}
+            className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+          >
+            Стоп
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={onStart}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+            >
+              Старт
+            </button>
+            <button
+              onClick={onEdit}
+              title="Редактировать"
+              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        <button
+          onClick={onDelete}
+          title="Удалить"
+          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── Stat Card ─────────────────────────────────────────── */
 
 function StatCard({
@@ -3009,7 +3543,8 @@ function AddStrategyModal({
   const [fcAutoRotate, setFcAutoRotate] = useState(true);
 
   // GridFloat fields. `tiers` is the dynamic expanding-grid list; start with one tier so the
-  // default config matches the legacy single-zone behaviour ($100 in the first 10%).
+  // default config matches the legacy single-zone behaviour ($100 in the first 10%). Per-tier
+  // dca/tp inputs default empty — empty falls back to the global step from gfForm.
   const [gfForm, setGfForm] = useState({
     timeframe: '1h',
     direction: 'Long',
@@ -3018,9 +3553,26 @@ function AddStrategyModal({
     leverage: '1',
     useStaticRange: false,
   });
-  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string }>>(
-    [{ upTo: '10', size: '100' }],
+  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(
+    [{ upTo: '10', size: '100', dca: '', tp: '' }],
   );
+
+  // GridHedge fields
+  const [ghForm, setGhForm] = useState({
+    mode: 1 as 1 | 2,
+    hedgeSymbol: '',
+    rangePercent: '10',
+    upperExitPercent: '2',
+    dcaStepPercent: '1',
+    tpStepPercent: '1',
+    hedgeRatio: '1.0',
+    beta: '1.0',
+    hedgeLeverage: '5',
+    gridLeverage: '1',
+  });
+  const [ghTiers, setGhTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>([
+    { upTo: '10', size: '100', dca: '', tp: '' },
+  ]);
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
     queryKey: ['symbols', accountId],
@@ -3102,7 +3654,13 @@ function AddStrategyModal({
       });
     } else if (strategyType === 'GridFloat') {
       const tiers = gfTiers
-        .map((t) => ({ upToPercent: Number(t.upTo), sizeUsdt: Number(t.size) }))
+        .map((t) => {
+          const upToPercent = Number(t.upTo);
+          const sizeUsdt = Number(t.size);
+          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
+          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
+          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
+        })
         .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
         .sort((a, b) => a.upToPercent - b.upToPercent);
       if (tiers.length === 0) {
@@ -3115,15 +3673,86 @@ function AddStrategyModal({
           return;
         }
       }
+      // Per-tier overrides, when provided, must be strictly positive.
+      for (const t of tiers) {
+        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) {
+          setError('Per-tier шаг DCA должен быть > 0 (или оставьте пустым)');
+          return;
+        }
+        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) {
+          setError('Per-tier шаг TP должен быть > 0 (или оставьте пустым)');
+          return;
+        }
+      }
+      // Send each tier — omit null overrides so the bot falls back to the global default.
+      const tiersPayload = tiers.map((t) => ({
+        upToPercent: t.upToPercent,
+        sizeUsdt: t.sizeUsdt,
+        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
+      }));
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: gfForm.timeframe,
         direction: gfForm.direction,
-        tiers,
+        tiers: tiersPayload,
         dcaStepPercent: Number(gfForm.dcaStepPercent),
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
         useStaticRange: gfForm.useStaticRange,
+      });
+    } else if (strategyType === 'GridHedge') {
+      const tiers = ghTiers
+        .map((t) => {
+          const upToPercent = Number(t.upTo);
+          const sizeUsdt = Number(t.size);
+          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
+          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
+          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
+        })
+        .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
+        .sort((a, b) => a.upToPercent - b.upToPercent);
+      if (tiers.length === 0) {
+        setError('Добавьте хотя бы один ярус с upTo% > 0 и размером > 0');
+        return;
+      }
+      for (let i = 1; i < tiers.length; i++) {
+        if (tiers[i].upToPercent <= tiers[i - 1].upToPercent) {
+          setError('Ярусы должны идти со строго возрастающим upTo%');
+          return;
+        }
+      }
+      for (const t of tiers) {
+        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) { setError('Per-tier шаг DCA должен быть > 0 (или пусто)'); return; }
+        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) { setError('Per-tier шаг TP должен быть > 0 (или пусто)'); return; }
+      }
+      if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
+        setError('rangePercent и upperExitPercent должны быть > 0');
+        return;
+      }
+      if (ghForm.mode === 2 && !ghForm.hedgeSymbol.trim()) {
+        setError('Cross-Ticker режим требует hedgeSymbol (например BTCUSDT)');
+        return;
+      }
+      const tiersPayload = tiers.map((t) => ({
+        upToPercent: t.upToPercent,
+        sizeUsdt: t.sizeUsdt,
+        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
+      }));
+      configJson = JSON.stringify({
+        mode: ghForm.mode,
+        gridSymbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        hedgeSymbol: ghForm.mode === 2 ? ghForm.hedgeSymbol.replace(/\s+/g, '').toUpperCase() : '',
+        rangePercent: Number(ghForm.rangePercent),
+        upperExitPercent: Number(ghForm.upperExitPercent),
+        tiers: tiersPayload,
+        dcaStepPercent: Number(ghForm.dcaStepPercent),
+        tpStepPercent: Number(ghForm.tpStepPercent),
+        hedgeRatio: Number(ghForm.hedgeRatio),
+        beta: Number(ghForm.beta),
+        hedgeLeverage: Number(ghForm.hedgeLeverage),
+        gridLeverage: Number(ghForm.gridLeverage),
       });
     } else {
       configJson = JSON.stringify({
@@ -3522,10 +4151,10 @@ function AddStrategyModal({
                 </div>
               </div>
 
-              {/* TP step + DCA step */}
+              {/* TP step + DCA step — defaults for tiers that don't override */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className={labelCls}>Шаг TP, %</label>
+                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -3534,10 +4163,10 @@ function AddStrategyModal({
                     onChange={(e) => setGfForm({ ...gfForm, tpStepPercent: e.target.value })}
                     className={inputCls}
                   />
-                  <p className="text-xs text-text-secondary mt-0.5">От цены каждого фила, не от средней</p>
+                  <p className="text-xs text-text-secondary mt-0.5">Используется для тиров без своего TP-шага</p>
                 </div>
                 <div>
-                  <label className={labelCls}>Шаг DCA, %</label>
+                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -3546,22 +4175,24 @@ function AddStrategyModal({
                     onChange={(e) => setGfForm({ ...gfForm, dcaStepPercent: e.target.value })}
                     className={inputCls}
                   />
-                  <p className="text-xs text-text-secondary mt-0.5">Расстояние между DCA-уровнями</p>
+                  <p className="text-xs text-text-secondary mt-0.5">Используется для тиров без своего DCA-шага</p>
                 </div>
               </div>
 
-              {/* Tiers — expanding zones */}
+              {/* Tiers — expanding zones, each can override DCA/TP step */}
               <div>
                 <label className={labelCls}>Ярусы сетки</label>
                 <div className="rounded-lg border border-border overflow-hidden">
-                  <table className="w-full text-sm">
+                  <table className="w-full text-xs">
                     <thead>
-                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
-                        <th className="px-3 py-2 text-left font-medium w-12">#</th>
-                        <th className="px-3 py-2 text-left font-medium">От %</th>
-                        <th className="px-3 py-2 text-left font-medium">До %</th>
-                        <th className="px-3 py-2 text-left font-medium">Ставка $</th>
-                        <th className="px-3 py-2 w-8" />
+                      <tr className="bg-bg-tertiary text-text-secondary">
+                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
+                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
+                        <th className="px-2 py-2 text-left font-medium">До %</th>
+                        <th className="px-2 py-2 text-left font-medium">$</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
+                        <th className="px-2 py-2 w-6" />
                       </tr>
                     </thead>
                     <tbody>
@@ -3569,9 +4200,9 @@ function AddStrategyModal({
                         const prevUp = i === 0 ? '0' : gfTiers[i - 1].upTo || '?';
                         return (
                           <tr key={i} className="border-t border-border/50">
-                            <td className="px-3 py-1.5 text-xs text-text-secondary">T{i + 1}</td>
-                            <td className="px-3 py-1.5 text-xs text-text-secondary">{prevUp}</td>
-                            <td className="px-3 py-1.5">
+                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
+                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
+                            <td className="px-2 py-1.5">
                               <input
                                 type="number"
                                 step="0.5"
@@ -3579,10 +4210,10 @@ function AddStrategyModal({
                                 value={t.upTo}
                                 onChange={(e) => setGfTiers((prev) =>
                                   prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
-                                className="w-20 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
                               />
                             </td>
-                            <td className="px-3 py-1.5">
+                            <td className="px-2 py-1.5">
                               <input
                                 type="number"
                                 step="1"
@@ -3590,15 +4221,39 @@ function AddStrategyModal({
                                 value={t.size}
                                 onChange={(e) => setGfTiers((prev) =>
                                   prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
-                                className="w-24 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
                               />
                             </td>
-                            <td className="px-3 py-1.5 text-right">
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.dca}
+                                placeholder={gfForm.dcaStepPercent}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.tp}
+                                placeholder={gfForm.tpStepPercent}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5 text-right">
                               {gfTiers.length > 1 && (
                                 <button
                                   type="button"
                                   onClick={() => setGfTiers((prev) => prev.filter((_, idx) => idx !== i))}
-                                  className="px-2 py-0.5 text-xs text-accent-red hover:bg-accent-red/10 rounded"
+                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
                                   title="Удалить ярус"
                                 >
                                   ×
@@ -3617,15 +4272,16 @@ function AddStrategyModal({
                     const last = prev[prev.length - 1];
                     const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
                     const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
-                    return [...prev, { upTo: String(nextUp), size: String(nextSize) }];
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
                   })}
                   className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
                 >
                   + Добавить ярус
                 </button>
                 <p className="text-xs text-text-secondary mt-1.5">
-                  Каждый ярус задаёт верхнюю границу (% от якоря) и ставку для всех филов в этом диапазоне.
-                  Якорь использует ставку первого яруса.
+                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
+                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
+                  Якорь использует параметры первого яруса.
                 </p>
               </div>
 
@@ -3648,12 +4304,258 @@ function AddStrategyModal({
               </label>
 
               <p className="text-xs text-text-secondary italic">
-                Уровней DCA на старте: ~{Math.max(0, Math.floor(Number(gfTiers[gfTiers.length - 1]?.upTo) / Math.max(0.0001, Number(gfForm.dcaStepPercent)))) || '?'}.
+                Уровней DCA на старте: ~{(() => {
+                  const fallback = Math.max(0.0001, Number(gfForm.dcaStepPercent));
+                  let total = 0;
+                  let prev = 0;
+                  for (const row of gfTiers) {
+                    const upTo = Number(row.upTo);
+                    if (!(upTo > 0)) continue;
+                    const tierStep = row.dca.trim() === '' ? fallback : Number(row.dca);
+                    if (tierStep > 0 && upTo > prev) total += Math.floor((upTo - prev) / tierStep);
+                    prev = upTo;
+                  }
+                  return total > 0 ? total : '?';
+                })()}.
                 Каждый фил (якорь и доборы) получает свой собственный reduce-only лимит на закрытие
-                в плюс {gfForm.tpStepPercent}% от ЦЕНЫ этого фила. Размер фила берётся из яруса,
-                в который попадает offset от якоря. Когда срабатывает TP — DCA-слот на этом
+                в плюс шаг_TP того яруса, в который попадает offset от якоря. Размер фила и шаг DCA
+                тоже берутся из соответствующего яруса. Когда срабатывает TP — DCA-слот на этом
                 уровне переустанавливается. Полное закрытие всех батчей → отмена всех лимиток
                 → ожидание следующего бара → новый якорь. Стоп-лосса нет.
+              </p>
+            </>
+          ) : strategyType === 'GridHedge' ? (
+            <>
+              {/* Mode selector */}
+              <div>
+                <label className={labelCls}>Режим</label>
+                <select
+                  value={ghForm.mode}
+                  onChange={(e) => setGhForm({ ...ghForm, mode: Number(e.target.value) as 1 | 2 })}
+                  className={inputCls}
+                >
+                  <option value={1}>SameTicker — Spot grid + same-symbol futures short (Bybit-only)</option>
+                  <option value={2}>CrossTicker — Futures grid + correlated-ticker futures short</option>
+                </select>
+              </div>
+
+              {/* HedgeSymbol — only shown for CrossTicker */}
+              {ghForm.mode === 2 && (
+                <div>
+                  <label className={labelCls}>Тикер хеджа</label>
+                  <input
+                    type="text"
+                    value={ghForm.hedgeSymbol}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeSymbol: e.target.value })}
+                    placeholder="BTCUSDT"
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    Коррелированный тикер для шорт-хеджа (например BTCUSDT при гриде на ETHUSDT).
+                  </p>
+                </div>
+              )}
+
+              {/* Range + UpperExit */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Range вниз, %</label>
+                  <input type="number" step="0.5" min="0.1"
+                    value={ghForm.rangePercent}
+                    onChange={(e) => setGhForm({ ...ghForm, rangePercent: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">Стоп-лосс при цене ниже anchor × (1 − R%)</p>
+                </div>
+                <div>
+                  <label className={labelCls}>UpperExit вверх, %</label>
+                  <input type="number" step="0.5" min="0.1"
+                    value={ghForm.upperExitPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, upperExitPercent: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">TP всего бота при цене выше anchor × (1 + U%)</p>
+                </div>
+              </div>
+
+              {/* Hedge sizing */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>HedgeRatio</label>
+                  <input type="number" step="0.1" min="0" max="5"
+                    value={ghForm.hedgeRatio}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeRatio: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">0..5; SameTicker обычно 1.0</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Beta (β)</label>
+                  <input type="number" step="0.1" min="0.1" max="10"
+                    value={ghForm.beta}
+                    onChange={(e) => setGhForm({ ...ghForm, beta: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">Корреляция; CrossTicker — на сколько β хеджа отличается от грида</p>
+                </div>
+              </div>
+
+              {/* Leverages */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Плечо хеджа</label>
+                  <input type="number" step="1" min="1"
+                    value={ghForm.hedgeLeverage}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeLeverage: e.target.value })}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Плечо грида (CrossTicker)</label>
+                  <input type="number" step="1" min="1"
+                    value={ghForm.gridLeverage}
+                    disabled={ghForm.mode === 1}
+                    onChange={(e) => setGhForm({ ...ghForm, gridLeverage: e.target.value })}
+                    className={inputCls + (ghForm.mode === 1 ? ' opacity-40' : '')} />
+                  <p className="text-xs text-text-secondary mt-0.5">Игнорируется в SameTicker (грид на споте — без плеча)</p>
+                </div>
+              </div>
+
+              {/* Default DCA + TP steps */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.dcaStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, dcaStepPercent: e.target.value })}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.tpStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, tpStepPercent: e.target.value })}
+                    className={inputCls} />
+                </div>
+              </div>
+
+              {/* Tiers */}
+              <div>
+                <label className={labelCls}>Ярусы сетки</label>
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-bg-tertiary text-text-secondary">
+                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
+                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
+                        <th className="px-2 py-2 text-left font-medium">До %</th>
+                        <th className="px-2 py-2 text-left font-medium">$</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
+                        <th className="px-2 py-2 w-6" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ghTiers.map((t, i) => {
+                        const prevUp = i === 0 ? '0' : ghTiers[i - 1].upTo || '?';
+                        return (
+                          <tr key={i} className="border-t border-border/50">
+                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
+                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.5"
+                                min="0.1"
+                                value={t.upTo}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="1"
+                                min="1"
+                                value={t.size}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.dca}
+                                placeholder={ghForm.dcaStepPercent}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.tp}
+                                placeholder={ghForm.tpStepPercent}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5 text-right">
+                              {ghTiers.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setGhTiers((prev) => prev.filter((_, idx) => idx !== i))}
+                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
+                                  title="Удалить ярус"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGhTiers((prev) => {
+                    const last = prev[prev.length - 1];
+                    const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
+                    const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
+                  })}
+                  className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
+                >
+                  + Добавить ярус
+                </button>
+                <p className="text-xs text-text-secondary mt-1.5">
+                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
+                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
+                </p>
+              </div>
+
+              <p className="text-xs text-text-secondary italic">
+                ~{(() => {
+                  const fallback = Math.max(0.0001, Number(ghForm.dcaStepPercent));
+                  let total = 0;
+                  let prev = 0;
+                  for (const row of ghTiers) {
+                    const upTo = Number(row.upTo);
+                    if (!(upTo > 0)) continue;
+                    const tierStep = row.dca.trim() === '' ? fallback : Number(row.dca);
+                    if (tierStep > 0 && upTo > prev) total += Math.floor((upTo - prev) / tierStep);
+                    prev = upTo;
+                  }
+                  return total > 0 ? total : '?';
+                })()} DCA-уровней.
+                Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой
+                на полный объём сетки × HedgeRatio × β. Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь
+                бот. После Done — Stop → Start чтобы начать новый цикл.
               </p>
             </>
           ) : strategyType === 'HuntingFunding' ? (
@@ -3964,6 +4866,7 @@ function EditStrategyModal({
   const isSD = strategy.type === 'SmaDca';
   const isFC = strategy.type === 'FundingClaim';
   const isGF = strategy.type === 'GridFloat';
+  const isGH = strategy.type === 'GridHedge';
 
   const [name, setName] = useState(strategy.name);
   const [symbol, setSymbol] = useState(cfg.symbol || 'BTCUSDT');
@@ -4039,22 +4942,59 @@ function EditStrategyModal({
     leverage: String(cfg.leverage ?? 1),
     useStaticRange: cfg.useStaticRange ?? false,
   });
-  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string }>>(() => {
+  const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(() => {
     if (Array.isArray(cfg.tiers) && cfg.tiers.length > 0) {
       const sorted = [...cfg.tiers]
         .filter((t: { upToPercent: number; sizeUsdt: number }) =>
           Number(t.upToPercent) > 0 && Number(t.sizeUsdt) > 0)
         .sort((a: { upToPercent: number }, b: { upToPercent: number }) => a.upToPercent - b.upToPercent);
       if (sorted.length > 0) {
-        return sorted.map((t: { upToPercent: number; sizeUsdt: number }) =>
-          ({ upTo: String(t.upToPercent), size: String(t.sizeUsdt) }));
+        return sorted.map((t: { upToPercent: number; sizeUsdt: number; dcaStepPercent?: number | null; tpStepPercent?: number | null }) => ({
+          upTo: String(t.upToPercent),
+          size: String(t.sizeUsdt),
+          dca: typeof t.dcaStepPercent === 'number' && t.dcaStepPercent > 0 ? String(t.dcaStepPercent) : '',
+          tp: typeof t.tpStepPercent === 'number' && t.tpStepPercent > 0 ? String(t.tpStepPercent) : '',
+        }));
       }
     }
     // Legacy bot — synthesise a single tier from the old fields.
     return [{
       upTo: String(cfg.rangePercent ?? 10),
       size: String(cfg.baseSizeUsdt ?? 100),
+      dca: '',
+      tp: '',
     }];
+  });
+
+  // GridHedge form state — initialise from existing configJson
+  const [ghForm, setGhForm] = useState({
+    mode: (cfg.mode ?? 1) as 1 | 2,
+    hedgeSymbol: cfg.hedgeSymbol || '',
+    rangePercent: String(cfg.rangePercent ?? 10),
+    upperExitPercent: String(cfg.upperExitPercent ?? 2),
+    dcaStepPercent: String(cfg.dcaStepPercent ?? 1),
+    tpStepPercent: String(cfg.tpStepPercent ?? 1),
+    hedgeRatio: String(cfg.hedgeRatio ?? 1.0),
+    beta: String(cfg.beta ?? 1.0),
+    hedgeLeverage: String(cfg.hedgeLeverage ?? 5),
+    gridLeverage: String(cfg.gridLeverage ?? 1),
+  });
+  const [ghTiers, setGhTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(() => {
+    if (Array.isArray(cfg.tiers) && cfg.tiers.length > 0) {
+      const sorted = [...cfg.tiers]
+        .filter((t: { upToPercent: number; sizeUsdt: number }) =>
+          Number(t.upToPercent) > 0 && Number(t.sizeUsdt) > 0)
+        .sort((a: { upToPercent: number }, b: { upToPercent: number }) => a.upToPercent - b.upToPercent);
+      if (sorted.length > 0) {
+        return sorted.map((t: { upToPercent: number; sizeUsdt: number; dcaStepPercent?: number | null; tpStepPercent?: number | null }) => ({
+          upTo: String(t.upToPercent),
+          size: String(t.sizeUsdt),
+          dca: typeof t.dcaStepPercent === 'number' && t.dcaStepPercent > 0 ? String(t.dcaStepPercent) : '',
+          tp: typeof t.tpStepPercent === 'number' && t.tpStepPercent > 0 ? String(t.tpStepPercent) : '',
+        }));
+      }
+    }
+    return [{ upTo: '10', size: '100', dca: '', tp: '' }];
   });
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
@@ -4135,7 +5075,13 @@ function EditStrategyModal({
       });
     } else if (isGF) {
       const tiers = gfTiers
-        .map((t) => ({ upToPercent: Number(t.upTo), sizeUsdt: Number(t.size) }))
+        .map((t) => {
+          const upToPercent = Number(t.upTo);
+          const sizeUsdt = Number(t.size);
+          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
+          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
+          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
+        })
         .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
         .sort((a, b) => a.upToPercent - b.upToPercent);
       if (tiers.length === 0) {
@@ -4148,15 +5094,84 @@ function EditStrategyModal({
           return;
         }
       }
+      for (const t of tiers) {
+        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) {
+          setError('Per-tier шаг DCA должен быть > 0 (или оставьте пустым)');
+          return;
+        }
+        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) {
+          setError('Per-tier шаг TP должен быть > 0 (или оставьте пустым)');
+          return;
+        }
+      }
+      const tiersPayload = tiers.map((t) => ({
+        upToPercent: t.upToPercent,
+        sizeUsdt: t.sizeUsdt,
+        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
+      }));
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: gfForm.timeframe,
         direction: gfForm.direction,
-        tiers,
+        tiers: tiersPayload,
         dcaStepPercent: Number(gfForm.dcaStepPercent),
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
         useStaticRange: gfForm.useStaticRange,
+      });
+    } else if (isGH) {
+      const tiers = ghTiers
+        .map((t) => {
+          const upToPercent = Number(t.upTo);
+          const sizeUsdt = Number(t.size);
+          const dcaStepPercent = t.dca.trim() === '' ? null : Number(t.dca);
+          const tpStepPercent = t.tp.trim() === '' ? null : Number(t.tp);
+          return { upToPercent, sizeUsdt, dcaStepPercent, tpStepPercent };
+        })
+        .filter((t) => t.upToPercent > 0 && t.sizeUsdt > 0)
+        .sort((a, b) => a.upToPercent - b.upToPercent);
+      if (tiers.length === 0) {
+        setError('Добавьте хотя бы один ярус с upTo% > 0 и размером > 0');
+        return;
+      }
+      for (let i = 1; i < tiers.length; i++) {
+        if (tiers[i].upToPercent <= tiers[i - 1].upToPercent) {
+          setError('Ярусы должны идти со строго возрастающим upTo%');
+          return;
+        }
+      }
+      for (const t of tiers) {
+        if (t.dcaStepPercent !== null && !(t.dcaStepPercent > 0)) { setError('Per-tier шаг DCA должен быть > 0 (или пусто)'); return; }
+        if (t.tpStepPercent !== null && !(t.tpStepPercent > 0)) { setError('Per-tier шаг TP должен быть > 0 (или пусто)'); return; }
+      }
+      if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
+        setError('rangePercent и upperExitPercent должны быть > 0');
+        return;
+      }
+      if (ghForm.mode === 2 && !ghForm.hedgeSymbol.trim()) {
+        setError('Cross-Ticker режим требует hedgeSymbol (например BTCUSDT)');
+        return;
+      }
+      const tiersPayload = tiers.map((t) => ({
+        upToPercent: t.upToPercent,
+        sizeUsdt: t.sizeUsdt,
+        ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
+        ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
+      }));
+      configJson = JSON.stringify({
+        mode: ghForm.mode,
+        gridSymbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        hedgeSymbol: ghForm.mode === 2 ? ghForm.hedgeSymbol.replace(/\s+/g, '').toUpperCase() : '',
+        rangePercent: Number(ghForm.rangePercent),
+        upperExitPercent: Number(ghForm.upperExitPercent),
+        tiers: tiersPayload,
+        dcaStepPercent: Number(ghForm.dcaStepPercent),
+        tpStepPercent: Number(ghForm.tpStepPercent),
+        hedgeRatio: Number(ghForm.hedgeRatio),
+        beta: Number(ghForm.beta),
+        hedgeLeverage: Number(ghForm.hedgeLeverage),
+        gridLeverage: Number(ghForm.gridLeverage),
       });
     } else {
       configJson = JSON.stringify({
@@ -4505,7 +5520,7 @@ function EditStrategyModal({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className={labelCls}>Шаг TP, %</label>
+                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -4516,7 +5531,7 @@ function EditStrategyModal({
                   />
                 </div>
                 <div>
-                  <label className={labelCls}>Шаг DCA, %</label>
+                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -4528,18 +5543,20 @@ function EditStrategyModal({
                 </div>
               </div>
 
-              {/* Tiers — expanding zones */}
+              {/* Tiers — expanding zones, each can override DCA/TP step */}
               <div>
                 <label className={labelCls}>Ярусы сетки</label>
                 <div className="rounded-lg border border-border overflow-hidden">
-                  <table className="w-full text-sm">
+                  <table className="w-full text-xs">
                     <thead>
-                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
-                        <th className="px-3 py-2 text-left font-medium w-12">#</th>
-                        <th className="px-3 py-2 text-left font-medium">От %</th>
-                        <th className="px-3 py-2 text-left font-medium">До %</th>
-                        <th className="px-3 py-2 text-left font-medium">Ставка $</th>
-                        <th className="px-3 py-2 w-8" />
+                      <tr className="bg-bg-tertiary text-text-secondary">
+                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
+                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
+                        <th className="px-2 py-2 text-left font-medium">До %</th>
+                        <th className="px-2 py-2 text-left font-medium">$</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
+                        <th className="px-2 py-2 w-6" />
                       </tr>
                     </thead>
                     <tbody>
@@ -4547,9 +5564,9 @@ function EditStrategyModal({
                         const prevUp = i === 0 ? '0' : gfTiers[i - 1].upTo || '?';
                         return (
                           <tr key={i} className="border-t border-border/50">
-                            <td className="px-3 py-1.5 text-xs text-text-secondary">T{i + 1}</td>
-                            <td className="px-3 py-1.5 text-xs text-text-secondary">{prevUp}</td>
-                            <td className="px-3 py-1.5">
+                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
+                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
+                            <td className="px-2 py-1.5">
                               <input
                                 type="number"
                                 step="0.5"
@@ -4557,10 +5574,10 @@ function EditStrategyModal({
                                 value={t.upTo}
                                 onChange={(e) => setGfTiers((prev) =>
                                   prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
-                                className="w-20 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
                               />
                             </td>
-                            <td className="px-3 py-1.5">
+                            <td className="px-2 py-1.5">
                               <input
                                 type="number"
                                 step="1"
@@ -4568,15 +5585,39 @@ function EditStrategyModal({
                                 value={t.size}
                                 onChange={(e) => setGfTiers((prev) =>
                                   prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
-                                className="w-24 bg-bg-tertiary border border-border rounded px-2 py-1 text-text-primary text-sm"
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
                               />
                             </td>
-                            <td className="px-3 py-1.5 text-right">
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.dca}
+                                placeholder={gfForm.dcaStepPercent}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.tp}
+                                placeholder={gfForm.tpStepPercent}
+                                onChange={(e) => setGfTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5 text-right">
                               {gfTiers.length > 1 && (
                                 <button
                                   type="button"
                                   onClick={() => setGfTiers((prev) => prev.filter((_, idx) => idx !== i))}
-                                  className="px-2 py-0.5 text-xs text-accent-red hover:bg-accent-red/10 rounded"
+                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
                                   title="Удалить ярус"
                                 >
                                   ×
@@ -4595,15 +5636,16 @@ function EditStrategyModal({
                     const last = prev[prev.length - 1];
                     const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
                     const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
-                    return [...prev, { upTo: String(nextUp), size: String(nextSize) }];
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
                   })}
                   className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
                 >
                   + Добавить ярус
                 </button>
                 <p className="text-xs text-text-secondary mt-1.5">
-                  Каждый ярус задаёт верхнюю границу (% от якоря) и ставку для всех филов в этом диапазоне.
-                  Якорь использует ставку первого яруса.
+                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
+                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
+                  Якорь использует параметры первого яруса.
                 </p>
               </div>
 
@@ -4622,6 +5664,227 @@ function EditStrategyModal({
                   </p>
                 </div>
               </label>
+            </>
+          ) : isGH ? (
+            <>
+              {/* Mode selector */}
+              <div>
+                <label className={labelCls}>Режим</label>
+                <select
+                  value={ghForm.mode}
+                  onChange={(e) => setGhForm({ ...ghForm, mode: Number(e.target.value) as 1 | 2 })}
+                  className={inputCls}
+                >
+                  <option value={1}>SameTicker — Spot grid + same-symbol futures short (Bybit-only)</option>
+                  <option value={2}>CrossTicker — Futures grid + correlated-ticker futures short</option>
+                </select>
+              </div>
+
+              {/* HedgeSymbol — only for CrossTicker */}
+              {ghForm.mode === 2 && (
+                <div>
+                  <label className={labelCls}>Тикер хеджа</label>
+                  <input
+                    type="text"
+                    value={ghForm.hedgeSymbol}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeSymbol: e.target.value })}
+                    placeholder="BTCUSDT"
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    Коррелированный тикер для шорт-хеджа (например BTCUSDT при гриде на ETHUSDT).
+                  </p>
+                </div>
+              )}
+
+              {/* Range + UpperExit */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Range вниз, %</label>
+                  <input type="number" step="0.5" min="0.1"
+                    value={ghForm.rangePercent}
+                    onChange={(e) => setGhForm({ ...ghForm, rangePercent: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">Стоп-лосс при цене ниже anchor × (1 − R%)</p>
+                </div>
+                <div>
+                  <label className={labelCls}>UpperExit вверх, %</label>
+                  <input type="number" step="0.5" min="0.1"
+                    value={ghForm.upperExitPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, upperExitPercent: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">TP всего бота при цене выше anchor × (1 + U%)</p>
+                </div>
+              </div>
+
+              {/* Hedge sizing */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>HedgeRatio</label>
+                  <input type="number" step="0.1" min="0" max="5"
+                    value={ghForm.hedgeRatio}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeRatio: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">0..5; SameTicker обычно 1.0</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Beta (β)</label>
+                  <input type="number" step="0.1" min="0.1" max="10"
+                    value={ghForm.beta}
+                    onChange={(e) => setGhForm({ ...ghForm, beta: e.target.value })}
+                    className={inputCls} />
+                  <p className="text-xs text-text-secondary mt-0.5">Корреляция; CrossTicker — на сколько β хеджа отличается от грида</p>
+                </div>
+              </div>
+
+              {/* Leverages */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Плечо хеджа</label>
+                  <input type="number" step="1" min="1"
+                    value={ghForm.hedgeLeverage}
+                    onChange={(e) => setGhForm({ ...ghForm, hedgeLeverage: e.target.value })}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Плечо грида (CrossTicker)</label>
+                  <input type="number" step="1" min="1"
+                    value={ghForm.gridLeverage}
+                    disabled={ghForm.mode === 1}
+                    onChange={(e) => setGhForm({ ...ghForm, gridLeverage: e.target.value })}
+                    className={inputCls + (ghForm.mode === 1 ? ' opacity-40' : '')} />
+                  <p className="text-xs text-text-secondary mt-0.5">Игнорируется в SameTicker (грид на споте — без плеча)</p>
+                </div>
+              </div>
+
+              {/* Default DCA + TP steps */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Шаг DCA, % (по умолчанию)</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.dcaStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, dcaStepPercent: e.target.value })}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Шаг TP, % (по умолчанию)</label>
+                  <input type="number" step="0.1" min="0.01"
+                    value={ghForm.tpStepPercent}
+                    onChange={(e) => setGhForm({ ...ghForm, tpStepPercent: e.target.value })}
+                    className={inputCls} />
+                </div>
+              </div>
+
+              {/* Tiers */}
+              <div>
+                <label className={labelCls}>Ярусы сетки</label>
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-bg-tertiary text-text-secondary">
+                        <th className="px-2 py-2 text-left font-medium w-8">#</th>
+                        <th className="px-2 py-2 text-left font-medium w-10">От %</th>
+                        <th className="px-2 py-2 text-left font-medium">До %</th>
+                        <th className="px-2 py-2 text-left font-medium">$</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг DCA в этом ярусе (пусто = глобальный)">DCA %</th>
+                        <th className="px-2 py-2 text-left font-medium" title="Шаг TP в этом ярусе (пусто = глобальный)">TP %</th>
+                        <th className="px-2 py-2 w-6" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ghTiers.map((t, i) => {
+                        const prevUp = i === 0 ? '0' : ghTiers[i - 1].upTo || '?';
+                        return (
+                          <tr key={i} className="border-t border-border/50">
+                            <td className="px-2 py-1.5 text-text-secondary">T{i + 1}</td>
+                            <td className="px-2 py-1.5 text-text-secondary">{prevUp}</td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.5"
+                                min="0.1"
+                                value={t.upTo}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, upTo: e.target.value } : row))}
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="1"
+                                min="1"
+                                value={t.size}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, size: e.target.value } : row))}
+                                className="w-16 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.dca}
+                                placeholder={ghForm.dcaStepPercent}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, dca: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0.01"
+                                value={t.tp}
+                                placeholder={ghForm.tpStepPercent}
+                                onChange={(e) => setGhTiers((prev) =>
+                                  prev.map((row, idx) => idx === i ? { ...row, tp: e.target.value } : row))}
+                                className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40"
+                              />
+                            </td>
+                            <td className="px-2 py-1.5 text-right">
+                              {ghTiers.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setGhTiers((prev) => prev.filter((_, idx) => idx !== i))}
+                                  className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded"
+                                  title="Удалить ярус"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGhTiers((prev) => {
+                    const last = prev[prev.length - 1];
+                    const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
+                    const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
+                    return [...prev, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }];
+                  })}
+                  className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors"
+                >
+                  + Добавить ярус
+                </button>
+                <p className="text-xs text-text-secondary mt-1.5">
+                  Каждый ярус — отдельный участок: внутри него DCA расставляются с шагом этого яруса
+                  (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
+                </p>
+              </div>
+
+              <p className="text-xs text-text-secondary italic">
+                Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой
+                на полный объём сетки × HedgeRatio × β. Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь
+                бот. После Done — Stop → Start чтобы начать новый цикл.
+              </p>
             </>
           ) : isHF ? (
             <>

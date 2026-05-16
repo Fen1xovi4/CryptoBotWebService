@@ -413,6 +413,38 @@ public class StrategiesController : ControllerBase
             };
             strategy.StateJson = JsonSerializer.Serialize(freshFcState, jsonOpts);
         }
+        else if (strategy.Type == StrategyTypes.GridHedge)
+        {
+            // GridHedge Start semantics:
+            //   - Empty state OR Phase == Done → fresh cycle (preserve cumulative cycle stats).
+            //   - Phase is mid-cycle (NotStarted/HedgeOpening/GridArming/Active/Exiting*) →
+            //     keep state as-is so the handler resumes where it left off; just clear the
+            //     transient placement-cooldown so retries fire on the next tick.
+            var prevGhState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
+                ? new GridHedgeState()
+                : JsonSerializer.Deserialize<GridHedgeState>(strategy.StateJson, jsonOpts) ?? new GridHedgeState();
+
+            GridHedgeState freshGhState;
+            var midCycle = prevGhState.Phase is not (GridHedgePhase.NotStarted or GridHedgePhase.Done)
+                && (prevGhState.HedgeQty > 0 || prevGhState.Batches.Count > 0 || prevGhState.PendingBuys.Count > 0);
+
+            if (midCycle)
+            {
+                freshGhState = prevGhState;
+                freshGhState.PlacementCooldownUntil = null;
+            }
+            else
+            {
+                freshGhState = new GridHedgeState
+                {
+                    Phase = GridHedgePhase.NotStarted,
+                    GridRealizedPnl = prevGhState.GridRealizedPnl,
+                    HedgeRealizedPnl = prevGhState.HedgeRealizedPnl,
+                    CompletedCycles = prevGhState.CompletedCycles
+                };
+            }
+            strategy.StateJson = JsonSerializer.Serialize(freshGhState, jsonOpts);
+        }
         else
         {
             // Preserve martingale state across restarts; clear counters so handler recalculates from history
@@ -572,6 +604,9 @@ public class StrategiesController : ControllerBase
         if (request.Tiers.Any(t => t.UpToPercent <= 0 || t.SizeUsdt <= 0))
             return BadRequest(new { message = "Каждый ярус: upToPercent > 0 и sizeUsdt > 0." });
 
+        if (request.Tiers.Any(t => t.DcaStepPercent is <= 0 || t.TpStepPercent is <= 0))
+            return BadRequest(new { message = "Если указан per-tier шаг DCA / TP, он должен быть > 0." });
+
         var sorted = request.Tiers.OrderBy(t => t.UpToPercent).ToList();
         for (int i = 1; i < sorted.Count; i++)
         {
@@ -584,8 +619,12 @@ public class StrategiesController : ControllerBase
         if (config == null)
             return BadRequest(new { message = "Не удалось прочитать ConfigJson стратегии." });
 
-        if (sorted[^1].UpToPercent < config.DcaStepPercent)
-            return BadRequest(new { message = $"Внешняя граница тиров ({sorted[^1].UpToPercent}%) должна быть ≥ DcaStepPercent ({config.DcaStepPercent}%)." });
+        // Outermost tier must accommodate at least one DCA level at its own effective step
+        // (per-tier override or global default).
+        var outerStep = sorted[^1].DcaStepPercent is > 0 ? sorted[^1].DcaStepPercent!.Value : config.DcaStepPercent;
+        var outerSpan = sorted[^1].UpToPercent - (sorted.Count > 1 ? sorted[^2].UpToPercent : 0m);
+        if (outerSpan < outerStep)
+            return BadRequest(new { message = $"Внешний ярус ({outerSpan}% от предыдущей границы) должен быть ≥ его шага DCA ({outerStep}%)." });
 
         // Compute old outer-tier extent before mutation so we can detect widening below.
         // Mirrors NormalizeTiers fallback: if Tiers is empty/null, use legacy RangePercent.
@@ -637,7 +676,17 @@ public class StrategiesController : ControllerBase
 
         await _db.SaveChangesAsync();
 
-        var newLevels = (int)Math.Floor(newMaxTierPct / config.DcaStepPercent);
+        // Per-tier walk: each tier produces floor((tier.UpTo - prevTop) / effectiveStep) levels.
+        // Mirrors GridFloatHandler.ComputeDcaLevels so the UI preview matches reality.
+        int newLevels = 0;
+        decimal prevTop = 0m;
+        foreach (var t in sorted)
+        {
+            var step = t.DcaStepPercent is > 0 ? t.DcaStepPercent!.Value : config.DcaStepPercent;
+            if (step > 0)
+                newLevels += (int)Math.Floor((t.UpToPercent - prevTop) / step);
+            prevTop = t.UpToPercent;
+        }
         return Ok(new
         {
             message = "Tiers updated",
