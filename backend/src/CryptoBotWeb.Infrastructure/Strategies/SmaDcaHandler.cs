@@ -98,6 +98,20 @@ public class SmaDcaHandler : IStrategyHandler
             await _db.SaveChangesAsync(ct);
         }
 
+        // 1b. Reconcile open orders on the exchange against tracked state. Cancels any counter-side
+        // limit that isn't a known Entry/DCA/TP id — defends against orphan TPs left behind by a
+        // failed cancel during DCA replacement or a false EXIT detection. If a stale non-reduce-only
+        // limit survives a position close, it would otherwise flip the position when it next fills.
+        // Throttled to once per ReconcileIntervalSeconds — save state right away so the throttle
+        // persists even if no later state-changing event fires this tick.
+        var preReconcileAt = state.LastReconcileAt;
+        await ReconcileOrphanOrders(strategy, config, state, exchange, isLongConfig);
+        if (state.LastReconcileAt != preReconcileAt)
+        {
+            SaveState(strategy, state);
+            await _db.SaveChangesAsync(ct);
+        }
+
         // 2. Poll pending ENTRY limit (if any). On fill → adopt as entry, place TP limit.
         if (!string.IsNullOrEmpty(state.EntryOrderId))
         {
@@ -946,6 +960,73 @@ public class SmaDcaHandler : IStrategyHandler
     {
         await CancelTakeProfitLimit(strategy, config, state, exchange);
         await PlaceTakeProfitLimit(strategy, config, state, exchange);
+    }
+
+    /// <summary>
+    /// Lists every open limit order on the symbol and cancels any whose id isn't tracked by the
+    /// current state (TakeProfitOrderId / EntryOrderId / DcaOrderId). Only counter-side orders are
+    /// touched — for a Long bot, only Sell limits (i.e. TP candidates); for a Short bot, only Buy
+    /// limits. Same-side limits (entry/DCA) are left alone — those are tracked anyway and an
+    /// unknown same-side order would more likely be a user/manual order.
+    ///
+    /// Defends against the orphan-TP failure mode where ReplaceTakeProfitLimit nulls TakeProfitOrderId
+    /// even when the underlying CancelOrderAsync silently failed (or raced with a partial fill on the
+    /// previous TP), and against false EXIT detection where the bot believes the TP closed the
+    /// position but the exchange still has it open.
+    /// </summary>
+    private const int ReconcileIntervalSeconds = 60;
+
+    private async Task ReconcileOrphanOrders(Strategy strategy, SmaDcaConfig config, SmaDcaState state,
+        IFuturesExchangeService exchange, bool isLongConfig)
+    {
+        if (exchange.UsesSoftTakeProfit) return;
+
+        // Throttle: orphans accumulate from rare cancel-fail / false-EXIT events, not per tick.
+        // Polling open orders on every 5s tick is wasteful and burns exchange rate-limit budget.
+        if (state.LastReconcileAt.HasValue
+            && (DateTime.UtcNow - state.LastReconcileAt.Value).TotalSeconds < ReconcileIntervalSeconds)
+            return;
+
+        state.LastReconcileAt = DateTime.UtcNow;
+
+        List<LimitOrderDto> openOrders;
+        try { openOrders = await exchange.GetOpenOrdersAsync(config.Symbol); }
+        catch (NotSupportedException) { return; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SmaDca reconcile: GetOpenOrdersAsync failed for {Symbol}", config.Symbol);
+            return;
+        }
+
+        if (openOrders.Count == 0) return;
+
+        var tracked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrEmpty(state.TakeProfitOrderId)) tracked.Add(state.TakeProfitOrderId);
+        if (!string.IsNullOrEmpty(state.EntryOrderId)) tracked.Add(state.EntryOrderId);
+        if (!string.IsNullOrEmpty(state.DcaOrderId)) tracked.Add(state.DcaOrderId);
+
+        var counterSide = isLongConfig ? "Sell" : "Buy";
+
+        foreach (var o in openOrders)
+        {
+            if (tracked.Contains(o.OrderId)) continue;
+            if (!string.Equals(o.Side, counterSide, StringComparison.OrdinalIgnoreCase)) continue;
+
+            try
+            {
+                var ok = await exchange.CancelOrderAsync(config.Symbol, o.OrderId);
+                Log(strategy, "Warning",
+                    $"🧹 Отменён орфан-ордер #{o.OrderId} ({o.Side} {o.Quantity} @ {o.Price})" +
+                    (ok ? "" : " — биржа вернула false"));
+                _logger.LogWarning(
+                    "Strategy {Id}: cancelled orphan order {OrderId} ({Side} {Qty} @ {Price}) on {Symbol}",
+                    strategy.Id, o.OrderId, o.Side, o.Quantity, o.Price, config.Symbol);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "SmaDca reconcile: CancelOrderAsync failed for {OrderId}", o.OrderId);
+            }
+        }
     }
 
     /// <summary>

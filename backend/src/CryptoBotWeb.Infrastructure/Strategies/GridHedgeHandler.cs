@@ -17,22 +17,18 @@ namespace CryptoBotWeb.Infrastructure.Strategies;
 ///   - CrossTicker: futures grid (long limits) on one symbol + futures short on a different
 ///                  correlated symbol (e.g. ETH grid hedged by BTC short).
 ///
-/// Lifecycle is a one-shot state machine:
-///   NotStarted → HedgeOpening → GridArming → Active → (ExitingUp | ExitingDown) → Done
+/// Lifecycle: NotStarted → HedgeOpening → GridArming → Active → (ExitingUp | ExitingDown) → Done.
 ///
-/// On Start: anchor at current market price, open the hedge short for the full planned grid
-/// notional (× HedgeRatio × Beta), lay down limit buys across the entire range below the
-/// anchor. Each grid fill becomes a batch with its own reduce-only take-profit limit.
+/// On Start: anchor at current market price, open the hedge short of HedgeNotionalUsdt, lay
+/// down uniform-step limit buys of BetUsdt across the range below the anchor. Each grid fill
+/// becomes a batch with its own reduce-only TP at fill_price × (1 + TpStepPercent/100).
 ///
-/// Exit triggers (both close the whole bot — grid + hedge):
+/// Exit triggers (both close the whole bot):
 ///   - price ≥ Anchor × (1 + UpperExitPercent/100) → ExitingUp (most grid in profit, hedge in loss)
 ///   - price ≤ Anchor × (1 − RangePercent/100)     → ExitingDown (stop-loss; hedge in profit)
 ///
-/// After Done, the user must Stop → Start the bot to begin a fresh cycle. Cumulative
+/// After Done, Stop → Start begins a fresh cycle at the current market price. Cumulative
 /// HedgeRealizedPnl / GridRealizedPnl / CompletedCycles persist across cycles.
-///
-/// V1 does NOT implement live re-anchoring, position-based reconcile, or per-tier auto-bump
-/// (those battle-tested patterns from GridFloat can land in V1.1 if needed).
 /// </summary>
 public class GridHedgeHandler : IStrategyHandler
 {
@@ -45,6 +41,23 @@ public class GridHedgeHandler : IStrategyHandler
     // ~13 req/sec — same throttle GridFloat uses for batched placements.
     private const int InterOrderDelayMs = 75;
     private const int PlacementCooldownMinutes = 5;
+
+    // After this many consecutive ArmGrid ticks without ANY successful placement, the handler
+    // assumes the grid leg is permanently refusing (Bybit Spot regulatory restriction, missing
+    // scope, invalid symbol, etc.) and rolls back the hedge so the user isn't left with a
+    // naked short on the exchange. 3 ticks ≈ 15 minutes given the 5-minute cooldown.
+    private const int MaxConsecutiveArmFailures = 3;
+
+    // Substrings in exchange error messages that indicate a permanent refusal — abort
+    // immediately on the first occurrence instead of waiting for the failure counter to fill.
+    private static readonly string[] FatalErrorSubstrings =
+    [
+        "regulatory restriction",
+        "regulatory restrictions",
+        "not available to you",
+        "API key permission",
+        "invalid api key",
+    ];
 
     public string StrategyType => StrategyTypes.GridHedge;
 
@@ -65,13 +78,9 @@ public class GridHedgeHandler : IStrategyHandler
 
         var config = JsonSerializer.Deserialize<GridHedgeConfig>(strategy.ConfigJson, JsonOptions);
         if (!ValidateConfig(strategy, config)) return;
-        config!.Tiers = config.Tiers
-            .Where(t => t.UpToPercent > 0 && t.SizeUsdt > 0)
-            .OrderBy(t => t.UpToPercent)
-            .ToList();
 
         // SameTicker: HedgeSymbol mirrors GridSymbol automatically.
-        var hedgeSymbol = (config.Mode == GridHedgeMode.SameTicker || string.IsNullOrWhiteSpace(config.HedgeSymbol))
+        var hedgeSymbol = (config!.Mode == GridHedgeMode.SameTicker || string.IsNullOrWhiteSpace(config.HedgeSymbol))
             ? config.GridSymbol
             : config.HedgeSymbol;
 
@@ -128,8 +137,8 @@ public class GridHedgeHandler : IStrategyHandler
                     break;
 
                 case GridHedgePhase.Done:
-                    // Bot completed this cycle. User must Stop → Start to begin a fresh one;
-                    // the controller's Start branch resets Phase = NotStarted.
+                    // Cycle complete. User must Stop → Start to begin a fresh one; the
+                    // controller's Start branch resets Phase = NotStarted.
                     break;
             }
         }
@@ -154,15 +163,12 @@ public class GridHedgeHandler : IStrategyHandler
         { Log(strategy, "Error", $"RangePercent должен быть > 0, текущее: {config.RangePercent}"); return false; }
         if (config.UpperExitPercent <= 0)
         { Log(strategy, "Error", $"UpperExitPercent должен быть > 0, текущее: {config.UpperExitPercent}"); return false; }
-        if (config.Tiers == null || config.Tiers.Count == 0
-            || config.Tiers.Any(t => t.UpToPercent <= 0 || t.SizeUsdt <= 0))
-        { Log(strategy, "Error", "Tiers пуст или содержит невалидные UpToPercent/SizeUsdt"); return false; }
         if (config.DcaStepPercent <= 0 || config.TpStepPercent <= 0)
         { Log(strategy, "Error", "DcaStepPercent / TpStepPercent должны быть > 0"); return false; }
-        if (config.HedgeRatio < 0 || config.HedgeRatio > 5)
-        { Log(strategy, "Error", $"HedgeRatio вне разумного диапазона [0..5]: {config.HedgeRatio}"); return false; }
-        if (config.Beta <= 0 || config.Beta > 10)
-        { Log(strategy, "Error", $"Beta вне разумного диапазона (0..10]: {config.Beta}"); return false; }
+        if (config.BetUsdt <= 0)
+        { Log(strategy, "Error", $"BetUsdt должен быть > 0, текущее: {config.BetUsdt}"); return false; }
+        if (config.HedgeNotionalUsdt < 0)
+        { Log(strategy, "Error", $"HedgeNotionalUsdt не может быть отрицательным: {config.HedgeNotionalUsdt}"); return false; }
         if (config.HedgeLeverage < 1 || config.GridLeverage < 1)
         { Log(strategy, "Error", "Leverage должен быть ≥ 1"); return false; }
         return true;
@@ -211,13 +217,12 @@ public class GridHedgeHandler : IStrategyHandler
             return;
         }
 
-        // Notional sizing: cover the entire grid (all tier levels × tier size) × HedgeRatio × β.
-        var gridNotional = ComputeGridNotional(config);
-        var hedgeNotional = gridNotional * config.HedgeRatio * config.Beta;
-        if (hedgeNotional <= 0)
+        // HedgeNotionalUsdt comes from the form's recommendation calculation (or user override).
+        // 0 = no hedge → skip opening, go straight to GridArming.
+        if (config.HedgeNotionalUsdt <= 0)
         {
-            Log(strategy, "Error",
-                $"hedgeNotional={hedgeNotional} (grid={gridNotional}, ratio={config.HedgeRatio}, β={config.Beta}) — невалидно");
+            Log(strategy, "Info", "HedgeNotionalUsdt = 0 — пропускаю открытие хеджа, иду к расстановке сетки.");
+            state.Phase = GridHedgePhase.GridArming;
             return;
         }
 
@@ -229,9 +234,9 @@ public class GridHedgeHandler : IStrategyHandler
 
         state.Phase = GridHedgePhase.HedgeOpening;
         Log(strategy, "Info",
-            $"🛡️ Открываю хедж SHORT {hedgeSymbol}: notional={hedgeNotional} USDT (grid={gridNotional} × ratio={config.HedgeRatio} × β={config.Beta}), lev={config.HedgeLeverage}");
+            $"🛡️ Открываю хедж SHORT {hedgeSymbol}: notional={config.HedgeNotionalUsdt} USDT, lev={config.HedgeLeverage}");
 
-        var result = await futures.OpenShortAsync(hedgeSymbol, hedgeNotional);
+        var result = await futures.OpenShortAsync(hedgeSymbol, config.HedgeNotionalUsdt);
         if (!result.Success || result.FilledQuantity is not > 0)
         {
             Log(strategy, "Error",
@@ -274,34 +279,36 @@ public class GridHedgeHandler : IStrategyHandler
         if (levels.Count == 0)
         {
             Log(strategy, "Error",
-                $"Сетка пуста: tier-конфиг и DcaStep дают 0 уровней внутри Range={config.RangePercent}%");
+                $"Сетка пуста: DcaStep={config.DcaStepPercent}%, Range={config.RangePercent}% — 0 уровней");
             strategy.Status = Core.Enums.StrategyStatus.Stopped;
             return;
         }
 
-        // Already-placed levels (PendingBuys, in case ArmGrid is retried after a partial failure).
+        // Already-placed levels (PendingBuys + Batches, in case ArmGrid is retried after a
+        // partial failure or a fill happened mid-arming).
         var placedKeys = new HashSet<string>(
             state.PendingBuys.Select(p => FormatLevelKey(p.LevelPercent)),
             StringComparer.OrdinalIgnoreCase);
-        // Already-filled levels (Batches, in case fills happened before ArmGrid completed).
         foreach (var b in state.Batches) placedKeys.Add(FormatLevelKey(b.LevelPercent));
 
-        var placedThisTick = 0;
         var toPlace = levels.Where(l => !placedKeys.Contains(FormatLevelKey(l.offsetPct))).ToList();
         Log(strategy, "Info",
             $"🪜 Расставляю сетку: всего уровней={levels.Count}, осталось={toPlace.Count} " +
-            $"(якорь={state.Anchor}, Range={config.RangePercent}%, default step={config.DcaStepPercent}%)");
+            $"(якорь={state.Anchor}, Range={config.RangePercent}%, step={config.DcaStepPercent}%, bet=${config.BetUsdt})");
 
-        foreach (var (offsetPct, price, tier) in toPlace)
+        var placedThisTick = 0;
+        string? lastErrorMessage = null;
+
+        foreach (var (offsetPct, price) in toPlace)
         {
             if (placedThisTick > 0) await Task.Delay(InterOrderDelayMs, ct);
             if (state.PlacementCooldownUntil.HasValue && state.PlacementCooldownUntil.Value > DateTime.UtcNow)
                 break;
 
-            var qty = tier.SizeUsdt / price;
+            var qty = config.BetUsdt / price;
             if (qty <= 0)
             {
-                Log(strategy, "Warning", $"Уровень -{offsetPct}%: qty=0 (size={tier.SizeUsdt}, price={price}) — пропуск");
+                Log(strategy, "Warning", $"Уровень -{offsetPct}%: qty=0 (bet={config.BetUsdt}, price={price}) — пропуск");
                 continue;
             }
 
@@ -310,6 +317,7 @@ public class GridHedgeHandler : IStrategyHandler
             catch (Exception ex)
             {
                 state.PlacementCooldownUntil = DateTime.UtcNow.AddMinutes(PlacementCooldownMinutes);
+                lastErrorMessage = ex.Message;
                 _logger.LogError(ex, "GridHedge: PlaceLimitBuy threw for {Symbol} @-{Pct}%", config.GridSymbol, offsetPct);
                 Log(strategy, "Error", $"Уровень -{offsetPct}% исключение (cooldown {PlacementCooldownMinutes}мин): {ex.Message}");
                 break;
@@ -331,6 +339,7 @@ public class GridHedgeHandler : IStrategyHandler
             else
             {
                 state.PlacementCooldownUntil = DateTime.UtcNow.AddMinutes(PlacementCooldownMinutes);
+                lastErrorMessage = result.ErrorMessage;
                 Log(strategy, "Warning",
                     $"Уровень -{offsetPct}% не выставлен (cooldown {PlacementCooldownMinutes}мин): {result.ErrorMessage}");
                 _logger.LogWarning("Strategy {Id}: GridHedge level -{Pct}% placement failed: {Error}",
@@ -339,12 +348,44 @@ public class GridHedgeHandler : IStrategyHandler
             }
         }
 
+        // ───────── Auto-rollback safety ─────────
+        // If this tick placed nothing, increment the consecutive-failure counter. When the
+        // exchange returned a "fatal" error (regulatory restriction / permission denied /
+        // similar) abort immediately on the first occurrence — otherwise let the counter run
+        // up to MaxConsecutiveArmFailures. In either case we transition to ExitingDown so the
+        // next tick force-closes the hedge — the user is never left with a naked short.
+        if (placedThisTick == 0 && toPlace.Count > 0)
+        {
+            state.GridArmingFailureCount++;
+            var isFatalError = !string.IsNullOrEmpty(lastErrorMessage)
+                && FatalErrorSubstrings.Any(s => lastErrorMessage!.Contains(s, StringComparison.OrdinalIgnoreCase));
+
+            if (isFatalError || state.GridArmingFailureCount >= MaxConsecutiveArmFailures)
+            {
+                Log(strategy, "Error",
+                    isFatalError
+                        ? $"🚨 Фатальная ошибка биржи при расстановке сетки: \"{lastErrorMessage}\". " +
+                          "Откатываю хедж и останавливаю бота."
+                        : $"🚨 Сетка не выставляется {state.GridArmingFailureCount} тика подряд. " +
+                          $"Откатываю хедж и останавливаю бота. Последняя ошибка: \"{lastErrorMessage}\".");
+                state.Phase = GridHedgePhase.ExitingDown;
+                state.PlacementCooldownUntil = null; // clear so ExitingDown runs immediately next tick
+                return;
+            }
+        }
+        else if (placedThisTick > 0)
+        {
+            // Any progress this tick clears the failure counter — partial-success is fine.
+            state.GridArmingFailureCount = 0;
+        }
+
         // Advance to Active only when every level we expected has a placed ID. Otherwise the
         // next tick will retry the remaining ones once the cooldown clears.
         var totalCovered = state.PendingBuys.Count + state.Batches.Count;
         if (totalCovered >= levels.Count)
         {
             state.Phase = GridHedgePhase.Active;
+            state.GridArmingFailureCount = 0;
             Log(strategy, "Info",
                 $"🟢 Сетка готова: {totalCovered}/{levels.Count} уровней. Phase=Active.");
         }
@@ -397,8 +438,7 @@ public class GridHedgeHandler : IStrategyHandler
                     break;
 
                 case OrderLifecycleStatus.Filled:
-                    // Filled with FilledQuantity == 0 — same Bybit V5 history glitch GridFloat
-                    // handles. Drop the tracking; we won't re-arm in V1 (not a recurring grid).
+                    // Filled with FilledQuantity == 0 — Bybit V5 history glitch (same as GridFloat).
                     Log(strategy, "Warning",
                         $"Лимит -{pending.LevelPercent}%: Filled но qty=0 — игнорирую (Bybit history glitch)");
                     state.PendingBuys.Remove(pending);
@@ -414,8 +454,7 @@ public class GridHedgeHandler : IStrategyHandler
         Strategy strategy, GridHedgeConfig config, GridHedgeState state, IGridLeg gridLeg,
         GridHedgePendingBuy pending, decimal fillQty, decimal fillPrice)
     {
-        var tpStep = EffectiveTpStep(config, pending.LevelPercent);
-        var tpPrice = fillPrice * (1m + tpStep / 100m);
+        var tpPrice = fillPrice * (1m + config.TpStepPercent / 100m);
 
         var batch = new GridHedgeBatch
         {
@@ -432,7 +471,7 @@ public class GridHedgeHandler : IStrategyHandler
             $"GridFill@-{pending.LevelPercent}%");
 
         Log(strategy, "Info",
-            $"✅ Фил -{pending.LevelPercent}%: qty={Math.Round(fillQty, 6)} @ {Math.Round(fillPrice, 6)} → TP={Math.Round(tpPrice, 6)} (+{tpStep}%)");
+            $"✅ Фил -{pending.LevelPercent}%: qty={Math.Round(fillQty, 6)} @ {Math.Round(fillPrice, 6)} → TP={Math.Round(tpPrice, 6)} (+{config.TpStepPercent}%)");
 
         await PlaceBatchTpAsync(strategy, state, gridLeg, batch);
     }
@@ -599,7 +638,9 @@ public class GridHedgeHandler : IStrategyHandler
         Strategy strategy, GridHedgeConfig config, GridHedgeState state,
         string hedgeSymbol, IGridLeg gridLeg, IFuturesExchangeService futures, CancellationToken ct)
     {
-        Log(strategy, "Info", $"🚪 Закрытие: Phase={state.Phase}, открытых батчей={state.Batches.Count(b => !b.Closed)}, pendingBuys={state.PendingBuys.Count}, hedgeQty={state.HedgeQty}");
+        Log(strategy, "Info",
+            $"🚪 Закрытие: Phase={state.Phase}, открытых батчей={state.Batches.Count(b => !b.Closed)}, " +
+            $"pendingBuys={state.PendingBuys.Count}, hedgeQty={state.HedgeQty}");
 
         // 1. Cancel every pending limit buy.
         foreach (var pending in state.PendingBuys.ToList())
@@ -638,8 +679,6 @@ public class GridHedgeHandler : IStrategyHandler
                 continue;
             }
 
-            // Use the most accurate close price we can get — exchange-reported FilledPrice if
-            // available, otherwise live ticker.
             var closePrice = sell.FilledPrice ?? state.LastPrice ?? batch.FilledPrice;
             RecordBatchClosure(strategy, state, gridLeg, batch, closePrice, batch.FilledQty, "ForceMarketClose");
             state.Batches.Remove(batch);
@@ -664,7 +703,6 @@ public class GridHedgeHandler : IStrategyHandler
                 return;
             }
 
-            // Hedge PnL — for a short: (avgEntry − closePrice) × qty, minus fees on both legs.
             decimal? closePxNullable;
             try { closePxNullable = await futures.GetTickerPriceAsync(hedgeSymbol); }
             catch (Exception ex)
@@ -675,7 +713,7 @@ public class GridHedgeHandler : IStrategyHandler
             var closePx = closePxNullable ?? state.HedgeAvgEntry;
             var hedgeNotional = state.HedgeAvgEntry * state.HedgeQty;
             var hedgeGross = (state.HedgeAvgEntry - closePx) * state.HedgeQty;
-            var hedgeFees = hedgeNotional * (futures.TakerFeeRate * 2m); // taker on open + taker on close
+            var hedgeFees = hedgeNotional * (futures.TakerFeeRate * 2m);
             var hedgeNet = hedgeGross - hedgeFees;
 
             state.HedgeRealizedPnl += hedgeNet;
@@ -693,81 +731,53 @@ public class GridHedgeHandler : IStrategyHandler
         }
 
         // 4. Finalize cycle.
+        var wasRollback = state.GridArmingFailureCount > 0;
         state.CompletedCycles += 1;
         state.Phase = GridHedgePhase.Done;
         state.Anchor = 0;
         state.HedgeAnchor = 0;
+        state.GridArmingFailureCount = 0;
+
         Log(strategy, "Info",
             $"🏁 Цикл #{state.CompletedCycles} завершён. " +
             $"Grid PnL за цикл (накопленный): ${Math.Round(state.GridRealizedPnl, 2)}, " +
             $"Hedge PnL (накопленный): ${Math.Round(state.HedgeRealizedPnl, 2)}. " +
-            $"Чтобы запустить новый цикл — Stop → Start.");
+            (wasRollback ? "Бот остановлен из-за невозможности выставить сетку." : "Чтобы запустить новый цикл — Stop → Start."));
+
+        if (wasRollback)
+        {
+            // Rollback path — don't leave the bot in Running state spinning on Done; the user
+            // needs to fix whatever blocked the grid (API scope, region, etc.) before retrying.
+            strategy.Status = Core.Enums.StrategyStatus.Stopped;
+        }
     }
 
     // ────────────────────────── Helpers: grid math ──────────────────────────
 
     /// <summary>
-    /// Walks each tier's offset range using the tier's effective DCA step (same algorithm as
-    /// GridFloat.ComputeDcaLevels), returning the list of grid-buy levels. Returns
-    /// (offsetPctFromAnchor, price, tier) tuples. Long-only.
+    /// Walks the lower range with uniform DcaStepPercent stride. Returns (offsetPctFromAnchor,
+    /// price) tuples for every grid-buy level. Long-only.
     /// </summary>
-    private static List<(decimal offsetPct, decimal price, GridFloatTier tier)> ComputeGridLevels(
+    private static List<(decimal offsetPct, decimal price)> ComputeGridLevels(
         GridHedgeConfig config, decimal anchor)
     {
-        var list = new List<(decimal, decimal, GridFloatTier)>();
-        if (anchor <= 0 || config.Tiers.Count == 0) return list;
+        var list = new List<(decimal, decimal)>();
+        if (anchor <= 0 || config.DcaStepPercent <= 0 || config.RangePercent <= 0) return list;
 
-        // Hard cap — protect against misconfig generating hundreds of orders.
-        const int safetyCeiling = 200;
+        const int safetyCeiling = 500;
         const decimal eps = 1e-9m;
 
-        decimal prevTopPct = 0m;
-        int k = 0;
-        foreach (var tier in config.Tiers)
+        var offsetPct = config.DcaStepPercent;
+        var k = 0;
+        while (offsetPct <= config.RangePercent + eps && k < safetyCeiling)
         {
-            var stepPct = tier.DcaStepPercent is > 0 ? tier.DcaStepPercent.Value : config.DcaStepPercent;
-            if (stepPct <= 0) continue;
-
-            var offsetPct = prevTopPct + stepPct;
-            while (offsetPct <= tier.UpToPercent + eps && k < safetyCeiling)
-            {
-                // Long-grid only: levels sit BELOW the anchor.
-                var price = anchor * (1m - offsetPct / 100m);
-                if (price <= 0) return list;
-
-                // Cap at config.RangePercent — never place buys below the stop-loss boundary.
-                if (offsetPct > config.RangePercent + eps) return list;
-
-                k++;
-                list.Add((offsetPct, price, tier));
-                offsetPct += stepPct;
-            }
-            prevTopPct = tier.UpToPercent;
-            if (k >= safetyCeiling) break;
+            var price = anchor * (1m - offsetPct / 100m);
+            if (price <= 0) break;
+            list.Add((offsetPct, price));
+            offsetPct += config.DcaStepPercent;
+            k++;
         }
         return list;
-    }
-
-    /// <summary>
-    /// Total USDT notional the grid will deploy if every level fills. Used as the basis for
-    /// hedge sizing.
-    /// </summary>
-    private static decimal ComputeGridNotional(GridHedgeConfig config)
-    {
-        var anchor = 1m; // notional sizing is anchor-independent — each level's USDT is fixed
-        var levels = ComputeGridLevels(config, anchor);
-        return levels.Sum(l => l.tier.SizeUsdt);
-    }
-
-    /// <summary>
-    /// Effective TP step% for a fill at a given offset% from anchor: the override from the
-    /// tier containing that offset, falling back to the global TpStepPercent.
-    /// </summary>
-    private static decimal EffectiveTpStep(GridHedgeConfig config, decimal offsetPct)
-    {
-        if (config.Tiers.Count == 0) return config.TpStepPercent;
-        var tier = config.Tiers.FirstOrDefault(t => offsetPct <= t.UpToPercent) ?? config.Tiers[^1];
-        return tier.TpStepPercent is > 0 ? tier.TpStepPercent.Value : config.TpStepPercent;
     }
 
     private static string FormatLevelKey(decimal offsetPct) => Math.Round(offsetPct, 6).ToString("0.######");
@@ -816,9 +826,6 @@ public class GridHedgeHandler : IStrategyHandler
 
     // ────────────────────────── Grid-leg adapter ──────────────────────────
 
-    // Lets the state machine treat the grid leg the same way regardless of whether the user
-    // chose SameTicker (spot) or CrossTicker (futures). Hedge always goes through the
-    // IFuturesExchangeService directly — that's a single leg with explicit semantics.
     private interface IGridLeg
     {
         string Symbol { get; }
