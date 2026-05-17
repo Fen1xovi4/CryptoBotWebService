@@ -189,7 +189,8 @@ public class FundingClaimHandler : IStrategyHandler
         // Verify position still exists.
         // Debounce: a single null result is treated as a transient API blip (rate limit, worker restart,
         // race after market open). We only declare ExternalClose after MaxMissedChecks consecutive misses.
-        const int MaxMissedChecks = 3;
+        // 6 ticks × 5s ≈ 30s window — long enough to ride out Bybit rate-limit bursts at minute :50.
+        const int MaxMissedChecks = 6;
 
         var posSide = state.Direction ?? "Long";
         var exchangePos = await exchange.GetPositionAsync(symbol, posSide);

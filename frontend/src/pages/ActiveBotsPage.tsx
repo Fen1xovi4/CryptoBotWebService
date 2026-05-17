@@ -97,9 +97,9 @@ const defaultConfig: WorkspaceConfig = {
   timerEnabled: false,
   timerExpiresAt: null,
   fcSizeUsdt: 100,
-  fcMinFundingRatePercent: 0.3,
+  fcMinFundingRatePercent: 0.6,
   fcMaxFundingRatePercent: 2.0,
-  fcStopLossPercent: 1.5,
+  fcStopLossPercent: 2.5,
   fcLeverage: 3,
 };
 

@@ -19,13 +19,23 @@ namespace CryptoBotWeb.Infrastructure.Strategies;
 ///
 /// Lifecycle: NotStarted → HedgeOpening → GridArming → Active → (ExitingUp | ExitingDown) → Done.
 ///
-/// On Start: anchor at current market price, open the hedge short of HedgeNotionalUsdt, lay
-/// down uniform-step limit buys of BetUsdt across the range below the anchor. Each grid fill
-/// becomes a batch with its own reduce-only TP at fill_price × (1 + TpStepPercent/100).
+/// On Start: anchor at current market price, open the hedge short of HedgeNotionalUsdt, then
+/// arm the grid:
+///   1. Open a level-0 MARKET BUY of BetUsdt at the anchor with its own TP at
+///      anchor × (1 + TpStepPercent/100).
+///   2. Lay down uniform-step limit buys of BetUsdt at −DcaStep%, −2·DcaStep%, …, −Range% below
+///      the anchor. Each limit fill becomes its own batch with its own TP at
+///      fill_price × (1 + TpStepPercent/100).
 ///
-/// Exit triggers (both close the whole bot):
-///   - price ≥ Anchor × (1 + UpperExitPercent/100) → ExitingUp (most grid in profit, hedge in loss)
-///   - price ≤ Anchor × (1 − RangePercent/100)     → ExitingDown (stop-loss; hedge in profit)
+/// Ladder-up: when the level-0 batch's TP fills, the WORKING anchor shifts up to the TP fill
+/// price, any still-pending limit buys are cancelled and the cycle re-enters GridArming.
+/// Filled deep batches keep their own TPs. The START anchor (StartAnchor) stays pinned —
+/// exit triggers are evaluated against StartAnchor, NOT the laddering Anchor, so stop-loss
+/// and upper take-profit remain at the prices set when the bot was first started.
+///
+/// Exit triggers (both close the whole bot — evaluated against the START anchor):
+///   - price ≥ StartAnchor × (1 + UpperExitPercent/100) → ExitingUp (most grid in profit, hedge in loss)
+///   - price ≤ StartAnchor × (1 − RangePercent/100)     → ExitingDown (stop-loss; hedge in profit)
 ///
 /// After Done, Stop → Start begins a fresh cycle at the current market price. Cumulative
 /// HedgeRealizedPnl / GridRealizedPnl / CompletedCycles persist across cycles.
@@ -193,7 +203,11 @@ public class GridHedgeHandler : IStrategyHandler
             if (gridPrice is null or <= 0)
             { Log(strategy, "Warning", $"Не удалось получить цену {config.GridSymbol} — пропуск тика"); return; }
             state.Anchor = gridPrice.Value;
-            Log(strategy, "Info", $"📌 ANCHOR {config.GridSymbol} = {state.Anchor}");
+            state.StartAnchor = gridPrice.Value;
+            Log(strategy, "Info",
+                $"📌 ANCHOR {config.GridSymbol} = {state.Anchor} " +
+                $"(triggers: ↑{Math.Round(state.StartAnchor * (1 + config.UpperExitPercent / 100m), 6)} / " +
+                $"↓{Math.Round(state.StartAnchor * (1 - config.RangePercent / 100m), 6)})");
         }
 
         if (state.HedgeAnchor <= 0)
@@ -276,85 +290,148 @@ public class GridHedgeHandler : IStrategyHandler
         }
 
         var levels = ComputeGridLevels(config, state.Anchor);
-        if (levels.Count == 0)
-        {
-            Log(strategy, "Error",
-                $"Сетка пуста: DcaStep={config.DcaStepPercent}%, Range={config.RangePercent}% — 0 уровней");
-            strategy.Status = Core.Enums.StrategyStatus.Stopped;
-            return;
-        }
-
-        // Already-placed levels (PendingBuys + Batches, in case ArmGrid is retried after a
-        // partial failure or a fill happened mid-arming).
-        var placedKeys = new HashSet<string>(
-            state.PendingBuys.Select(p => FormatLevelKey(p.LevelPercent)),
-            StringComparer.OrdinalIgnoreCase);
-        foreach (var b in state.Batches) placedKeys.Add(FormatLevelKey(b.LevelPercent));
-
-        var toPlace = levels.Where(l => !placedKeys.Contains(FormatLevelKey(l.offsetPct))).ToList();
-        Log(strategy, "Info",
-            $"🪜 Расставляю сетку: всего уровней={levels.Count}, осталось={toPlace.Count} " +
-            $"(якорь={state.Anchor}, Range={config.RangePercent}%, step={config.DcaStepPercent}%, bet=${config.BetUsdt})");
-
-        var placedThisTick = 0;
+        // Note: an empty `levels` list is only fatal if MarketEntryOpened is also already true.
+        // Otherwise we still want to open the level-0 market batch — the limit grid being empty
+        // is a config issue (DcaStep > Range) that the user can fix without losing the entry.
+        var madeProgressThisTick = false;
         string? lastErrorMessage = null;
 
-        foreach (var (offsetPct, price) in toPlace)
+        // ───────── Level-0 MARKET buy ─────────
+        // First step of the strategy is a market buy at the anchor. It owns its own TP at
+        // anchor × (1 + TpStep%). When that TP fills, PollTpFillsAsync triggers LadderUpAsync
+        // which shifts the anchor up and re-enters this method to re-arm a fresh generation.
+        // MarketEntryOpened guards against duplicate opens on retry-from-cooldown.
+        if (!state.MarketEntryOpened && config.BetUsdt > 0)
         {
-            if (placedThisTick > 0) await Task.Delay(InterOrderDelayMs, ct);
-            if (state.PlacementCooldownUntil.HasValue && state.PlacementCooldownUntil.Value > DateTime.UtcNow)
-                break;
-
-            var qty = config.BetUsdt / price;
-            if (qty <= 0)
-            {
-                Log(strategy, "Warning", $"Уровень -{offsetPct}%: qty=0 (bet={config.BetUsdt}, price={price}) — пропуск");
-                continue;
-            }
-
-            OrderResultDto result;
-            try { result = await gridLeg.PlaceLimitBuyAsync(price, qty); }
+            OrderResultDto? marketResult = null;
+            try { marketResult = await gridLeg.PlaceMarketBuyAsync(config.BetUsdt); }
             catch (Exception ex)
             {
                 state.PlacementCooldownUntil = DateTime.UtcNow.AddMinutes(PlacementCooldownMinutes);
                 lastErrorMessage = ex.Message;
-                _logger.LogError(ex, "GridHedge: PlaceLimitBuy threw for {Symbol} @-{Pct}%", config.GridSymbol, offsetPct);
-                Log(strategy, "Error", $"Уровень -{offsetPct}% исключение (cooldown {PlacementCooldownMinutes}мин): {ex.Message}");
-                break;
+                _logger.LogError(ex, "GridHedge: market entry threw for {Symbol}", config.GridSymbol);
+                Log(strategy, "Error", $"MARKET ENTRY (level 0%) исключение (cooldown {PlacementCooldownMinutes}мин): {ex.Message}");
             }
 
-            if (result.Success && !string.IsNullOrEmpty(result.OrderId))
+            if (marketResult != null)
             {
-                state.PendingBuys.Add(new GridHedgePendingBuy
+                if (marketResult.Success && marketResult.FilledQuantity is > 0)
                 {
-                    OrderId = result.OrderId,
-                    Price = result.FilledPrice ?? price,
-                    Qty = result.FilledQuantity ?? qty,
-                    LevelPercent = offsetPct
-                });
-                placedThisTick++;
-                Log(strategy, "Info",
-                    $"🎯 -{offsetPct}%: BUY {Math.Round(qty, 6)} @ {Math.Round(price, 6)} (id={result.OrderId})");
+                    var entryPrice = marketResult.FilledPrice is > 0 ? marketResult.FilledPrice!.Value : state.Anchor;
+                    var tpPrice = entryPrice * (1m + config.TpStepPercent / 100m);
+                    var batch = new GridHedgeBatch
+                    {
+                        BuyOrderId = marketResult.OrderId ?? string.Empty,
+                        LevelPercent = 0m,
+                        FilledPrice = entryPrice,
+                        FilledQty = marketResult.FilledQuantity.Value,
+                        TpPrice = tpPrice,
+                        FilledAt = DateTime.UtcNow
+                    };
+                    state.Batches.Add(batch);
+                    state.MarketEntryOpened = true;
+                    madeProgressThisTick = true;
+
+                    RecordTrade(strategy, gridLeg.Symbol, "Buy", batch.FilledQty, entryPrice,
+                        marketResult.OrderId, "MarketEntry@0%");
+
+                    Log(strategy, "Info",
+                        $"🚀 MARKET ENTRY (level 0%): BUY {Math.Round(batch.FilledQty, 6)} @ {Math.Round(entryPrice, 6)} " +
+                        $"→ TP={Math.Round(tpPrice, 6)} (+{config.TpStepPercent}%)");
+
+                    await PlaceBatchTpAsync(strategy, state, gridLeg, batch);
+                }
+                else
+                {
+                    state.PlacementCooldownUntil = DateTime.UtcNow.AddMinutes(PlacementCooldownMinutes);
+                    lastErrorMessage = marketResult.ErrorMessage;
+                    Log(strategy, "Error",
+                        $"❌ MARKET ENTRY (level 0%) не открыт (cooldown {PlacementCooldownMinutes}мин): {marketResult.ErrorMessage}");
+                    _logger.LogWarning("Strategy {Id}: GridHedge market entry failed: {Error}",
+                        strategy.Id, marketResult.ErrorMessage);
+                }
             }
-            else
+        }
+
+        // ───────── Limit grid below anchor ─────────
+        // Dedup by absolute price (not by LevelPercent) so a partial retry after cooldown
+        // skips already-placed limits, while a re-entry after ladder-shift treats the new
+        // anchor's levels as fresh (their absolute prices differ from any old batch's).
+        // Only PendingBuys are considered — Batches at LevelPercent != 0 hold historical
+        // absolute prices that must not block new placements at different prices.
+        if (!state.PlacementCooldownUntil.HasValue || state.PlacementCooldownUntil.Value <= DateTime.UtcNow)
+        {
+            var placedPrices = new HashSet<string>(
+                state.PendingBuys.Select(p => FormatPriceKey(p.Price)),
+                StringComparer.OrdinalIgnoreCase);
+
+            var toPlace = levels.Where(l => !placedPrices.Contains(FormatPriceKey(l.price))).ToList();
+            if (levels.Count > 0)
             {
-                state.PlacementCooldownUntil = DateTime.UtcNow.AddMinutes(PlacementCooldownMinutes);
-                lastErrorMessage = result.ErrorMessage;
-                Log(strategy, "Warning",
-                    $"Уровень -{offsetPct}% не выставлен (cooldown {PlacementCooldownMinutes}мин): {result.ErrorMessage}");
-                _logger.LogWarning("Strategy {Id}: GridHedge level -{Pct}% placement failed: {Error}",
-                    strategy.Id, offsetPct, result.ErrorMessage);
-                break;
+                Log(strategy, "Info",
+                    $"🪜 Расставляю сетку: всего уровней={levels.Count}, осталось={toPlace.Count} " +
+                    $"(якорь={state.Anchor}, Range={config.RangePercent}%, step={config.DcaStepPercent}%, bet=${config.BetUsdt})");
+            }
+
+            var placedLimitsThisTick = 0;
+            foreach (var (offsetPct, price) in toPlace)
+            {
+                if (placedLimitsThisTick > 0 || madeProgressThisTick) await Task.Delay(InterOrderDelayMs, ct);
+                if (state.PlacementCooldownUntil.HasValue && state.PlacementCooldownUntil.Value > DateTime.UtcNow)
+                    break;
+
+                var qty = config.BetUsdt / price;
+                if (qty <= 0)
+                {
+                    Log(strategy, "Warning", $"Уровень -{offsetPct}%: qty=0 (bet={config.BetUsdt}, price={price}) — пропуск");
+                    continue;
+                }
+
+                OrderResultDto result;
+                try { result = await gridLeg.PlaceLimitBuyAsync(price, qty); }
+                catch (Exception ex)
+                {
+                    state.PlacementCooldownUntil = DateTime.UtcNow.AddMinutes(PlacementCooldownMinutes);
+                    lastErrorMessage = ex.Message;
+                    _logger.LogError(ex, "GridHedge: PlaceLimitBuy threw for {Symbol} @-{Pct}%", config.GridSymbol, offsetPct);
+                    Log(strategy, "Error", $"Уровень -{offsetPct}% исключение (cooldown {PlacementCooldownMinutes}мин): {ex.Message}");
+                    break;
+                }
+
+                if (result.Success && !string.IsNullOrEmpty(result.OrderId))
+                {
+                    state.PendingBuys.Add(new GridHedgePendingBuy
+                    {
+                        OrderId = result.OrderId,
+                        Price = result.FilledPrice ?? price,
+                        Qty = result.FilledQuantity ?? qty,
+                        LevelPercent = offsetPct
+                    });
+                    placedLimitsThisTick++;
+                    madeProgressThisTick = true;
+                    Log(strategy, "Info",
+                        $"🎯 -{offsetPct}%: BUY {Math.Round(qty, 6)} @ {Math.Round(price, 6)} (id={result.OrderId})");
+                }
+                else
+                {
+                    state.PlacementCooldownUntil = DateTime.UtcNow.AddMinutes(PlacementCooldownMinutes);
+                    lastErrorMessage = result.ErrorMessage;
+                    Log(strategy, "Warning",
+                        $"Уровень -{offsetPct}% не выставлен (cooldown {PlacementCooldownMinutes}мин): {result.ErrorMessage}");
+                    _logger.LogWarning("Strategy {Id}: GridHedge level -{Pct}% placement failed: {Error}",
+                        strategy.Id, offsetPct, result.ErrorMessage);
+                    break;
+                }
             }
         }
 
         // ───────── Auto-rollback safety ─────────
-        // If this tick placed nothing, increment the consecutive-failure counter. When the
-        // exchange returned a "fatal" error (regulatory restriction / permission denied /
-        // similar) abort immediately on the first occurrence — otherwise let the counter run
-        // up to MaxConsecutiveArmFailures. In either case we transition to ExitingDown so the
-        // next tick force-closes the hedge — the user is never left with a naked short.
-        if (placedThisTick == 0 && toPlace.Count > 0)
+        // No progress this tick (no market entry, no limit placed) AND there was work to do
+        // → increment failure counter. Fatal exchange errors short-circuit to immediate
+        // rollback so the hedge isn't left naked.
+        var hadWorkThisTick = (!state.MarketEntryOpened && config.BetUsdt > 0)
+                              || state.PendingBuys.Count + (state.MarketEntryOpened ? 1 : 0) < levels.Count + 1;
+        if (!madeProgressThisTick && hadWorkThisTick)
         {
             state.GridArmingFailureCount++;
             var isFatalError = !string.IsNullOrEmpty(lastErrorMessage)
@@ -369,25 +446,24 @@ public class GridHedgeHandler : IStrategyHandler
                         : $"🚨 Сетка не выставляется {state.GridArmingFailureCount} тика подряд. " +
                           $"Откатываю хедж и останавливаю бота. Последняя ошибка: \"{lastErrorMessage}\".");
                 state.Phase = GridHedgePhase.ExitingDown;
-                state.PlacementCooldownUntil = null; // clear so ExitingDown runs immediately next tick
+                state.PlacementCooldownUntil = null;
                 return;
             }
         }
-        else if (placedThisTick > 0)
+        else if (madeProgressThisTick)
         {
-            // Any progress this tick clears the failure counter — partial-success is fine.
             state.GridArmingFailureCount = 0;
         }
 
-        // Advance to Active only when every level we expected has a placed ID. Otherwise the
-        // next tick will retry the remaining ones once the cooldown clears.
-        var totalCovered = state.PendingBuys.Count + state.Batches.Count;
-        if (totalCovered >= levels.Count)
+        // Advance to Active when market entry is in place AND every limit level is covered.
+        // Empty `levels` is fine — that just means the grid has only the market entry slot.
+        var allLimitsPlaced = state.PendingBuys.Count >= levels.Count;
+        if (state.MarketEntryOpened && allLimitsPlaced)
         {
             state.Phase = GridHedgePhase.Active;
             state.GridArmingFailureCount = 0;
             Log(strategy, "Info",
-                $"🟢 Сетка готова: {totalCovered}/{levels.Count} уровней. Phase=Active.");
+                $"🟢 Сетка готова: market entry + {state.PendingBuys.Count}/{levels.Count} лимитных уровней. Phase=Active.");
         }
     }
 
@@ -537,8 +613,15 @@ public class GridHedgeHandler : IStrategyHandler
                 case OrderLifecycleStatus.Filled when status.FilledQuantity > 0:
                 {
                     var closePrice = status.AverageFilledPrice > 0 ? status.AverageFilledPrice : batch.TpPrice;
+                    var isLevelZero = batch.LevelPercent == 0m;
                     RecordBatchClosure(strategy, state, gridLeg, batch, closePrice, status.FilledQuantity, "TpFill");
                     state.Batches.Remove(batch);
+
+                    if (isLevelZero)
+                    {
+                        await LadderUpAsync(strategy, state, gridLeg, closePrice, ct);
+                        return; // Stop polling — Phase is now GridArming, next tick re-arms.
+                    }
                     break;
                 }
 
@@ -547,8 +630,15 @@ public class GridHedgeHandler : IStrategyHandler
                     if (status.FilledQuantity > 0)
                     {
                         var closePrice = status.AverageFilledPrice > 0 ? status.AverageFilledPrice : batch.TpPrice;
+                        var isLevelZero = batch.LevelPercent == 0m;
                         RecordBatchClosure(strategy, state, gridLeg, batch, closePrice, status.FilledQuantity, "TpCancelledPartial");
                         state.Batches.Remove(batch);
+
+                        if (isLevelZero)
+                        {
+                            await LadderUpAsync(strategy, state, gridLeg, closePrice, ct);
+                            return;
+                        }
                     }
                     else
                     {
@@ -568,6 +658,40 @@ public class GridHedgeHandler : IStrategyHandler
                     break; // still resting / partial
             }
         }
+    }
+
+    // ────────────────────────── Ladder-up after level-0 TP fill ──────────────────────────
+
+    /// <summary>
+    /// Triggered when the level-0 (market entry) batch's TP fills. Shifts the anchor up to
+    /// the TP fill price, cancels every still-pending limit buy, and flips Phase back to
+    /// GridArming so the next tick opens a fresh market entry at the new anchor and re-places
+    /// the limit grid relative to it. Filled deep-level batches stay untouched — they keep
+    /// their own TPs and remain in state.Batches with their original LevelPercent (which now
+    /// references the OLD anchor; this is why the limit-grid dedup keys by absolute price).
+    /// </summary>
+    private async Task LadderUpAsync(
+        Strategy strategy, GridHedgeState state, IGridLeg gridLeg, decimal newAnchor, CancellationToken ct)
+    {
+        var oldAnchor = state.Anchor;
+        state.Anchor = newAnchor;
+
+        Log(strategy, "Info",
+            $"⬆️ LADDER UP: TP level-0 закрылся @ {Math.Round(newAnchor, 6)}. " +
+            $"Якорь {Math.Round(oldAnchor, 6)} → {Math.Round(newAnchor, 6)}. " +
+            $"Отменяю pending лимитки ({state.PendingBuys.Count}) и перевыставлю сетку на след. тике.");
+
+        foreach (var pending in state.PendingBuys.ToList())
+        {
+            try { await gridLeg.CancelOrderAsync(pending.OrderId); }
+            catch (Exception ex)
+            { _logger.LogWarning(ex, "GridHedge ladder-up: cancel pending failed for {OrderId}", pending.OrderId); }
+        }
+        state.PendingBuys.Clear();
+        state.MarketEntryOpened = false;
+        state.GridArmingFailureCount = 0;
+        state.PlacementCooldownUntil = null;
+        state.Phase = GridHedgePhase.GridArming;
     }
 
     private void RecordBatchClosure(Strategy strategy, GridHedgeState state, IGridLeg gridLeg,
@@ -613,22 +737,26 @@ public class GridHedgeHandler : IStrategyHandler
         if (price is null or <= 0) return;
 
         state.LastPrice = price.Value;
-        var upTrigger = state.Anchor * (1m + config.UpperExitPercent / 100m);
-        var downTrigger = state.Anchor * (1m - config.RangePercent / 100m);
+        // Triggers are pinned to the START anchor, not the (laddering) working anchor — so the
+        // stop-loss and upper take-profit stay at the prices set when the bot was started.
+        // Fall back to Anchor if StartAnchor is missing (state from before this field existed).
+        var triggerAnchor = state.StartAnchor > 0 ? state.StartAnchor : state.Anchor;
+        var upTrigger = triggerAnchor * (1m + config.UpperExitPercent / 100m);
+        var downTrigger = triggerAnchor * (1m - config.RangePercent / 100m);
 
         if (price.Value >= upTrigger)
         {
             state.Phase = GridHedgePhase.ExitingUp;
             Log(strategy, "Info",
                 $"⬆️ ВЕРХНИЙ ТРИГГЕР: цена {Math.Round(price.Value, 6)} ≥ {Math.Round(upTrigger, 6)} " +
-                $"(anchor + {config.UpperExitPercent}%). Закрываю grid + hedge.");
+                $"(start anchor + {config.UpperExitPercent}%). Закрываю grid + hedge.");
         }
         else if (price.Value <= downTrigger)
         {
             state.Phase = GridHedgePhase.ExitingDown;
             Log(strategy, "Warning",
                 $"⬇️ STOP-LOSS: цена {Math.Round(price.Value, 6)} ≤ {Math.Round(downTrigger, 6)} " +
-                $"(anchor − {config.RangePercent}%). Аварийное закрытие grid + hedge.");
+                $"(start anchor − {config.RangePercent}%). Аварийное закрытие grid + hedge.");
         }
     }
 
@@ -735,6 +863,7 @@ public class GridHedgeHandler : IStrategyHandler
         state.CompletedCycles += 1;
         state.Phase = GridHedgePhase.Done;
         state.Anchor = 0;
+        state.StartAnchor = 0;
         state.HedgeAnchor = 0;
         state.GridArmingFailureCount = 0;
 
@@ -780,7 +909,11 @@ public class GridHedgeHandler : IStrategyHandler
         return list;
     }
 
-    private static string FormatLevelKey(decimal offsetPct) => Math.Round(offsetPct, 6).ToString("0.######");
+    // Dedup key for grid limit placements. Uses absolute price (not LevelPercent offset) so
+    // post-ladder-shift placements at the new anchor don't collide with historical batches
+    // that were filled relative to the old anchor.
+    private static string FormatPriceKey(decimal price) =>
+        Math.Round(price, 8).ToString("0.########", System.Globalization.CultureInfo.InvariantCulture);
 
     // ────────────────────────── Helpers: persistence ──────────────────────────
 
@@ -834,6 +967,7 @@ public class GridHedgeHandler : IStrategyHandler
         Task<decimal?> GetTickerPriceAsync();
         Task<OrderResultDto> PlaceLimitBuyAsync(decimal price, decimal qty);
         Task<OrderResultDto> PlaceLimitSellAsync(decimal price, decimal qty);
+        Task<OrderResultDto> PlaceMarketBuyAsync(decimal notionalUsdt);
         Task<OrderResultDto> PlaceMarketSellAsync(decimal qty);
         Task<bool> CancelOrderAsync(string orderId);
         Task<OrderStatusDto?> GetOrderAsync(string orderId);
@@ -851,6 +985,8 @@ public class GridHedgeHandler : IStrategyHandler
             => _spot.PlaceLimitBuyAsync(Symbol, price, qty);
         public Task<OrderResultDto> PlaceLimitSellAsync(decimal price, decimal qty)
             => _spot.PlaceLimitSellAsync(Symbol, price, qty);
+        public Task<OrderResultDto> PlaceMarketBuyAsync(decimal notionalUsdt)
+            => _spot.PlaceMarketBuyAsync(Symbol, notionalUsdt);
         public Task<OrderResultDto> PlaceMarketSellAsync(decimal qty)
             => _spot.PlaceMarketSellAsync(Symbol, qty);
         public Task<bool> CancelOrderAsync(string orderId) => _spot.CancelOrderAsync(Symbol, orderId);
@@ -869,6 +1005,8 @@ public class GridHedgeHandler : IStrategyHandler
             => _futures.PlaceLimitOrderAsync(Symbol, "Buy", price, qty, reduceOnly: false);
         public Task<OrderResultDto> PlaceLimitSellAsync(decimal price, decimal qty)
             => _futures.PlaceLimitOrderAsync(Symbol, "Sell", price, qty, reduceOnly: true);
+        public Task<OrderResultDto> PlaceMarketBuyAsync(decimal notionalUsdt)
+            => _futures.OpenLongAsync(Symbol, notionalUsdt);
         public Task<OrderResultDto> PlaceMarketSellAsync(decimal qty) => _futures.CloseLongAsync(Symbol, qty);
         public Task<bool> CancelOrderAsync(string orderId) => _futures.CancelOrderAsync(Symbol, orderId);
         public Task<OrderStatusDto?> GetOrderAsync(string orderId) => _futures.GetOrderAsync(Symbol, orderId);

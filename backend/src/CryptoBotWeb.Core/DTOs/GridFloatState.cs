@@ -68,4 +68,11 @@ public class GridFloatState
     // On placement failure (min-notional, transient net/exchange error) skip further DCA/TP
     // (re)placements until this UTC instant — prevents tight retry storms.
     public DateTime? PlacementCooldownUntil { get; set; }
+
+    // Fix #6 noise dedupe — last qtyExcess value that produced a reconcile-DCA orphan
+    // warning, and the moment it was last logged. Used to suppress the chronic warning
+    // storm when the orphan can't be adopted (state.DcaOrders empty + qty unchanged).
+    // Re-logs only when the value moves > 0.1% or > 30 min elapsed.
+    public decimal? LastReconcileOrphanQty { get; set; }
+    public DateTime? LastReconcileOrphanLoggedAt { get; set; }
 }

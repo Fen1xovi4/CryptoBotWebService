@@ -128,9 +128,7 @@ public class BybitSpotExchangeService : ISpotExchangeService
             if (roundedQty < minQty)
                 return new OrderResultDto { Success = false, ErrorMessage = $"Qty {roundedQty} < min {minQty} for {symbol}" };
 
-            // Spot market SELL: qty is in base coin (default marketUnit). For market buy Bybit
-            // would expect qty in quote with MarketUnit.QuoteCoin — but GridHedge never market-
-            // buys spot (grid entries are limit buys).
+            // Spot market SELL: qty is in base coin (default marketUnit).
             var result = await _client.V5Api.Trading.PlaceOrderAsync(
                 Category.Spot, bybitSymbol, OrderSide.Sell, NewOrderType.Market, roundedQty);
 
@@ -140,6 +138,49 @@ public class BybitSpotExchangeService : ISpotExchangeService
                 OrderId = result.Data?.OrderId,
                 FilledQuantity = roundedQty,
                 ErrorMessage = result.Error?.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
+        }
+    }
+
+    public async Task<OrderResultDto> PlaceMarketBuyAsync(string symbol, decimal quoteAmount)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+
+            // Bybit spot market BUY: qty is in quote currency (USDT) when marketUnit=QuoteAsset.
+            // No qtyStep / minQty rounding — those filters are for base coin, not quote notional.
+            // After fill we poll the order to learn the actual base-coin quantity filled.
+            var result = await _client.V5Api.Trading.PlaceOrderAsync(
+                Category.Spot, bybitSymbol, OrderSide.Buy, NewOrderType.Market, quoteAmount,
+                marketUnit: MarketUnit.QuoteAsset);
+
+            if (!result.Success || string.IsNullOrEmpty(result.Data?.OrderId))
+            {
+                return new OrderResultDto
+                {
+                    Success = false,
+                    OrderId = result.Data?.OrderId,
+                    ErrorMessage = result.Error?.Message
+                };
+            }
+
+            // Poll the just-placed order so the caller gets the actual filled base-coin qty +
+            // average price (Bybit market spot fills are typically immediate but we still need
+            // the numbers off the executed record).
+            var status = await GetOrderAsync(symbol, result.Data!.OrderId!);
+
+            return new OrderResultDto
+            {
+                Success = true,
+                OrderId = result.Data.OrderId,
+                FilledQuantity = status?.FilledQuantity ?? 0m,
+                FilledPrice = status?.AverageFilledPrice ?? 0m,
+                ErrorMessage = null
             };
         }
         catch (Exception ex)

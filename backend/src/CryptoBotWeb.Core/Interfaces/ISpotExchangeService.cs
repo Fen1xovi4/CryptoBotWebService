@@ -25,6 +25,10 @@ public interface ISpotExchangeService : IDisposable
     Task<OrderResultDto> PlaceLimitSellAsync(string symbol, decimal price, decimal quantity);
     Task<OrderResultDto> PlaceMarketSellAsync(string symbol, decimal quantity);
 
+    // GridHedge level-0 entry uses this for the SameTicker spot leg. quoteAmount is in USDT;
+    // Bybit spot market buys take quote-coin notional (MarketUnit.QuoteCoin).
+    Task<OrderResultDto> PlaceMarketBuyAsync(string symbol, decimal quoteAmount);
+
     Task<bool> CancelOrderAsync(string symbol, string orderId);
     Task<bool> CancelAllOrdersAsync(string symbol);
     Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId);
