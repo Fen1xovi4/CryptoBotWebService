@@ -23,9 +23,24 @@ public enum GridHedgeMode
     CrossTicker = 2
 }
 
+// Margin/position-mode selector for the exchange account.
+//   OneWay (default, all exchanges): each symbol has at most one net position.
+//     SameTicker therefore requires a spot leg (grid) + futures leg (hedge) on the SAME account
+//     — you can't be both long and short the same symbol on one one-way futures account.
+//   Hedge (Bybit-only V1): both legs go through ONE futures account in hedge mode, where the
+//     long-grid position (positionIdx=1) and the short-hedge position (positionIdx=2) coexist
+//     on the same symbol. Requires the user to have switched the Bybit account to Hedge Mode
+//     in the exchange UI — there is no client-side toggle from the backend.
+public enum GridHedgePositionMode
+{
+    OneWay = 1,
+    Hedge = 2
+}
+
 public class GridHedgeConfig
 {
     public GridHedgeMode Mode { get; set; } = GridHedgeMode.SameTicker;
+    public GridHedgePositionMode PositionMode { get; set; } = GridHedgePositionMode.OneWay;
 
     public string GridSymbol { get; set; } = string.Empty;
     public string HedgeSymbol { get; set; } = string.Empty;

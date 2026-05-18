@@ -393,6 +393,14 @@ public class GridFloatHandler : IStrategyHandler
         // Cleanup guard: drop batches whose qty is below the exchange minimum (legacy zombies
         // from partial-fill reconcile adoptions before Fix #5 was deployed). Without this they
         // would loop in HealMissingTps forever logging "Qty 0 < min N".
+        //
+        // Fix #6 (prevention): also floor batch.Qty to the symbol's lot step before placement,
+        // so the reduce-only limit qty matches what the exchange can actually fill exactly.
+        // Without this, a batch.Qty=3042.685 placed as a TP on Bybit JCTUSDT can fill 3000
+        // (rounded) and leave 42.685 dust untracked on the exchange — which then triggers a
+        // chronic ReconcileMissedDcaFills warning storm because state.DcaOrders is empty and
+        // the orphan can never be adopted. By flooring at placement time we keep state and
+        // exchange aligned per-batch.
         try
         {
             var (qtyStep, minQty) = await exchange.GetSymbolInfoAsync(config.Symbol);
@@ -403,6 +411,20 @@ public class GridFloatHandler : IStrategyHandler
                     $"Это легаси из partial-fill reconcile до Fix #5. PnL по нему не реализуется.");
                 state.Batches.Remove(batch);
                 return;
+            }
+
+            if (qtyStep > 0)
+            {
+                var flooredQty = Math.Floor(batch.Qty / qtyStep) * qtyStep;
+                if (flooredQty < batch.Qty && flooredQty >= minQty)
+                {
+                    var dust = batch.Qty - flooredQty;
+                    Log(strategy, "Info",
+                        $"⚙️ Fix #6: округляю TP qty батча #{batch.LevelIdx} вниз до lot-step: " +
+                        $"{batch.Qty} → {flooredQty} (lot-step={qtyStep}, dust={dust} списан). " +
+                        $"Предотвращает orphan на бирже.");
+                    batch.Qty = flooredQty;
+                }
             }
         }
         catch (NotSupportedException) { /* exchange doesn't expose, fall through to normal flow */ }
@@ -638,6 +660,48 @@ public class GridFloatHandler : IStrategyHandler
             "Strategy {Id}: GridFloat TP batch#{Lvl} {Dir} qty={Qty} @ {Price} netPnL={Pnl}",
             strategy.Id, batch.LevelIdx, config.Direction, closeQty, closePrice, netPnl);
 
+        // Fix #6 (defense in depth): handle partial-TP-fill where exchange returned
+        // Status=Filled but FilledQuantity < batch.Qty. Without this branch the batch is
+        // dropped from state while a residual qty sits on the exchange — producing the
+        // chronic qtyExcess loop documented in iter-50/53. Two sub-cases:
+        //
+        //   residual ≥ minQty → keep the batch open at the reduced qty, clear TpOrderId so
+        //     HealMissingTps re-places a fresh TP on the next tick. The batch will close
+        //     normally when the new TP fills.
+        //   residual < minQty → can't be re-sold, so just write it off (log + remove batch).
+        //     Exchange dust remains but Fix #6's reconcile-DCA dedupe (see ReconcileMissedDcaFills)
+        //     will not flood the log.
+        var residual = batch.Qty - closeQty;
+        if (residual > 0)
+        {
+            decimal partialMinQty = 0m;
+            try
+            {
+                (_, partialMinQty) = await exchange.GetSymbolInfoAsync(config.Symbol);
+            }
+            catch (NotSupportedException) { }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GridFloat Fix #6 partial-TP: GetSymbolInfoAsync failed for {Symbol}", config.Symbol);
+            }
+
+            if (partialMinQty > 0 && residual >= partialMinQty)
+            {
+                batch.Qty = residual;
+                batch.TpOrderId = null;
+                Log(strategy, "Warning",
+                    $"⚠️ Fix #6 partial TP батча #{batch.LevelIdx}: закрылось {closeQty} из {closeQty + residual}, " +
+                    $"residual {residual} ≥ min {partialMinQty} — оставляю батч, TP переустановится.");
+                await _telegramSignalService.SendPositionClosedSignalAsync(
+                    strategy, config.Symbol, config.Direction, netPnl, pnlPct, ct);
+                return;
+            }
+
+            Log(strategy, "Info",
+                $"⚙️ Fix #6 partial TP батча #{batch.LevelIdx}: dust residual={residual} < min={partialMinQty} — " +
+                $"списываю и удаляю батч (untracked dust может остаться на бирже).");
+        }
+
         state.Batches.Remove(batch);
 
         // If this batch was the anchor (level 0) and grid still has DCAs ↓ resting, the next
@@ -819,6 +883,25 @@ public class GridFloatHandler : IStrategyHandler
         decimal exchangeQty, decimal stateQty, decimal price, CancellationToken ct)
     {
         var qtyExcess = exchangeQty - stateQty;
+
+        // Fix #6 (dedupe): when state.DcaOrders is empty (nothing to adopt the orphan into)
+        // AND the qtyExcess value hasn't moved more than 0.1% since the last log AND less than
+        // 30 minutes have passed, suppress both this entry log and the trailing "остаток"
+        // warning. Without this, a stuck orphan (e.g. residual from a Bybit partial TP fill
+        // that left dust on the exchange) generates ~600 warnings/hour for hours on end.
+        //
+        // The state field gets cleared the moment qtyExcess changes value (someone placed/
+        // filled/cancelled an order, or the orphan resolved itself), so a fresh anomaly
+        // always gets logged once. Re-logs every 30 min as a heartbeat.
+        var canAdopt = state.DcaOrders.Count > 0;
+        if (!canAdopt && state.LastReconcileOrphanQty.HasValue && state.LastReconcileOrphanLoggedAt.HasValue)
+        {
+            var lastQty = state.LastReconcileOrphanQty.Value;
+            var deltaPct = lastQty > 0 ? Math.Abs(qtyExcess - lastQty) / lastQty : 1m;
+            var ageMin = (DateTime.UtcNow - state.LastReconcileOrphanLoggedAt.Value).TotalMinutes;
+            if (deltaPct < 0.001m && ageMin < 30) return;
+        }
+
         Log(strategy, "Warning",
             $"🔎 RECONCILE DCA: state qty={Math.Round(stateQty, 8)} vs exchange qty={Math.Round(exchangeQty, 8)} " +
             $"(биржа БОЛЬШЕ на {Math.Round(qtyExcess, 8)}, цена={Math.Round(price, 8)}). " +
@@ -857,6 +940,18 @@ public class GridFloatHandler : IStrategyHandler
             Log(strategy, "Warning",
                 $"После reconcile DCA остаток qtyExcess={Math.Round(qtyExcess, 8)} — нет больше DCA-уровней для адаптации. " +
                 "Возможно ручное открытие извне или повреждение state.");
+
+            // Fix #6 (dedupe): remember this orphan qty + timestamp so subsequent identical
+            // observations get suppressed by the gate at the top of this method.
+            state.LastReconcileOrphanQty = qtyExcess;
+            state.LastReconcileOrphanLoggedAt = DateTime.UtcNow;
+        }
+        else
+        {
+            // Orphan resolved (either fully adopted or dropped below 1% noise floor) —
+            // clear the dedupe state so any new anomaly logs immediately.
+            state.LastReconcileOrphanQty = null;
+            state.LastReconcileOrphanLoggedAt = null;
         }
     }
 

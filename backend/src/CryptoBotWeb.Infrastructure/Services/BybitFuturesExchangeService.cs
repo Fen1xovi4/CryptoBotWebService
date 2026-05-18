@@ -14,6 +14,15 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
     public decimal TakerFeeRate => 0.00055m;
     public decimal MakerFeeRate => 0.0002m;
 
+    // Public klines are per-IP rate-limited on Bybit and identical regardless of which user
+    // asked. A process-wide cache keyed by (symbol, interval, limit) lets concurrent strategies
+    // share one HTTP fetch — both reduces requests and coalesces parallel calls. TTL=4s is
+    // below the 5s strategy tick and well below 1m candle granularity, so staleness is invisible.
+    // Failed fetches are cached too (for TTL), giving an organic short circuit-breaker on outage.
+    private static readonly TimeSpan _klinesCacheTtl = TimeSpan.FromSeconds(4);
+    private static readonly object _klinesCacheLock = new();
+    private static readonly Dictionary<string, (DateTime fetchedAt, Task<List<CandleDto>> task)> _klinesCache = new();
+
     private readonly BybitRestClient _client;
 
     // Bybit Broker Program: our broker code "Ty001081" must be sent as the Referer header
@@ -49,7 +58,22 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         return all.OrderBy(s => s.Symbol).ToList();
     }
 
-    public async Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit)
+    public Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit)
+    {
+        var key = $"{symbol}|{timeframe}|{limit}";
+        lock (_klinesCacheLock)
+        {
+            var now = DateTime.UtcNow;
+            if (_klinesCache.TryGetValue(key, out var entry) && (now - entry.fetchedAt) < _klinesCacheTtl)
+                return entry.task;
+
+            var fetchTask = FetchKlinesAsync(symbol, timeframe, limit);
+            _klinesCache[key] = (now, fetchTask);
+            return fetchTask;
+        }
+    }
+
+    private async Task<List<CandleDto>> FetchKlinesAsync(string symbol, string timeframe, int limit)
     {
         var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
         var interval = MapInterval(timeframe);
@@ -590,6 +614,135 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         catch
         {
             return false;
+        }
+    }
+
+    // ────────────────────────── Hedge mode (V1 — Bybit-only) ──────────────────────────
+    // Bybit V5 supports per-symbol hedge mode on linear USDT-perpetuals: a single account
+    // can hold a long (positionIdx=1) AND short (positionIdx=2) on the same symbol
+    // simultaneously. The account must be switched to Hedge Mode in the Bybit UI first —
+    // we do not flip the mode from code, only consume it.
+
+    public bool IsHedgeModeSupported => true;
+
+    /// <summary>
+    /// Probes the account's position-mode for the given symbol. Bybit V5 returns one row per
+    /// position slot — in one-way mode the result has positionIdx=0; in hedge mode it has
+    /// positionIdx=1 AND positionIdx=2 entries (even if the actual quantities are zero).
+    /// Returns null if the probe failed (network/auth) or returned no slots at all.
+    /// </summary>
+    public async Task<bool?> IsHedgeModeEnabledAsync(string symbol)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var result = await _client.V5Api.Trading.GetPositionsAsync(Category.Linear, bybitSymbol);
+            if (!result.Success || result.Data?.List == null) return null;
+            var slots = result.Data.List.ToList();
+            if (slots.Count == 0) return null;
+            return slots.Any(p => p.PositionIdx == PositionIdx.BuyHedgeMode
+                               || p.PositionIdx == PositionIdx.SellHedgeMode);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public async Task<OrderResultDto> OpenHedgeLongAsync(string symbol, decimal quoteAmount)
+        => await PlaceHedgeMarketAsync(symbol, OrderSide.Buy, quoteAmount, PositionIdx.BuyHedgeMode, reduceOnly: false);
+
+    public async Task<OrderResultDto> OpenHedgeShortAsync(string symbol, decimal quoteAmount)
+        => await PlaceHedgeMarketAsync(symbol, OrderSide.Sell, quoteAmount, PositionIdx.SellHedgeMode, reduceOnly: false);
+
+    public async Task<OrderResultDto> CloseHedgeLongAsync(string symbol, decimal quantity)
+        => await CloseHedgeMarketAsync(symbol, OrderSide.Sell, quantity, PositionIdx.BuyHedgeMode);
+
+    public async Task<OrderResultDto> CloseHedgeShortAsync(string symbol, decimal quantity)
+        => await CloseHedgeMarketAsync(symbol, OrderSide.Buy, quantity, PositionIdx.SellHedgeMode);
+
+    private async Task<OrderResultDto> PlaceHedgeMarketAsync(
+        string symbol, OrderSide side, decimal quoteAmount, PositionIdx posIdx, bool reduceOnly)
+    {
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        var price = await GetTickerPriceAsync(symbol);
+        if (price == null || price == 0)
+            return new OrderResultDto { Success = false, ErrorMessage = "Failed to get ticker price" };
+
+        var (qtyStep, minQty) = await GetSymbolInfoAsync(bybitSymbol);
+        var quantity = FloorToStep(quoteAmount / price.Value, qtyStep);
+
+        if (quantity < minQty)
+            return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} < min {minQty} for {symbol}" };
+
+        var result = await _client.V5Api.Trading.PlaceOrderAsync(
+            Category.Linear, bybitSymbol, side, NewOrderType.Market, quantity,
+            positionIdx: posIdx, reduceOnly: reduceOnly);
+
+        return new OrderResultDto
+        {
+            Success = result.Success,
+            OrderId = result.Data?.OrderId,
+            FilledPrice = price,
+            FilledQuantity = quantity,
+            ErrorMessage = result.Error?.Message
+        };
+    }
+
+    private async Task<OrderResultDto> CloseHedgeMarketAsync(
+        string symbol, OrderSide side, decimal quantity, PositionIdx posIdx)
+    {
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        var (qtyStep, _) = await GetSymbolInfoAsync(bybitSymbol);
+        var qty = FloorToStep(quantity, qtyStep);
+
+        var result = await _client.V5Api.Trading.PlaceOrderAsync(
+            Category.Linear, bybitSymbol, side, NewOrderType.Market, qty,
+            positionIdx: posIdx, reduceOnly: true);
+
+        return new OrderResultDto
+        {
+            Success = result.Success,
+            OrderId = result.Data?.OrderId,
+            ErrorMessage = result.Error?.Message
+        };
+    }
+
+    public async Task<OrderResultDto> PlaceLimitHedgeOrderAsync(
+        string symbol, string side, string positionSide, decimal price, decimal quantity, bool reduceOnly = false)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var orderSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? OrderSide.Buy : OrderSide.Sell;
+            var posIdx = positionSide.Equals("Long", StringComparison.OrdinalIgnoreCase)
+                ? PositionIdx.BuyHedgeMode
+                : PositionIdx.SellHedgeMode;
+
+            var (qtyStep, minQty, priceStep) = await GetSymbolInfoWithPriceAsync(bybitSymbol);
+            var roundedQty = FloorToStep(quantity, qtyStep);
+            var roundedPrice = FloorToStep(price, priceStep);
+
+            if (roundedQty < minQty)
+                return new OrderResultDto { Success = false, ErrorMessage = $"Qty {roundedQty} < min {minQty} for {symbol}" };
+
+            var result = await _client.V5Api.Trading.PlaceOrderAsync(
+                Category.Linear, bybitSymbol, orderSide, NewOrderType.Limit, roundedQty,
+                price: roundedPrice, timeInForce: TimeInForce.GoodTillCanceled,
+                positionIdx: posIdx, reduceOnly: reduceOnly);
+
+            return new OrderResultDto
+            {
+                Success = result.Success,
+                OrderId = result.Data?.OrderId,
+                FilledPrice = roundedPrice,
+                FilledQuantity = roundedQty,
+                ErrorMessage = result.Error?.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
         }
     }
 

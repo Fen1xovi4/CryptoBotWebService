@@ -178,8 +178,30 @@ public class SmaDcaHandler : IStrategyHandler
             }
         }
 
-        // 3. Fetch candles for SMA. Extra headroom so the seed SMA is well-populated.
-        var needsCandles = Math.Max(config.SmaPeriod + 20, 300);
+        // 2c. Skip Klines fetch if no new bar can have closed yet.
+        // GetKlines is the heaviest public endpoint and weighs against the shared per-IP budget;
+        // a 1h strategy would otherwise burn 720 needless requests/hour returning a bar we've
+        // already evaluated. Position/TP/ticker safety checks above still run every 5s — only the
+        // indicator data is gated to bar boundaries. 5s grace lets the exchange finalize the bar.
+        if (state.LastProcessedCandleTime.HasValue)
+        {
+            var barMinutes = ParseTimeframeMinutes(config.Timeframe);
+            if (barMinutes > 0)
+            {
+                var nextBarClose = state.LastProcessedCandleTime.Value + TimeSpan.FromMinutes(barMinutes);
+                if (DateTime.UtcNow < nextBarClose + TimeSpan.FromSeconds(5))
+                {
+                    if (await SyncIfClosedExternally(strategy, state, ct))
+                        return;
+                    SaveState(strategy, state);
+                    await _db.SaveChangesAsync(ct);
+                    return;
+                }
+            }
+        }
+
+        // 3. Fetch candles for SMA. 2× period gives a fully-warmed seed window.
+        var needsCandles = config.SmaPeriod * 2;
         var candles = await exchange.GetKlinesAsync(config.Symbol, config.Timeframe, needsCandles);
         if (candles.Count < config.SmaPeriod + 1)
         {

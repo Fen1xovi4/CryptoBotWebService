@@ -50,9 +50,15 @@ public class GridHedgeState
 {
     public GridHedgePhase Phase { get; set; } = GridHedgePhase.NotStarted;
 
-    // Captured market price of GridSymbol at activation. Drives every grid-level calculation
-    // and the exit triggers. 0 = not yet anchored.
+    // Working anchor for the grid leg. Drives grid-level price math AND moves up after each
+    // ladder-up (TP fill of the level-0 market batch). 0 = not yet anchored.
     public decimal Anchor { get; set; }
+
+    // The ORIGINAL anchor captured at activation — never changes for the lifetime of a cycle.
+    // Drives the exit triggers (UpperExitPercent / RangePercent) so the stop-loss and upper
+    // take-profit stay pinned to the price where the bot started, even after the working
+    // anchor ladders up. Reset to 0 on cycle end (alongside Anchor).
+    public decimal StartAnchor { get; set; }
 
     // Captured market price of HedgeSymbol at activation (= Anchor when Mode==SameTicker).
     // Used to compute hedge PnL on close.
@@ -85,4 +91,10 @@ public class GridHedgeState
     // hedge is rolled back via a forced ExitingDown — prevents a naked hedge from sitting on
     // the exchange when the grid leg refuses (e.g. Bybit Spot regulatory restriction).
     public int GridArmingFailureCount { get; set; }
+
+    // Marks the level-0 market entry as already opened for the current grid generation.
+    // Reset to false at Start and after a ladder-up shift (so the next ArmGridAsync opens a
+    // fresh market batch at the new anchor). Without this, repeated GridArming retries (e.g.
+    // after a cooldown) would open duplicate market buys at level 0.
+    public bool MarketEntryOpened { get; set; }
 }
