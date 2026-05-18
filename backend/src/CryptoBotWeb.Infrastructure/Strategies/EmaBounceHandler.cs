@@ -489,7 +489,7 @@ public class EmaBounceHandler : IStrategyHandler
                     var estPnlDollar = position.OrderSize * estPnlPercent / 100m;
                     var estCommission = position.OrderSize * exchange.TakerFeeRate * 2m;
                     UpdateMartingaleState(config, state, estPnlPercent, position.OrderSize);
-                    RecordTrade(strategy, config.Symbol, "Sell", position.Quantity, closePrice, null, reason + " (exchange-closed)",
+                    RecordTrade(strategy, config.Symbol, "Sell", position.Quantity, closePrice, null, "Ext:" + reason,
                         pnlDollar: estPnlDollar - estCommission, commission: estCommission);
                     state.OpenLong = null;
                     state.LastPrice = null;
@@ -562,7 +562,7 @@ public class EmaBounceHandler : IStrategyHandler
                     var estPnlDollar = position.OrderSize * estPnlPercent / 100m;
                     var estCommission = position.OrderSize * exchange.TakerFeeRate * 2m;
                     UpdateMartingaleState(config, state, estPnlPercent, position.OrderSize);
-                    RecordTrade(strategy, config.Symbol, "Buy", position.Quantity, closePrice, null, reason + " (exchange-closed)",
+                    RecordTrade(strategy, config.Symbol, "Buy", position.Quantity, closePrice, null, "Ext:" + reason,
                         pnlDollar: estPnlDollar - estCommission, commission: estCommission);
                     state.OpenShort = null;
                     state.LastPrice = null;

@@ -304,7 +304,7 @@ public class FundingClaimHandler : IStrategyHandler
 
             if (!rateOk || !signOk)
             {
-                string reason = !signOk ? "FundingSignFlipped" : "FundingBelowThreshold";
+                string reason = !signOk ? "FundingSignFlipped" : "FundingBelowMin";
                 Log(strategy, "Info",
                     $"Hourly check: closing position — {reason} (rate={state.CurrentFundingRate:P4}, " +
                     $"threshold={wsCfg.FcMinFundingRatePercent}%)");

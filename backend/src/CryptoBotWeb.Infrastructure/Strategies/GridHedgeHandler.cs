@@ -98,12 +98,26 @@ public class GridHedgeHandler : IStrategyHandler
                     ?? new GridHedgeState();
 
         // Resolve the grid leg through an adapter so the state machine doesn't care whether
-        // we're hitting Bybit spot or Bybit futures for the long-grid side.
+        // we're hitting Bybit spot, Bybit futures (one-way), or Bybit futures hedge mode for
+        // the long-grid side.
         ISpotExchangeService? spotForDispose = null;
         IGridLeg gridLeg;
         try
         {
-            if (config.Mode == GridHedgeMode.SameTicker)
+            if (config.PositionMode == GridHedgePositionMode.Hedge)
+            {
+                if (!futures.IsHedgeModeSupported)
+                {
+                    Log(strategy, "Error",
+                        "PositionMode=Hedge не поддерживается этой биржей (поддерживается только Bybit). " +
+                        "Переключите PositionMode на OneWay или выберите Bybit-аккаунт.");
+                    strategy.Status = Core.Enums.StrategyStatus.Stopped;
+                    await _db.SaveChangesAsync(ct);
+                    return;
+                }
+                gridLeg = new HedgedFuturesGridLeg(futures, config.GridSymbol);
+            }
+            else if (config.Mode == GridHedgeMode.SameTicker)
             {
                 spotForDispose = _factory.CreateSpot(strategy.Account);
                 gridLeg = new SpotGridLeg(spotForDispose, config.GridSymbol);
@@ -181,6 +195,13 @@ public class GridHedgeHandler : IStrategyHandler
         { Log(strategy, "Error", $"HedgeNotionalUsdt не может быть отрицательным: {config.HedgeNotionalUsdt}"); return false; }
         if (config.HedgeLeverage < 1 || config.GridLeverage < 1)
         { Log(strategy, "Error", "Leverage должен быть ≥ 1"); return false; }
+        if (config.PositionMode == GridHedgePositionMode.Hedge && config.Mode == GridHedgeMode.CrossTicker)
+        {
+            Log(strategy, "Error",
+                "PositionMode=Hedge применим только при Mode=SameTicker (одинаковый тикер). " +
+                "Для CrossTicker (разные тикеры) используйте PositionMode=OneWay.");
+            return false;
+        }
         return true;
     }
 
@@ -250,7 +271,9 @@ public class GridHedgeHandler : IStrategyHandler
         Log(strategy, "Info",
             $"🛡️ Открываю хедж SHORT {hedgeSymbol}: notional={config.HedgeNotionalUsdt} USDT, lev={config.HedgeLeverage}");
 
-        var result = await futures.OpenShortAsync(hedgeSymbol, config.HedgeNotionalUsdt);
+        var result = config.PositionMode == GridHedgePositionMode.Hedge
+            ? await futures.OpenHedgeShortAsync(hedgeSymbol, config.HedgeNotionalUsdt)
+            : await futures.OpenShortAsync(hedgeSymbol, config.HedgeNotionalUsdt);
         if (!result.Success || result.FilledQuantity is not > 0)
         {
             Log(strategy, "Error",
@@ -556,8 +579,12 @@ public class GridHedgeHandler : IStrategyHandler
     {
         if (batch.FilledQty <= 0 || batch.TpPrice <= 0) return;
 
+        // Discount by buy-side fee on spot legs — see IGridLeg.SellQtyAfterBuyFee.
+        var sellQty = gridLeg.SellQtyAfterBuyFee(batch.FilledQty);
+        if (sellQty <= 0) return;
+
         OrderResultDto result;
-        try { result = await gridLeg.PlaceLimitSellAsync(batch.TpPrice, batch.FilledQty); }
+        try { result = await gridLeg.PlaceLimitSellAsync(batch.TpPrice, sellQty); }
         catch (Exception ex)
         {
             batch.TpOrderId = null;
@@ -570,7 +597,7 @@ public class GridHedgeHandler : IStrategyHandler
         {
             batch.TpOrderId = result.OrderId;
             Log(strategy, "Info",
-                $"🎯 TP -{batch.LevelPercent}%: SELL {Math.Round(batch.FilledQty, 6)} @ {Math.Round(batch.TpPrice, 6)} (id={result.OrderId})");
+                $"🎯 TP -{batch.LevelPercent}%: SELL {Math.Round(sellQty, 6)} @ {Math.Round(batch.TpPrice, 6)} (id={result.OrderId})");
         }
         else
         {
@@ -631,7 +658,7 @@ public class GridHedgeHandler : IStrategyHandler
                     {
                         var closePrice = status.AverageFilledPrice > 0 ? status.AverageFilledPrice : batch.TpPrice;
                         var isLevelZero = batch.LevelPercent == 0m;
-                        RecordBatchClosure(strategy, state, gridLeg, batch, closePrice, status.FilledQuantity, "TpCancelledPartial");
+                        RecordBatchClosure(strategy, state, gridLeg, batch, closePrice, status.FilledQuantity, "TpCancelPart");
                         state.Batches.Remove(batch);
 
                         if (isLevelZero)
@@ -703,7 +730,7 @@ public class GridHedgeHandler : IStrategyHandler
         // Buy was a maker limit, TP exit is a maker limit on TP fills / taker on forced market
         // close. Approximate uniformly with maker+maker for TP fills, maker+taker for forced
         // market closures.
-        var feeRate = reason == "ForceMarketClose"
+        var feeRate = reason == "ForceClose"
             ? gridLeg.MakerFeeRate + gridLeg.TakerFeeRate
             : gridLeg.MakerFeeRate * 2m;
         var commission = notional * feeRate;
@@ -792,8 +819,12 @@ public class GridHedgeHandler : IStrategyHandler
                 batch.TpOrderId = null;
             }
 
+            // Spot legs need the buy-fee discount or the market sell rejects with "Insufficient balance".
+            var closeQty = gridLeg.SellQtyAfterBuyFee(batch.FilledQty);
+            if (closeQty <= 0) { state.Batches.Remove(batch); continue; }
+
             OrderResultDto sell;
-            try { sell = await gridLeg.PlaceMarketSellAsync(batch.FilledQty); }
+            try { sell = await gridLeg.PlaceMarketSellAsync(closeQty); }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "GridHedge: force-close market sell threw for batch @-{Pct}%", batch.LevelPercent);
@@ -808,7 +839,7 @@ public class GridHedgeHandler : IStrategyHandler
             }
 
             var closePrice = sell.FilledPrice ?? state.LastPrice ?? batch.FilledPrice;
-            RecordBatchClosure(strategy, state, gridLeg, batch, closePrice, batch.FilledQty, "ForceMarketClose");
+            RecordBatchClosure(strategy, state, gridLeg, batch, closePrice, closeQty, "ForceClose");
             state.Batches.Remove(batch);
         }
 
@@ -816,7 +847,12 @@ public class GridHedgeHandler : IStrategyHandler
         if (state.HedgeQty > 0)
         {
             OrderResultDto hedgeClose;
-            try { hedgeClose = await futures.CloseShortAsync(hedgeSymbol, state.HedgeQty); }
+            try
+            {
+                hedgeClose = config.PositionMode == GridHedgePositionMode.Hedge
+                    ? await futures.CloseHedgeShortAsync(hedgeSymbol, state.HedgeQty)
+                    : await futures.CloseShortAsync(hedgeSymbol, state.HedgeQty);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "GridHedge: hedge close threw for {Symbol}", hedgeSymbol);
@@ -964,6 +1000,11 @@ public class GridHedgeHandler : IStrategyHandler
         string Symbol { get; }
         decimal MakerFeeRate { get; }
         decimal TakerFeeRate { get; }
+        // Multiplier applied to a gross-buy-fill qty before placing a sell against that fill.
+        // Bybit SPOT charges the buy-side fee in the base coin, so a 7.03 XRP fill actually
+        // credits ~7.02297 XRP — selling the full 7.03 fails with "Insufficient balance". For
+        // futures legs the fee comes out of margin, not the position size, so this stays 1.0.
+        decimal SellQtyAfterBuyFee(decimal grossFillQty);
         Task<decimal?> GetTickerPriceAsync();
         Task<OrderResultDto> PlaceLimitBuyAsync(decimal price, decimal qty);
         Task<OrderResultDto> PlaceLimitSellAsync(decimal price, decimal qty);
@@ -979,6 +1020,11 @@ public class GridHedgeHandler : IStrategyHandler
         public string Symbol { get; }
         public decimal MakerFeeRate => _spot.MakerFeeRate;
         public decimal TakerFeeRate => _spot.TakerFeeRate;
+        // Discount by taker rate (≥ maker rate on Bybit spot), plus a tiny safety buffer for
+        // funding-rebate / fee-tier edge cases. The spot service floors to BasePrecision, so a
+        // small over-discount just yields a few satoshi of dust — strictly safer than a reject.
+        public decimal SellQtyAfterBuyFee(decimal grossFillQty)
+            => grossFillQty * (1m - _spot.TakerFeeRate - 0.0001m);
         public SpotGridLeg(ISpotExchangeService spot, string symbol) { _spot = spot; Symbol = symbol; }
         public Task<decimal?> GetTickerPriceAsync() => _spot.GetTickerPriceAsync(Symbol);
         public Task<OrderResultDto> PlaceLimitBuyAsync(decimal price, decimal qty)
@@ -999,6 +1045,7 @@ public class GridHedgeHandler : IStrategyHandler
         public string Symbol { get; }
         public decimal MakerFeeRate => _futures.MakerFeeRate;
         public decimal TakerFeeRate => _futures.TakerFeeRate;
+        public decimal SellQtyAfterBuyFee(decimal grossFillQty) => grossFillQty;
         public FuturesGridLeg(IFuturesExchangeService futures, string symbol) { _futures = futures; Symbol = symbol; }
         public Task<decimal?> GetTickerPriceAsync() => _futures.GetTickerPriceAsync(Symbol);
         public Task<OrderResultDto> PlaceLimitBuyAsync(decimal price, decimal qty)
@@ -1008,6 +1055,30 @@ public class GridHedgeHandler : IStrategyHandler
         public Task<OrderResultDto> PlaceMarketBuyAsync(decimal notionalUsdt)
             => _futures.OpenLongAsync(Symbol, notionalUsdt);
         public Task<OrderResultDto> PlaceMarketSellAsync(decimal qty) => _futures.CloseLongAsync(Symbol, qty);
+        public Task<bool> CancelOrderAsync(string orderId) => _futures.CancelOrderAsync(Symbol, orderId);
+        public Task<OrderStatusDto?> GetOrderAsync(string orderId) => _futures.GetOrderAsync(Symbol, orderId);
+    }
+
+    // Hedge-mode grid leg — long-side (positionIdx=1) lives on the SAME futures account as the
+    // short hedge (positionIdx=2). All grid placements target the Long position side; reduce-only
+    // TP sells close that side only, never touching the short hedge.
+    private sealed class HedgedFuturesGridLeg : IGridLeg
+    {
+        private readonly IFuturesExchangeService _futures;
+        public string Symbol { get; }
+        public decimal MakerFeeRate => _futures.MakerFeeRate;
+        public decimal TakerFeeRate => _futures.TakerFeeRate;
+        public decimal SellQtyAfterBuyFee(decimal grossFillQty) => grossFillQty;
+        public HedgedFuturesGridLeg(IFuturesExchangeService futures, string symbol)
+        { _futures = futures; Symbol = symbol; }
+        public Task<decimal?> GetTickerPriceAsync() => _futures.GetTickerPriceAsync(Symbol);
+        public Task<OrderResultDto> PlaceLimitBuyAsync(decimal price, decimal qty)
+            => _futures.PlaceLimitHedgeOrderAsync(Symbol, "Buy", "Long", price, qty, reduceOnly: false);
+        public Task<OrderResultDto> PlaceLimitSellAsync(decimal price, decimal qty)
+            => _futures.PlaceLimitHedgeOrderAsync(Symbol, "Sell", "Long", price, qty, reduceOnly: true);
+        public Task<OrderResultDto> PlaceMarketBuyAsync(decimal notionalUsdt)
+            => _futures.OpenHedgeLongAsync(Symbol, notionalUsdt);
+        public Task<OrderResultDto> PlaceMarketSellAsync(decimal qty) => _futures.CloseHedgeLongAsync(Symbol, qty);
         public Task<bool> CancelOrderAsync(string orderId) => _futures.CancelOrderAsync(Symbol, orderId);
         public Task<OrderStatusDto?> GetOrderAsync(string orderId) => _futures.GetOrderAsync(Symbol, orderId);
     }

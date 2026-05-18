@@ -69,4 +69,42 @@ public interface IFuturesExchangeService : IDisposable
     /// </summary>
     Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string symbol) =>
         Task.FromResult((0m, 0m));
+
+    // ────────────────────────── Hedge-mode (Bybit V1) ──────────────────────────
+    // These methods target hedge-mode positions, where the long-side (positionIdx=1) and
+    // short-side (positionIdx=2) coexist on the SAME symbol within ONE futures account.
+    // Implementations should only enable these when the exchange account is configured
+    // for hedge mode. Default: throws — caller must check support via IsHedgeModeSupported.
+
+    /// <summary>True if this exchange service implements the hedge-mode order surface below.</summary>
+    bool IsHedgeModeSupported => false;
+
+    /// <summary>
+    /// Probes the account's current position-mode setting for <paramref name="symbol"/>.
+    /// Returns null if the probe failed (network, auth) — caller should treat as "unknown".
+    /// </summary>
+    Task<bool?> IsHedgeModeEnabledAsync(string symbol) =>
+        throw new NotSupportedException("IsHedgeModeEnabledAsync not implemented");
+
+    Task<OrderResultDto> OpenHedgeLongAsync(string symbol, decimal quoteAmount) =>
+        throw new NotSupportedException("OpenHedgeLongAsync not implemented");
+
+    Task<OrderResultDto> OpenHedgeShortAsync(string symbol, decimal quoteAmount) =>
+        throw new NotSupportedException("OpenHedgeShortAsync not implemented");
+
+    Task<OrderResultDto> CloseHedgeLongAsync(string symbol, decimal quantity) =>
+        throw new NotSupportedException("CloseHedgeLongAsync not implemented");
+
+    Task<OrderResultDto> CloseHedgeShortAsync(string symbol, decimal quantity) =>
+        throw new NotSupportedException("CloseHedgeShortAsync not implemented");
+
+    /// <summary>
+    /// Place a limit order tied to a specific hedge-mode position side.
+    /// <paramref name="positionSide"/> = "Long" routes to positionIdx=1 (the long-grid position);
+    /// "Short" routes to positionIdx=2 (the short-hedge position). reduceOnly closes the
+    /// matching side only.
+    /// </summary>
+    Task<OrderResultDto> PlaceLimitHedgeOrderAsync(
+        string symbol, string side, string positionSide, decimal price, decimal quantity, bool reduceOnly = false) =>
+        throw new NotSupportedException("PlaceLimitHedgeOrderAsync not implemented");
 }

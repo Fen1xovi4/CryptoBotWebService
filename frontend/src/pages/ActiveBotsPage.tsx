@@ -3024,6 +3024,7 @@ function GridFloatCard({
 
 interface GridHedgeCfg {
   mode: 1 | 2;
+  positionMode: 1 | 2;
   gridSymbol: string;
   hedgeSymbol: string;
   rangePercent: number;
@@ -3264,7 +3265,7 @@ function GridHedgeCard({
 
             {/* Hedge row */}
             <div className="text-[10px] text-text-secondary">
-              {state.hedgeQty > 0
+              {(state.hedgeQty ?? 0) > 0
                 ? (
                   <span>
                     HEDGE SHORT {cfg?.hedgeSymbol || cfg?.gridSymbol}:{' '}
@@ -3286,18 +3287,26 @@ function GridHedgeCard({
                 Открытых батчей: <span className="text-text-primary font-medium">{openBatches.length}</span>
               </span>
               <span>
-                Циклов: <span className="text-text-primary font-medium">{state.completedCycles}</span>
+                Циклов: <span className="text-text-primary font-medium">{state.completedCycles ?? 0}</span>
               </span>
             </div>
 
             {/* PnL */}
             <div className="flex items-center gap-3 flex-wrap">
-              <span className={`text-[10px] font-medium ${state.gridRealizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                Grid: {state.gridRealizedPnl >= 0 ? '+' : ''}${state.gridRealizedPnl.toFixed(2)}
-              </span>
-              <span className={`text-[10px] font-medium ${state.hedgeRealizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                Hedge: {state.hedgeRealizedPnl >= 0 ? '+' : ''}${state.hedgeRealizedPnl.toFixed(2)}
-              </span>
+              {(() => {
+                const gridPnl = state.gridRealizedPnl ?? 0;
+                const hedgePnl = state.hedgeRealizedPnl ?? 0;
+                return (
+                  <>
+                    <span className={`text-[10px] font-medium ${gridPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                      Grid: {gridPnl >= 0 ? '+' : ''}${gridPnl.toFixed(2)}
+                    </span>
+                    <span className={`text-[10px] font-medium ${hedgePnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                      Hedge: {hedgePnl >= 0 ? '+' : ''}${hedgePnl.toFixed(2)}
+                    </span>
+                  </>
+                );
+              })()}
             </div>
 
             {/* Done hint */}
@@ -3548,6 +3557,7 @@ function AddStrategyModal({
   // GridHedge fields
   const [ghForm, setGhForm] = useState({
     mode: 1 as 1 | 2,
+    positionMode: 1 as 1 | 2,
     hedgeSymbol: '',
     rangePercent: '10',
     upperExitPercent: '10',
@@ -3570,6 +3580,37 @@ function AddStrategyModal({
     () => (symbolsData || []).map((s) => s.symbol),
     [symbolsData],
   );
+
+  const activeAccounts = accounts?.filter((a) => a.isActive) || [];
+  const currentAccountExchangeType = activeAccounts.find((a) => a.id === accountId)?.exchangeType ?? 0;
+  const isBybit = currentAccountExchangeType === 1;
+
+  const [checkingHedgeMode, setCheckingHedgeMode] = useState(false);
+  const [hedgeCheckResult, setHedgeCheckResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const handleCheckHedgeMode = async () => {
+    setCheckingHedgeMode(true);
+    setHedgeCheckResult(null);
+    try {
+      const res = await api.get(`/exchange/${accountId}/position-mode`, { params: { symbol: symbol } });
+      const data = res.data as { supported: boolean; hedgeMode: boolean | null; message: string };
+      setHedgeCheckResult({
+        ok: data.supported && data.hedgeMode === true,
+        message: data.message,
+      });
+    } catch (err) {
+      const e = err as { response?: { data?: { message?: string } } };
+      setHedgeCheckResult({ ok: false, message: e.response?.data?.message ?? 'Ошибка проверки' });
+    } finally {
+      setCheckingHedgeMode(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isBybit && ghForm.positionMode === 2) {
+      setGhForm((p) => ({ ...p, positionMode: 1 }));
+    }
+  }, [isBybit, ghForm.positionMode]);
 
   const [error, setError] = useState('');
 
@@ -3707,8 +3748,17 @@ function AddStrategyModal({
         setError('Cross-Ticker режим требует hedgeSymbol (например BTCUSDT)');
         return;
       }
+      if (ghForm.positionMode === 2 && !isBybit) {
+        setError('Hedge mode доступен только для Bybit');
+        return;
+      }
+      if (ghForm.positionMode === 2 && ghForm.mode === 2) {
+        setError('Hedge mode применим только при SameTicker (mode=1)');
+        return;
+      }
       configJson = JSON.stringify({
         mode: ghForm.mode,
+        positionMode: ghForm.positionMode,
         gridSymbol: symbol.replace(/\s+/g, '').toUpperCase(),
         hedgeSymbol: ghForm.mode === 2 ? ghForm.hedgeSymbol.replace(/\s+/g, '').toUpperCase() : '',
         rangePercent: Number(ghForm.rangePercent),
@@ -3736,7 +3786,6 @@ function AddStrategyModal({
     mutation.mutate({ accountId, workspaceId, name, type: strategyType, configJson });
   };
 
-  const activeAccounts = accounts?.filter((a) => a.isActive) || [];
   const inputCls =
     'w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors';
   const labelCls = 'block text-xs font-medium text-text-secondary mb-1';
@@ -4305,6 +4354,56 @@ function AddStrategyModal({
                 </select>
               </div>
 
+              {/* PositionMode selector */}
+              <div>
+                <label className={labelCls}>Маржинальный режим (Position Mode)</label>
+                <select
+                  value={ghForm.positionMode}
+                  onChange={(e) => setGhForm({ ...ghForm, positionMode: Number(e.target.value) as 1 | 2 })}
+                  className={inputCls}
+                  disabled={!isBybit}
+                >
+                  <option value={1}>OneWay — спот grid + фьючерс short (разные продукты)</option>
+                  <option value={2} disabled={!isBybit}>
+                    Hedge — обе ноги на одном фьючерсном аккаунте (только Bybit)
+                  </option>
+                </select>
+                {!isBybit && (
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    Hedge режим доступен только для Bybit. Выбранный аккаунт — {exchangeNames[currentAccountExchangeType] ?? 'не выбран'}.
+                  </p>
+                )}
+              </div>
+
+              {/* Hedge mode warning + check */}
+              {ghForm.positionMode === 2 && (
+                <div className="rounded-lg border border-accent-yellow/40 bg-accent-yellow/5 p-3 text-xs space-y-2">
+                  <p className="font-medium text-accent-yellow">
+                    ⚠️ Убедитесь что аккаунт переключён в Hedge Mode на бирже Bybit.
+                  </p>
+                  <p className="text-text-secondary">
+                    В Hedge Mode бот будет держать long-сетку (positionIdx=1) и short-хедж (positionIdx=2)
+                    на одном и том же тикере, на одном фьючерсном аккаунте. Если режим на бирже не настроен,
+                    ордера будут отклоняться.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCheckHedgeMode}
+                      disabled={checkingHedgeMode || !symbol}
+                      className="px-3 py-1.5 text-xs font-medium bg-accent-yellow/15 text-accent-yellow rounded hover:bg-accent-yellow/25 transition-colors disabled:opacity-40"
+                    >
+                      {checkingHedgeMode ? 'Проверяю...' : 'Проверить hedge mode'}
+                    </button>
+                    {hedgeCheckResult && (
+                      <span className={hedgeCheckResult.ok ? 'text-accent-green' : 'text-accent-red'}>
+                        {hedgeCheckResult.message}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* HedgeSymbol — only shown for CrossTicker */}
               {ghForm.mode === 2 && (
                 <div>
@@ -4858,6 +4957,7 @@ function EditStrategyModal({
   // GridHedge form state — initialise from existing configJson
   const [ghForm, setGhForm] = useState({
     mode: (cfg.mode ?? 1) as 1 | 2,
+    positionMode: (cfg.positionMode ?? 1) as 1 | 2,
     hedgeSymbol: cfg.hedgeSymbol || '',
     rangePercent: String(cfg.rangePercent ?? 10),
     upperExitPercent: String(cfg.upperExitPercent ?? 10),
@@ -4879,6 +4979,41 @@ function EditStrategyModal({
     () => (symbolsData || []).map((s) => s.symbol),
     [symbolsData],
   );
+
+  const { data: accountsForExchange } = useQuery<Array<{ id: string; exchangeType: number }>>({
+    queryKey: ['accounts'],
+    queryFn: () => api.get('/accounts').then((r) => r.data),
+    staleTime: 5 * 60 * 1000,
+  });
+  const currentAccountExchangeType = accountsForExchange?.find((a) => a.id === strategy.accountId)?.exchangeType ?? 0;
+  const isBybit = currentAccountExchangeType === 1;
+
+  const [checkingHedgeMode, setCheckingHedgeMode] = useState(false);
+  const [hedgeCheckResult, setHedgeCheckResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  const handleCheckHedgeMode = async () => {
+    setCheckingHedgeMode(true);
+    setHedgeCheckResult(null);
+    try {
+      const res = await api.get(`/exchange/${strategy.accountId}/position-mode`, { params: { symbol: symbol } });
+      const data = res.data as { supported: boolean; hedgeMode: boolean | null; message: string };
+      setHedgeCheckResult({
+        ok: data.supported && data.hedgeMode === true,
+        message: data.message,
+      });
+    } catch (err) {
+      const e = err as { response?: { data?: { message?: string } } };
+      setHedgeCheckResult({ ok: false, message: e.response?.data?.message ?? 'Ошибка проверки' });
+    } finally {
+      setCheckingHedgeMode(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isBybit && ghForm.positionMode === 2) {
+      setGhForm((p) => ({ ...p, positionMode: 1 }));
+    }
+  }, [isBybit, ghForm.positionMode]);
 
   const [error, setError] = useState('');
 
@@ -5013,8 +5148,17 @@ function EditStrategyModal({
         setError('Cross-Ticker режим требует hedgeSymbol (например BTCUSDT)');
         return;
       }
+      if (ghForm.positionMode === 2 && !isBybit) {
+        setError('Hedge mode доступен только для Bybit');
+        return;
+      }
+      if (ghForm.positionMode === 2 && ghForm.mode === 2) {
+        setError('Hedge mode применим только при SameTicker (mode=1)');
+        return;
+      }
       configJson = JSON.stringify({
         mode: ghForm.mode,
+        positionMode: ghForm.positionMode,
         gridSymbol: symbol.replace(/\s+/g, '').toUpperCase(),
         hedgeSymbol: ghForm.mode === 2 ? ghForm.hedgeSymbol.replace(/\s+/g, '').toUpperCase() : '',
         rangePercent: Number(ghForm.rangePercent),
@@ -5532,6 +5676,56 @@ function EditStrategyModal({
                   <option value={2}>CrossTicker — Futures grid + correlated-ticker futures short</option>
                 </select>
               </div>
+
+              {/* PositionMode selector */}
+              <div>
+                <label className={labelCls}>Маржинальный режим (Position Mode)</label>
+                <select
+                  value={ghForm.positionMode}
+                  onChange={(e) => setGhForm({ ...ghForm, positionMode: Number(e.target.value) as 1 | 2 })}
+                  className={inputCls}
+                  disabled={!isBybit}
+                >
+                  <option value={1}>OneWay — спот grid + фьючерс short (разные продукты)</option>
+                  <option value={2} disabled={!isBybit}>
+                    Hedge — обе ноги на одном фьючерсном аккаунте (только Bybit)
+                  </option>
+                </select>
+                {!isBybit && (
+                  <p className="text-xs text-text-secondary mt-0.5">
+                    Hedge режим доступен только для Bybit. Аккаунт — {exchangeNames[currentAccountExchangeType] ?? 'неизвестен'}.
+                  </p>
+                )}
+              </div>
+
+              {/* Hedge mode warning + check */}
+              {ghForm.positionMode === 2 && (
+                <div className="rounded-lg border border-accent-yellow/40 bg-accent-yellow/5 p-3 text-xs space-y-2">
+                  <p className="font-medium text-accent-yellow">
+                    ⚠️ Убедитесь что аккаунт переключён в Hedge Mode на бирже Bybit.
+                  </p>
+                  <p className="text-text-secondary">
+                    В Hedge Mode бот будет держать long-сетку (positionIdx=1) и short-хедж (positionIdx=2)
+                    на одном и том же тикере, на одном фьючерсном аккаунте. Если режим на бирже не настроен,
+                    ордера будут отклоняться.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCheckHedgeMode}
+                      disabled={checkingHedgeMode || !symbol}
+                      className="px-3 py-1.5 text-xs font-medium bg-accent-yellow/15 text-accent-yellow rounded hover:bg-accent-yellow/25 transition-colors disabled:opacity-40"
+                    >
+                      {checkingHedgeMode ? 'Проверяю...' : 'Проверить hedge mode'}
+                    </button>
+                    {hedgeCheckResult && (
+                      <span className={hedgeCheckResult.ok ? 'text-accent-green' : 'text-accent-red'}>
+                        {hedgeCheckResult.message}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* HedgeSymbol — only for CrossTicker */}
               {ghForm.mode === 2 && (
