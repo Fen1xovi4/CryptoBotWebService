@@ -21,11 +21,16 @@ public class StrategiesController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IExchangeServiceFactory _exchangeFactory;
+    private readonly GridHedgeHandler _gridHedgeHandler;
 
-    public StrategiesController(AppDbContext db, IExchangeServiceFactory exchangeFactory)
+    public StrategiesController(
+        AppDbContext db,
+        IExchangeServiceFactory exchangeFactory,
+        GridHedgeHandler gridHedgeHandler)
     {
         _db = db;
         _exchangeFactory = exchangeFactory;
+        _gridHedgeHandler = gridHedgeHandler;
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -1072,6 +1077,26 @@ public class StrategiesController : ControllerBase
                 details = new[]
                 {
                     $"{gfDirection} closed: qty={Math.Round(totalQty, 6)}, price={Math.Round(gfClosePrice, 6)}, PnL=${Math.Round(gfNetPnl, 2)}"
+                }
+            });
+        }
+
+        // --- GridHedge path ---
+        if (strategy.Type == StrategyTypes.GridHedge)
+        {
+            using var ghFutures = _exchangeFactory.CreateFutures(strategy.Account);
+            var ghResult = await _gridHedgeHandler.ForceCloseAsync(strategy, ghFutures, HttpContext.RequestAborted);
+
+            if (!ghResult.Ok)
+                return BadRequest(new { message = ghResult.Message });
+
+            return Ok(new
+            {
+                message = ghResult.Message,
+                details = new[]
+                {
+                    $"GridHedge closed: батчей={ghResult.ClosedBatches}, " +
+                    $"pendingBuys={ghResult.CancelledPendings}, hedgeQty={ghResult.HedgeClosedQty}"
                 }
             });
         }

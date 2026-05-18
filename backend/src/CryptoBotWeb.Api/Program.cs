@@ -3,6 +3,7 @@ using System.Text;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using CryptoBotWeb.Infrastructure.Services;
+using CryptoBotWeb.Infrastructure.Strategies;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -39,6 +40,10 @@ builder.Services.AddSingleton<IEncryptionService>(new EncryptionService(encrypti
 
 // Exchange factory
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
+
+// GridHedge handler — used by the manual "Close" endpoint to invoke the same exit logic the
+// worker runs on a natural exit trigger. Scoped because it relies on the scoped AppDbContext.
+builder.Services.AddScoped<GridHedgeHandler>();
 
 // CORS
 builder.Services.AddCors(options =>

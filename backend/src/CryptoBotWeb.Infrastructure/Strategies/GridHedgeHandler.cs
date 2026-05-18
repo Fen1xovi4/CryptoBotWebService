@@ -174,6 +174,102 @@ public class GridHedgeHandler : IStrategyHandler
         }
     }
 
+    // ────────────────────────── Manual force-close (controller entry) ──────────────────────────
+
+    /// <summary>
+    /// Manual "Close" button entry point. Mirrors the Exiting* phase: cancels every tracked
+    /// limit + TP, market-sells each batch on the grid leg (spot OR futures depending on mode),
+    /// and buys back the hedge short. Sets Phase=Done and persists state.
+    ///
+    /// Also fires a defensive `CancelAllOrdersAsync` sweep on the grid+hedge symbols so any
+    /// orphan order the state list missed (e.g. from a previously crashed tick) gets killed.
+    /// </summary>
+    public async Task<GridHedgeForceCloseResult> ForceCloseAsync(
+        Strategy strategy, IFuturesExchangeService futures, CancellationToken ct)
+    {
+        await _db.Entry(strategy).ReloadAsync(ct);
+
+        var config = JsonSerializer.Deserialize<GridHedgeConfig>(strategy.ConfigJson, JsonOptions);
+        if (config == null || string.IsNullOrWhiteSpace(config.GridSymbol))
+            return new GridHedgeForceCloseResult(false, "Некорректная конфигурация GridHedge", 0, 0, 0m);
+
+        var state = JsonSerializer.Deserialize<GridHedgeState>(strategy.StateJson, JsonOptions)
+                    ?? new GridHedgeState();
+
+        var hedgeSymbol = (config.Mode == GridHedgeMode.SameTicker || string.IsNullOrWhiteSpace(config.HedgeSymbol))
+            ? config.GridSymbol
+            : config.HedgeSymbol;
+
+        var openBatchesBefore = state.Batches.Count(b => !b.Closed);
+        var pendingBuysBefore = state.PendingBuys.Count;
+        var hedgeQtyBefore = state.HedgeQty;
+
+        if (openBatchesBefore == 0 && pendingBuysBefore == 0 && hedgeQtyBefore == 0)
+            return new GridHedgeForceCloseResult(false, "Нет открытых позиций или ордеров", 0, 0, 0m);
+
+        ISpotExchangeService? spotForDispose = null;
+        IGridLeg gridLeg;
+        try
+        {
+            if (config.PositionMode == GridHedgePositionMode.Hedge)
+            {
+                if (!futures.IsHedgeModeSupported)
+                    return new GridHedgeForceCloseResult(false,
+                        "PositionMode=Hedge не поддерживается этой биржей", 0, 0, 0m);
+                gridLeg = new HedgedFuturesGridLeg(futures, config.GridSymbol);
+            }
+            else if (config.Mode == GridHedgeMode.SameTicker)
+            {
+                spotForDispose = _factory.CreateSpot(strategy.Account);
+                gridLeg = new SpotGridLeg(spotForDispose, config.GridSymbol);
+            }
+            else
+            {
+                gridLeg = new FuturesGridLeg(futures, config.GridSymbol);
+            }
+        }
+        catch (Exception ex)
+        {
+            return new GridHedgeForceCloseResult(false,
+                $"Не удалось создать grid leg: {ex.Message}", 0, 0, 0m);
+        }
+
+        try
+        {
+            Log(strategy, "Info",
+                $"🛑 Ручное закрытие: открытых батчей={openBatchesBefore}, " +
+                $"pendingBuys={pendingBuysBefore}, hedgeQty={hedgeQtyBefore}");
+
+            // Defensive sweep: kill any orphaned orders the state list didn't track.
+            try
+            {
+                if (spotForDispose != null)
+                    await spotForDispose.CancelAllOrdersAsync(config.GridSymbol);
+                else
+                    await futures.CancelAllOrdersAsync(config.GridSymbol);
+
+                if (config.Mode == GridHedgeMode.CrossTicker && hedgeSymbol != config.GridSymbol)
+                    await futures.CancelAllOrdersAsync(hedgeSymbol);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GridHedge: defensive CancelAllOrders failed (continuing)");
+            }
+
+            await CloseEverythingAsync(strategy, config, state, hedgeSymbol, gridLeg, futures, ct);
+        }
+        finally
+        {
+            spotForDispose?.Dispose();
+            SaveState(strategy, state);
+            await _db.SaveChangesAsync(ct);
+        }
+
+        return new GridHedgeForceCloseResult(true,
+            "Позиции закрыты, ордера отменены",
+            openBatchesBefore, pendingBuysBefore, hedgeQtyBefore);
+    }
+
     // ────────────────────────── Validation ──────────────────────────
 
     private bool ValidateConfig(Strategy strategy, GridHedgeConfig? config)
