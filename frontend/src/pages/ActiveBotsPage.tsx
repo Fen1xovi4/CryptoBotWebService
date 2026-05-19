@@ -297,7 +297,19 @@ export default function ActiveBotsPage() {
 
   const closePositionMutation = useMutation({
     mutationFn: (id: string) => api.post(`/strategies/${id}/close-position`),
-    onSuccess: () => invalidateAll(queryClient),
+    onSuccess: (resp) => {
+      invalidateAll(queryClient);
+      const data = (resp?.data ?? {}) as { message?: string; details?: string[] };
+      const msg = data.message ?? 'Позиции закрыты';
+      const details = Array.isArray(data.details) ? '\n' + data.details.join('\n') : '';
+      alert(msg + details);
+    },
+    onError: (err: unknown) => {
+      const e = err as { response?: { status?: number; data?: { message?: string } }; message?: string };
+      const status = e.response?.status ? ` [HTTP ${e.response.status}]` : '';
+      const apiMsg = e.response?.data?.message;
+      alert(`Не удалось закрыть позицию${status}: ${apiMsg ?? e.message ?? 'неизвестная ошибка'}`);
+    },
   });
 
   const resetLossesMutation = useMutation({
@@ -3075,14 +3087,38 @@ interface GridHedgeStateData {
   placementCooldownUntil: string | null;
 }
 
-function gridHedgeRecommendation(R: number, step: number, G: number): { hedge: number; maxLoss: number } | null {
-  if (!(R > 0) || !(step > 0) || !(G > 0)) return null;
-  const COEF = 0.88;
-  const executions = (2 * R - 1) / step;
-  const gridWorstLoss = G * executions * (R / 100) * COEF;
-  const hedge = gridWorstLoss / (2 * R / 100);
-  const maxLoss = gridWorstLoss / 2;
-  return { hedge, maxLoss };
+// Recommends hedge size H that equalises USD loss in the two most likely exit paths:
+//   1. sharp move up to +U% (ladders the level-0 TPs all the way, hedge bleeds)
+//   2. sharp move down to -R% (all R/step + 1 buys held, hedge profits)
+// Solving L_up - H*U/100 = -|L_down| + H*R/100  →  H = (L_up + |L_down|) * 100 / (R + U).
+// The zigzag case (deep drawdown after many ladder-ups) is left worse on purpose —
+// it's the less probable path and a balanced hedge for paths 1+2 is the priority.
+function gridHedgeRecommendation(
+  R: number,
+  U: number,
+  step: number,
+  tp: number,
+  G: number,
+): { hedge: number; equalLoss: number; lUp: number; lDown: number } | null {
+  if (!(R > 0) || !(U > 0) || !(step > 0) || !(tp > 0) || !(G > 0)) return null;
+
+  // Scenario 1 — smooth ladder up to +U%: n complete level-0 TPs of G*tp/100 each,
+  // then the final open level-0 closes at exit price with a small residual gain.
+  const n = Math.floor(Math.log(1 + U / 100) / Math.log(1 + tp / 100));
+  const lastAnchor = Math.pow(1 + tp / 100, n);
+  const lUp = n * G * (tp / 100) + G * ((1 + U / 100) / lastAnchor - 1);
+
+  // Scenario 2 — sharp drop to -R%: every buy at level k*step held to exit at (1 - R/100).
+  // Level 0 is the market entry at anchor (k = 0).
+  const m = Math.round(R / step);
+  let lDown = 0;
+  for (let k = 0; k <= m; k++) {
+    lDown += G * (1 - (1 - R / 100) / (1 - (k * step) / 100));
+  }
+
+  const hedge = ((lUp + lDown) * 100) / (R + U);
+  const equalLoss = lUp - (hedge * U) / 100;
+  return { hedge, equalLoss, lUp, lDown };
 }
 
 const GRID_HEDGE_PHASE_LABELS: Record<number, string> = {
@@ -3136,7 +3172,10 @@ function GridHedgeCard({
   const batches = state?.batches ?? [];
   const pendingBuys = state?.pendingBuys ?? [];
   const openBatches = batches.filter((b) => !b.closed);
-  const hasPosition = openBatches.length > 0 || (state?.hedgeQty ?? 0) > 0;
+  const hasPosition =
+    openBatches.length > 0
+    || (state?.hedgeQty ?? 0) > 0
+    || pendingBuys.length > 0;
 
   // Border accent based on phase / running state
   const borderAccent = !isRunning
@@ -3166,7 +3205,9 @@ function GridHedgeCard({
 
   const modeLabel = cfg
     ? cfg.mode === 1
-      ? 'Spot+Futures'
+      ? cfg.positionMode === 2
+        ? 'Hedge (Fut+Fut)'
+        : 'Spot+Futures'
       : `Cross: ${cfg.gridSymbol?.replace(/USDT$/i, '')}/${cfg.hedgeSymbol?.replace(/USDT$/i, '')}`
     : null;
 
@@ -3564,7 +3605,7 @@ function AddStrategyModal({
     dcaStepPercent: '1',
     tpStepPercent: '1',
     betUsdt: '100',
-    hedgeNotionalUsdt: '836',
+    hedgeNotionalUsdt: '332',
     hedgeLeverage: '5',
     gridLeverage: '1',
   });
@@ -4471,22 +4512,24 @@ function AddStrategyModal({
               {/* Recommendation panel */}
               {(() => {
                 const R = Number(ghForm.rangePercent);
+                const U = Number(ghForm.upperExitPercent);
                 const step = Number(ghForm.dcaStepPercent);
+                const tp = Number(ghForm.tpStepPercent);
                 const G = Number(ghForm.betUsdt);
-                const rec = gridHedgeRecommendation(R, step, G);
+                const rec = gridHedgeRecommendation(R, U, step, tp, G);
                 if (!rec) return null;
                 const hedgeR = Math.round(rec.hedge);
-                const maxL = Math.round(rec.maxLoss);
+                const lossR = Math.round(Math.abs(rec.equalLoss));
                 return (
                   <div className="rounded-lg border border-accent-blue/30 bg-accent-blue/5 p-3 text-xs space-y-1">
                     <div className="font-medium text-accent-blue">
                       Рекомендуемый хедж: ~${hedgeR}
                     </div>
                     <div className="text-text-secondary">
-                      Максимальный убыток (при просадке до −{R}%): ~${maxL}
+                      Одинаковый убыток на резком +{U}% и резком −{R}%: ~${lossR}
                     </div>
                     <div className="text-text-secondary/70 italic">
-                      Расчёт: ставка ${G} × ({(2*R-1).toFixed(0)}/{step}) исполнений × коэф. 0.88. При меньшем шаге уровней больше — хедж и убыток растут пропорционально.
+                      Хедж выравнивает PnL в двух наиболее вероятных сценариях (выход вверх и выход вниз без отскоков). Зигзаг с многократными ладдер-апами и обвалом останется хуже — это редкий путь.
                     </div>
                   </div>
                 );
@@ -4507,7 +4550,13 @@ function AddStrategyModal({
                   <button
                     type="button"
                     onClick={() => {
-                      const rec = gridHedgeRecommendation(Number(ghForm.rangePercent), Number(ghForm.dcaStepPercent), Number(ghForm.betUsdt));
+                      const rec = gridHedgeRecommendation(
+                        Number(ghForm.rangePercent),
+                        Number(ghForm.upperExitPercent),
+                        Number(ghForm.dcaStepPercent),
+                        Number(ghForm.tpStepPercent),
+                        Number(ghForm.betUsdt),
+                      );
                       if (rec) setGhForm({ ...ghForm, hedgeNotionalUsdt: String(Math.round(rec.hedge)) });
                     }}
                     className="px-3 py-2 text-xs font-medium bg-accent-blue/15 text-accent-blue rounded-lg hover:bg-accent-blue/25 transition-colors whitespace-nowrap"
@@ -4964,7 +5013,7 @@ function EditStrategyModal({
     dcaStepPercent: String(cfg.dcaStepPercent ?? 1),
     tpStepPercent: String(cfg.tpStepPercent ?? 1),
     betUsdt: String(cfg.betUsdt ?? 100),
-    hedgeNotionalUsdt: String(cfg.hedgeNotionalUsdt ?? 836),
+    hedgeNotionalUsdt: String(cfg.hedgeNotionalUsdt ?? 332),
     hedgeLeverage: String(cfg.hedgeLeverage ?? 5),
     gridLeverage: String(cfg.gridLeverage ?? 1),
   });
@@ -5794,22 +5843,24 @@ function EditStrategyModal({
               {/* Recommendation panel */}
               {(() => {
                 const R = Number(ghForm.rangePercent);
+                const U = Number(ghForm.upperExitPercent);
                 const step = Number(ghForm.dcaStepPercent);
+                const tp = Number(ghForm.tpStepPercent);
                 const G = Number(ghForm.betUsdt);
-                const rec = gridHedgeRecommendation(R, step, G);
+                const rec = gridHedgeRecommendation(R, U, step, tp, G);
                 if (!rec) return null;
                 const hedgeR = Math.round(rec.hedge);
-                const maxL = Math.round(rec.maxLoss);
+                const lossR = Math.round(Math.abs(rec.equalLoss));
                 return (
                   <div className="rounded-lg border border-accent-blue/30 bg-accent-blue/5 p-3 text-xs space-y-1">
                     <div className="font-medium text-accent-blue">
                       Рекомендуемый хедж: ~${hedgeR}
                     </div>
                     <div className="text-text-secondary">
-                      Максимальный убыток (при просадке до −{R}%): ~${maxL}
+                      Одинаковый убыток на резком +{U}% и резком −{R}%: ~${lossR}
                     </div>
                     <div className="text-text-secondary/70 italic">
-                      Расчёт: ставка ${G} × ({(2*R-1).toFixed(0)}/{step}) исполнений × коэф. 0.88. При меньшем шаге уровней больше — хедж и убыток растут пропорционально.
+                      Хедж выравнивает PnL в двух наиболее вероятных сценариях (выход вверх и выход вниз без отскоков). Зигзаг с многократными ладдер-апами и обвалом останется хуже — это редкий путь.
                     </div>
                   </div>
                 );
@@ -5830,7 +5881,13 @@ function EditStrategyModal({
                   <button
                     type="button"
                     onClick={() => {
-                      const rec = gridHedgeRecommendation(Number(ghForm.rangePercent), Number(ghForm.dcaStepPercent), Number(ghForm.betUsdt));
+                      const rec = gridHedgeRecommendation(
+                        Number(ghForm.rangePercent),
+                        Number(ghForm.upperExitPercent),
+                        Number(ghForm.dcaStepPercent),
+                        Number(ghForm.tpStepPercent),
+                        Number(ghForm.betUsdt),
+                      );
                       if (rec) setGhForm({ ...ghForm, hedgeNotionalUsdt: String(Math.round(rec.hedge)) });
                     }}
                     className="px-3 py-2 text-xs font-medium bg-accent-blue/15 text-accent-blue rounded-lg hover:bg-accent-blue/25 transition-colors whitespace-nowrap"
