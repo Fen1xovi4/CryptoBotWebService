@@ -44,6 +44,7 @@ builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>()
 // GridHedge handler — used by the manual "Close" endpoint to invoke the same exit logic the
 // worker runs on a natural exit trigger. Scoped because it relies on the scoped AppDbContext.
 builder.Services.AddScoped<GridHedgeHandler>();
+builder.Services.AddScoped<SmartGridHedgeHandler>();
 
 // CORS
 builder.Services.AddCors(options =>

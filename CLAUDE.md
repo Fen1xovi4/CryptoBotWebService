@@ -2,7 +2,7 @@
 
 ## Position mode
 
-**All exchange integrations use one-way (unilateral) position mode, never hedge mode.**
+**Default: all exchange integrations use one-way (unilateral) position mode, never hedge mode.**
 
 Concretely:
 - **Bybit** — omit `positionIdx` (defaults to one-way); close with `reduceOnly: true`.
@@ -10,6 +10,10 @@ Concretely:
 - **Bitget** — **omit `tradeSide` entirely** (pass nothing / `null`). The `JK.Bitget.Net` SDK throws `ArgumentException("Trade side should be either Open or Close if provided")` on any other value (including `BuySingle`/`SellSingle`/`OpenLong`/`CloseLong`/...) — verified by decompiling `PlaceOrderAsync` in v3.6.0. Per Bitget V2 API docs, one-way mode requires `tradeSide` to be empty. Close with `reduceOnly: true` only. Do **not** use `ClosePositionsAsync` with `PositionSide.Long/Short` — that's hedge-mode semantics.
 
 Accounts on all three exchanges must be configured in one-way mode. Sending hedge-mode parameters (`tradeSide=Open/Close`, `holdSide`, `positionIdx != 0`) against a one-way account returns errors from the exchange.
+
+### Exception: SmartGridHedge
+
+The `SmartGridHedge` strategy requires **Bybit hedge position mode** on its `ExchangeAccount` — it holds simultaneous long (initial qInit + DCA buys, `positionIdx=1`) and short (Q_hedge + paired skim shorts, `positionIdx=2`) legs on the same futures symbol. No other strategy is allowed on that account; one-way-mode strategies (MaratG, HuntingFunding, FundingClaim, SmaDca, GridFloat, GridHedge) must use a different account. The handler calls `/v5/position/switch-mode` at bot start and refuses to run if the switch fails.
 
 ## Local development ports
 
