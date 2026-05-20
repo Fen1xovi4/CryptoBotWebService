@@ -112,13 +112,14 @@ public class SmaDcaHandler : IStrategyHandler
             await _db.SaveChangesAsync(ct);
         }
 
-        // 1c. Adoption — BingX only. If state thinks we're flat but the exchange holds a matching
+        // 1c. Adoption — BingX/Bybit. If state thinks we're flat but the exchange holds a matching
         // position, take ownership of it and place a TP limit. Covers the "false EXIT" scenario
-        // where a transient API hiccup made the bot reset state while the position was actually
-        // alive. Reuses the reconcile throttle so we don't poll positions on every 5s tick.
+        // where a transient API hiccup or a partial-fill misdetection made the bot reset state
+        // while the position was actually alive. Reuses the reconcile throttle so we don't poll
+        // positions on every 5s tick.
         if (state.LastReconcileAt != preReconcileAt)
         {
-            await TryAdoptBingXPosition(strategy, config, state, exchange, isLongConfig, ct);
+            await TryAdoptOrphanPosition(strategy, config, state, exchange, isLongConfig, ct);
             SaveState(strategy, state);
             await _db.SaveChangesAsync(ct);
         }
@@ -846,23 +847,77 @@ public class SmaDcaHandler : IStrategyHandler
     }
 
     /// <summary>
-    /// BingX-only periodic position adoption. SyncFromExchangeOnStartup runs once per worker boot;
-    /// this covers the live-runtime case where the bot's state went flat (false EXIT, manual state
-    /// edit, transient API hiccup during close-detection) while the position is actually still alive
-    /// on the exchange. We pick it up, recompute TP off the current avg, wipe any stale orders, and
-    /// place a fresh reduce-only TP limit on the same tick so the user sees the order immediately.
+    /// Estimates the current DCA level by comparing the live position's notional (qty × avg) to
+    /// the initial PositionSizeUsd, walking the configured tiers.
     ///
-    /// Scoped to BingX by class name — other exchanges don't have the failure mode that motivated
-    /// this and we don't want to silently take ownership of positions on accounts that may be
-    /// shared with other tooling. Throttled by reusing reconcile's LastReconcileAt cadence.
+    /// Each DCA fill with multiplier M grows total qty by factor (1+M), so cumulative qty grows
+    /// geometrically: ratio = (1+M_1)^c_1 × (1+M_2)^c_2 × … . Notional ≈ qty × avg, and avg drifts
+    /// only a few percent per fill (e.g. ~2.3% per step at 3%/3x), so notional/PositionSizeUsd
+    /// stays close enough to that geometric series to distinguish levels reliably.
+    ///
+    /// We walk every potential fill in order and use the geometric midpoint between the cumulative
+    /// ratio "before this fill" and "after this fill" as the split: if observed ratio is past it,
+    /// this fill happened. Returns 0 when the math is undefined (zero PositionSizeUsd, etc).
+    ///
+    /// Use this as a defensive fallback to EstimateDcaLevelFromHistory — DB-based history is
+    /// authoritative when present, notional-based is the only signal when DB has no trades for
+    /// this cycle (manual position open, missing audit trail, history-cleared bot). Caller takes
+    /// the max of the two so neither false-low estimate causes the bot to under-count its level
+    /// and start a fresh DCA staircase on top of an already-deep position.
     /// </summary>
-    private async Task TryAdoptBingXPosition(Strategy strategy, SmaDcaConfig config, SmaDcaState state,
+    private static int EstimateDcaLevelFromNotional(decimal notional, decimal positionSizeUsd,
+        List<SmaDcaLevel> effectiveLevels)
+    {
+        if (positionSizeUsd <= 0 || notional <= 0 || effectiveLevels.Count == 0) return 0;
+
+        var ratio = notional / positionSizeUsd;
+        if (ratio <= 1m) return 0;
+
+        var cumulativeQtyRatio = 1m;
+        var level = 0;
+
+        foreach (var tier in effectiveLevels)
+        {
+            if (tier.Multiplier <= 0) break;
+            for (var i = 0; i < tier.Count; i++)
+            {
+                var nextRatio = cumulativeQtyRatio * (1m + tier.Multiplier);
+                // Geometric midpoint — the natural split for a geometric series.
+                var threshold = (decimal)Math.Sqrt((double)(cumulativeQtyRatio * nextRatio));
+                if (ratio < threshold) return level;
+                level += 1;
+                cumulativeQtyRatio = nextRatio;
+            }
+        }
+        return level;
+    }
+
+    /// <summary>
+    /// Periodic orphan-position adoption for BingX and Bybit. SyncFromExchangeOnStartup runs once
+    /// per worker boot; this covers the live-runtime case where the bot's state went flat (false
+    /// EXIT, partial-fill misdetection on the TP, manual state edit, transient API hiccup during
+    /// close-detection) while the position is actually still alive on the exchange. We pick it up,
+    /// recompute TP off the current avg, wipe any stale orders, and place a fresh reduce-only TP
+    /// limit on the same tick so the user sees the order immediately.
+    ///
+    /// Scoped to BingX + Bybit explicitly — both have confirmed false-EXIT scenarios. Bitget and
+    /// other exchanges are excluded to avoid silently adopting positions on accounts that may be
+    /// shared with other tooling without first verifying the failure mode applies there too.
+    /// Throttled by reusing reconcile's LastReconcileAt cadence.
+    /// </summary>
+    private async Task TryAdoptOrphanPosition(Strategy strategy, SmaDcaConfig config, SmaDcaState state,
         IFuturesExchangeService exchange, bool isLongConfig, CancellationToken ct)
     {
-        if (exchange.GetType().Name != "BingXFuturesExchangeService") return;
+        var exchangeName = exchange.GetType().Name;
+        var isBingX = exchangeName == "BingXFuturesExchangeService";
+        var isBybit = exchangeName == "BybitFuturesExchangeService";
+        if (!isBingX && !isBybit) return;
+
         if (state.InPosition) return;
         if (!string.IsNullOrEmpty(state.EntryOrderId)) return;
         if (!string.IsNullOrEmpty(state.DcaOrderId)) return;
+
+        var effectiveLevels = GetEffectiveLevels(config);
 
         PositionDto? pos;
         try
@@ -895,7 +950,16 @@ public class SmaDcaHandler : IStrategyHandler
         state.AverageEntryPrice = pos.EntryPrice > 0 ? pos.EntryPrice : state.AverageEntryPrice;
         state.TotalCost = state.AverageEntryPrice * state.TotalQuantity;
         state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice, config.TakeProfitPercent, isLongConfig);
-        state.DcaLevel = await EstimateDcaLevelFromHistory(strategy.Id, isLongConfig, ct);
+
+        // DcaLevel estimation: combine DB history with a notional-ratio fallback. History is
+        // authoritative when present; notional fallback covers manually-opened or history-less
+        // positions. We take the max so we never undercount and start a fresh DCA staircase on
+        // top of an already-deep position.
+        var historyLevel = await EstimateDcaLevelFromHistory(strategy.Id, isLongConfig, ct);
+        var notionalLevel = EstimateDcaLevelFromNotional(state.TotalCost, config.PositionSizeUsd, effectiveLevels);
+        var totalMaxLevels = GetTotalMaxLevels(config);
+        state.DcaLevel = Math.Min(Math.Max(historyLevel, notionalLevel), totalMaxLevels);
+
         if (state.LastDcaPrice <= 0) state.LastDcaPrice = state.AverageEntryPrice;
         state.PositionOpenedAt ??= DateTime.UtcNow;
         state.SkipNextCandle = true;
@@ -912,10 +976,16 @@ public class SmaDcaHandler : IStrategyHandler
         }
         state.TakeProfitOrderId = null;
 
+        var notionalRatio = config.PositionSizeUsd > 0
+            ? Math.Round(state.TotalCost / config.PositionSizeUsd, 2)
+            : 0m;
+        var exchangeLabel = isBingX ? "BingX" : "Bybit";
         Log(strategy, "Info",
-            $"🪝 ADOPT: подхвачена позиция с биржи (BingX) — {config.Direction} qty={state.TotalQuantity}, " +
+            $"🪝 ADOPT: подхвачена позиция с биржи ({exchangeLabel}) — {config.Direction} qty={state.TotalQuantity}, " +
             $"avg={Math.Round(state.AverageEntryPrice, 6)}, " +
-            $"PnL={Math.Round(pos.UnrealizedPnl, 4)}$, dcaLvl={state.DcaLevel}, " +
+            $"PnL={Math.Round(pos.UnrealizedPnl, 4)}$, " +
+            $"dcaLvl={state.DcaLevel}/{totalMaxLevels} " +
+            $"(history={historyLevel}, notional={notionalLevel} @ ratio={notionalRatio}× from {config.PositionSizeUsd}$), " +
             $"TP={Math.Round(state.CurrentTakeProfit, 6)} ({config.TakeProfitPercent}%)");
 
         // Place TP immediately so the user sees the order this tick instead of waiting for the
