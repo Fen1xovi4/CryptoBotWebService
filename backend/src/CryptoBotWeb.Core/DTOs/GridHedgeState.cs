@@ -98,3 +98,12 @@ public class GridHedgeState
     // after a cooldown) would open duplicate market buys at level 0.
     public bool MarketEntryOpened { get; set; }
 }
+
+// Result of a manual "Close" button click — populated by GridHedgeHandler.ForceCloseAsync and
+// surfaced to the controller for the API response.
+public record GridHedgeForceCloseResult(
+    bool Ok,
+    string Message,
+    int ClosedBatches,
+    int CancelledPendings,
+    decimal HedgeClosedQty);

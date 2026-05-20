@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import api from '../api/client';
+import api, { optimizeSmartGridHedge } from '../api/client';
+import type { OptimizeSmartGridHedgeResponse } from '../api/client';
 import Header from '../components/Layout/Header';
 import StatusBadge from '../components/ui/StatusBadge';
 import SearchableSelect from '../components/ui/SearchableSelect';
@@ -297,7 +298,19 @@ export default function ActiveBotsPage() {
 
   const closePositionMutation = useMutation({
     mutationFn: (id: string) => api.post(`/strategies/${id}/close-position`),
-    onSuccess: () => invalidateAll(queryClient),
+    onSuccess: (resp) => {
+      invalidateAll(queryClient);
+      const data = (resp?.data ?? {}) as { message?: string; details?: string[] };
+      const msg = data.message ?? 'Позиции закрыты';
+      const details = Array.isArray(data.details) ? '\n' + data.details.join('\n') : '';
+      alert(msg + details);
+    },
+    onError: (err: unknown) => {
+      const e = err as { response?: { status?: number; data?: { message?: string } }; message?: string };
+      const status = e.response?.status ? ` [HTTP ${e.response.status}]` : '';
+      const apiMsg = e.response?.data?.message;
+      alert(`Не удалось закрыть позицию${status}: ${apiMsg ?? e.message ?? 'неизвестная ошибка'}`);
+    },
   });
 
   const resetLossesMutation = useMutation({
@@ -396,6 +409,7 @@ export default function ActiveBotsPage() {
             <option value="FundingClaim">FundingClaim</option>
             <option value="GridFloat">Grid Float</option>
             <option value="GridHedge">Grid Hedge</option>
+            <option value="SmartGridHedge">Smart Grid + Hedge</option>
           </select>
         </div>
 
@@ -581,6 +595,13 @@ export default function ActiveBotsPage() {
             <div className="h-6 w-px bg-border" />
             <p className="text-sm text-text-secondary italic">
               Режим (Spot+Futures vs Cross-Ticker), диапазон, шаги DCA/TP, размер хеджа (ratio × β) и плечи задаются в каждом боте.
+            </p>
+          </>
+        ) : activeWorkspace?.strategyType === 'SmartGridHedge' ? (
+          <>
+            <div className="h-6 w-px bg-border" />
+            <p className="text-sm text-text-secondary italic">
+              Геометрический шаг, NUp/NDown, SkimMode, лот, плечо и Q_hedge задаются в каждом боте. Только Bybit hedge mode.
             </p>
           </>
         ) : (
@@ -889,6 +910,27 @@ export default function ActiveBotsPage() {
                   s={s}
                   cfg={cfg}
                   state={state}
+                  isRunning={isRunning}
+                  onStart={() => startMutation.mutate(s.id)}
+                  onStop={() => stopMutation.mutate(s.id)}
+                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
+                  onEdit={() => setEditingStrategy(s)}
+                  onLogs={() => setLogStrategy(s)}
+                  onClosePosition={() => closePositionMutation.mutate(s.id)}
+                  closePositionPending={closePositionMutation.isPending}
+                  telegramBots={telegramBots}
+                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                />
+              );
+            }
+
+            if (s.type === 'SmartGridHedge') {
+              return (
+                <SmartGridHedgeCard
+                  key={s.id}
+                  s={s}
+                  cfg={cfg as SmartGridHedgeCfg | null}
+                  state={state as SmartGridHedgeStateData | null}
                   isRunning={isRunning}
                   onStart={() => startMutation.mutate(s.id)}
                   onStop={() => stopMutation.mutate(s.id)}
@@ -3075,14 +3117,38 @@ interface GridHedgeStateData {
   placementCooldownUntil: string | null;
 }
 
-function gridHedgeRecommendation(R: number, step: number, G: number): { hedge: number; maxLoss: number } | null {
-  if (!(R > 0) || !(step > 0) || !(G > 0)) return null;
-  const COEF = 0.88;
-  const executions = (2 * R - 1) / step;
-  const gridWorstLoss = G * executions * (R / 100) * COEF;
-  const hedge = gridWorstLoss / (2 * R / 100);
-  const maxLoss = gridWorstLoss / 2;
-  return { hedge, maxLoss };
+// Recommends hedge size H that equalises USD loss in the two most likely exit paths:
+//   1. sharp move up to +U% (ladders the level-0 TPs all the way, hedge bleeds)
+//   2. sharp move down to -R% (all R/step + 1 buys held, hedge profits)
+// Solving L_up - H*U/100 = -|L_down| + H*R/100  →  H = (L_up + |L_down|) * 100 / (R + U).
+// The zigzag case (deep drawdown after many ladder-ups) is left worse on purpose —
+// it's the less probable path and a balanced hedge for paths 1+2 is the priority.
+function gridHedgeRecommendation(
+  R: number,
+  U: number,
+  step: number,
+  tp: number,
+  G: number,
+): { hedge: number; equalLoss: number; lUp: number; lDown: number } | null {
+  if (!(R > 0) || !(U > 0) || !(step > 0) || !(tp > 0) || !(G > 0)) return null;
+
+  // Scenario 1 — smooth ladder up to +U%: n complete level-0 TPs of G*tp/100 each,
+  // then the final open level-0 closes at exit price with a small residual gain.
+  const n = Math.floor(Math.log(1 + U / 100) / Math.log(1 + tp / 100));
+  const lastAnchor = Math.pow(1 + tp / 100, n);
+  const lUp = n * G * (tp / 100) + G * ((1 + U / 100) / lastAnchor - 1);
+
+  // Scenario 2 — sharp drop to -R%: every buy at level k*step held to exit at (1 - R/100).
+  // Level 0 is the market entry at anchor (k = 0).
+  const m = Math.round(R / step);
+  let lDown = 0;
+  for (let k = 0; k <= m; k++) {
+    lDown += G * (1 - (1 - R / 100) / (1 - (k * step) / 100));
+  }
+
+  const hedge = ((lUp + lDown) * 100) / (R + U);
+  const equalLoss = lUp - (hedge * U) / 100;
+  return { hedge, equalLoss, lUp, lDown };
 }
 
 const GRID_HEDGE_PHASE_LABELS: Record<number, string> = {
@@ -3136,7 +3202,10 @@ function GridHedgeCard({
   const batches = state?.batches ?? [];
   const pendingBuys = state?.pendingBuys ?? [];
   const openBatches = batches.filter((b) => !b.closed);
-  const hasPosition = openBatches.length > 0 || (state?.hedgeQty ?? 0) > 0;
+  const hasPosition =
+    openBatches.length > 0
+    || (state?.hedgeQty ?? 0) > 0
+    || pendingBuys.length > 0;
 
   // Border accent based on phase / running state
   const borderAccent = !isRunning
@@ -3166,7 +3235,9 @@ function GridHedgeCard({
 
   const modeLabel = cfg
     ? cfg.mode === 1
-      ? 'Spot+Futures'
+      ? cfg.positionMode === 2
+        ? 'Hedge (Fut+Fut)'
+        : 'Spot+Futures'
       : `Cross: ${cfg.gridSymbol?.replace(/USDT$/i, '')}/${cfg.hedgeSymbol?.replace(/USDT$/i, '')}`
     : null;
 
@@ -3432,6 +3503,545 @@ function GridHedgeCard({
   );
 }
 
+/* ── SmartGridHedge types + card ───────────────────────── */
+
+interface SmartGridHedgeCfg {
+  symbol: string;
+  lotUsd: number;
+  step: number;
+  nUp: number;
+  nDown: number;
+  skimMode: number; // 0=OneShot, 1=ExcessRecycle, 2=FullRecycle
+  leverage: number;
+  qHedgeOverride: number | null;
+  autoRestart: boolean;
+  makerFeeBps: number;
+  takerFeeBps: number;
+}
+
+interface SmartGridDcaCellData {
+  k: number;
+  buyPrice: number;
+  sellPrice: number;
+  buyOrderId: string | null;
+  sellOrderId: string | null;
+  paired: boolean;
+  qtyCoins: number;
+}
+
+interface SmartGridSkimCellData {
+  k: number;
+  sellPrice: number;
+  coverPrice: number;
+  firedOnceShot: boolean;
+  shortOrderId: string | null;
+  coverOrderId: string | null;
+  paired: boolean;
+  shortQtyCoins: number;
+}
+
+// phase: 0=NotStarted, 1=Opening, 2=Active, 3=HardClosing, 4=Closed
+interface SmartGridHedgeStateData {
+  phase: number;
+  p0: number;
+  hBreak: number;
+  lBreak: number;
+  qInitCoins: number;
+  pAvgInit: number;
+  qHedgeCoins: number;
+  hedgeEntryPrice: number;
+  dcaCells: SmartGridDcaCellData[];
+  skimCells: SmartGridSkimCellData[];
+  gridRealizedPnl: number;
+  hedgeRealizedPnl: number;
+  totalFees: number;
+  completedCycles: number;
+  cycleGridRealized: number;
+  cycleHedgeRealized: number;
+  cycleFees: number;
+  lastMarkPrice: number | null;
+  cycleStartedAt: string | null;
+  lastTickAt: string | null;
+  lastCycleEndReason: 'HBreak' | 'LBreak' | 'Manual' | null;
+}
+
+const SGH_PHASE_LABELS: Record<number, string> = {
+  0: 'NotStarted',
+  1: 'Opening',
+  2: 'Active',
+  3: 'HardClosing',
+  4: 'Closed',
+};
+
+const SGH_SKIM_LABELS: Record<number, string> = {
+  0: 'OneShot',
+  1: 'ExcessRecycle',
+  2: 'FullRecycle',
+};
+
+function sghPhaseColor(phase: number): string {
+  if (phase === 2) return 'bg-accent-green/15 text-accent-green';
+  if (phase === 3) return 'bg-accent-red/15 text-accent-red';
+  if (phase === 4) return 'bg-bg-tertiary text-text-secondary';
+  if (phase === 1) return 'bg-accent-yellow/15 text-accent-yellow';
+  return 'bg-bg-tertiary text-text-secondary';
+}
+
+function trimCoins(n: number): string {
+  // up to 8 decimals, trailing zeros stripped
+  return parseFloat(n.toFixed(8)).toString();
+}
+
+function SmartGridHedgeCard({
+  s,
+  cfg,
+  state,
+  isRunning,
+  onStart,
+  onStop,
+  onDelete,
+  onEdit,
+  onLogs,
+  onClosePosition,
+  closePositionPending,
+  telegramBots,
+  onSetTelegramBot,
+}: {
+  s: Strategy;
+  cfg: SmartGridHedgeCfg | null;
+  state: SmartGridHedgeStateData | null;
+  isRunning: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onLogs: () => void;
+  onClosePosition: () => void;
+  closePositionPending: boolean;
+  telegramBots: TelegramBotOption[] | undefined;
+  onSetTelegramBot: (botId: string | null) => void;
+}) {
+  const [gridExpanded, setGridExpanded] = useState(false);
+
+  const phase = state?.phase ?? 0;
+  const dcaCells = (state?.dcaCells ?? []).filter((c) => c.k > 0);
+  const skimCells = (state?.skimCells ?? []).filter((c) => c.k > 0);
+  const hasPosition = (state?.qInitCoins ?? 0) > 0 || (state?.qHedgeCoins ?? 0) > 0;
+
+  const borderAccent = !isRunning
+    ? 'border-l-border'
+    : phase === 2
+      ? 'border-l-accent-green'
+      : phase === 3
+        ? 'border-l-accent-red'
+        : phase === 4
+          ? 'border-l-border'
+          : 'border-l-accent-yellow';
+
+  // Price band: position of lastMarkPrice between LBreak and HBreak
+  const p0 = state?.p0 ?? 0;
+  const hBreak = state?.hBreak ?? 0;
+  const lBreak = state?.lBreak ?? 0;
+  const lastMark = state?.lastMarkPrice ?? null;
+  let bandPct: number | null = null;
+  if (p0 > 0 && hBreak > lBreak && lastMark != null) {
+    bandPct = Math.max(0, Math.min(100, ((lastMark - lBreak) / (hBreak - lBreak)) * 100));
+  }
+
+  // Net PnL helpers
+  const cycleNet = (state?.cycleGridRealized ?? 0) + (state?.cycleHedgeRealized ?? 0) - (state?.cycleFees ?? 0);
+  const totalNet = (state?.gridRealizedPnl ?? 0) + (state?.hedgeRealizedPnl ?? 0) - (state?.totalFees ?? 0);
+
+  // Skim cells: hide if OneShot and none have fired
+  const skimMode = cfg?.skimMode ?? 0;
+  const anySkimFired = skimCells.some((c) => c.firedOnceShot || c.paired);
+  const showSkimCells = skimMode !== 0 || anySkimFired;
+
+  return (
+    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
+      {/* Header */}
+      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-mono font-semibold text-text-primary truncate">
+              {cfg?.symbol || '—'}
+            </span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400">
+              SGH
+            </span>
+            {cfg && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+                {SGH_SKIM_LABELS[cfg.skimMode] ?? '?'}
+              </span>
+            )}
+            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${sghPhaseColor(phase)}`}>
+              {SGH_PHASE_LABELS[phase] ?? String(phase)}
+            </span>
+          </div>
+          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
+            {s.name} · {s.accountName}
+          </div>
+        </div>
+        <StatusBadge status={s.status} />
+      </div>
+
+      {/* Config chips */}
+      {cfg && (
+        <div className="px-4 pb-2 flex flex-wrap gap-1">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            lot ${cfg.lotUsd}
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            step {(cfg.step * 100).toFixed(2)}%
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            {cfg.nDown}D / {cfg.nUp}U rungs
+          </span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            ×{cfg.leverage}
+          </span>
+          {cfg.autoRestart && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-blue/10 text-accent-blue">
+              auto-restart
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* State block */}
+      <div className="px-4 py-2.5 min-h-[52px]">
+        {!isRunning ? (
+          <span className="text-text-secondary text-xs">Остановлен</span>
+        ) : state == null ? (
+          <span className="text-text-secondary text-xs">Ожидание состояния...</span>
+        ) : (
+          <div className="w-full space-y-1.5">
+            {/* Cycle anchor + boundaries */}
+            {p0 > 0 && (
+              <div className="flex items-center gap-2 flex-wrap text-[10px]">
+                <span className="text-text-secondary">
+                  P0: <span className="text-text-primary font-mono">{p0}</span>
+                </span>
+                <span className="text-accent-green">
+                  HBreak: <span className="font-mono">{hBreak}</span>
+                </span>
+                <span className="text-accent-red">
+                  LBreak: <span className="font-mono">{lBreak}</span>
+                </span>
+                {lastMark != null && (
+                  <span className="text-text-secondary">
+                    Mark: <span className="text-text-primary font-mono">{lastMark}</span>
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Price band visualisation */}
+            {bandPct != null && (
+              <div className="relative h-1.5 rounded-full bg-bg-tertiary overflow-hidden">
+                {/* LBreak marker (left) */}
+                <div className="absolute top-0 bottom-0 w-px bg-accent-red/50" style={{ left: '0%' }} />
+                {/* P0 marker */}
+                {p0 > 0 && hBreak > lBreak && (
+                  <div
+                    className="absolute top-0 bottom-0 w-px bg-text-secondary/40"
+                    style={{ left: `${((p0 - lBreak) / (hBreak - lBreak)) * 100}%` }}
+                  />
+                )}
+                {/* HBreak marker (right) */}
+                <div className="absolute top-0 bottom-0 w-px bg-accent-green/50" style={{ left: '100%', transform: 'translateX(-100%)' }} />
+                {/* Current mark price cursor */}
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-accent-blue rounded-full"
+                  style={{ left: `${bandPct}%`, transform: 'translateX(-50%)' }}
+                />
+              </div>
+            )}
+
+            {/* Positions */}
+            <div className="flex items-center gap-3 flex-wrap text-[10px] text-text-secondary">
+              {(state.qInitCoins ?? 0) > 0 && (
+                <span>
+                  LONG <span className="text-text-primary font-mono">{trimCoins(state.qInitCoins)}</span> coins
+                  {p0 > 0 && <span className="text-text-secondary/70"> (${(state.qInitCoins * p0).toFixed(2)}@P0)</span>}
+                </span>
+              )}
+              {(state.qHedgeCoins ?? 0) > 0 && (
+                <span>
+                  HEDGE SHORT <span className="text-accent-red font-mono">{trimCoins(state.qHedgeCoins)}</span> coins
+                  {state.hedgeEntryPrice > 0 && <span className="text-text-secondary/70"> @ <span className="font-mono text-text-primary">{state.hedgeEntryPrice}</span></span>}
+                </span>
+              )}
+            </div>
+
+            {/* Grid summary row */}
+            <div className="flex items-center gap-3 flex-wrap text-[10px] text-text-secondary">
+              <span>
+                DCA paired: <span className="text-text-primary font-medium">{dcaCells.filter((c) => c.paired).length}/{dcaCells.length}</span>
+              </span>
+              {showSkimCells && (
+                <span>
+                  Skim {skimMode === 0 ? 'fired' : 'paired'}: <span className="text-text-primary font-medium">
+                    {skimMode === 0
+                      ? skimCells.filter((c) => c.firedOnceShot).length
+                      : skimCells.filter((c) => c.paired).length}/{skimCells.length}
+                  </span>
+                </span>
+              )}
+              <span>
+                Cycles: <span className="text-text-primary font-medium">{state.completedCycles ?? 0}</span>
+              </span>
+            </div>
+
+            {/* Collapsible grid cell tables */}
+            {(dcaCells.length > 0 || (showSkimCells && skimCells.length > 0)) && (
+              <div>
+                <button
+                  onClick={() => setGridExpanded((v) => !v)}
+                  className="text-[10px] text-accent-blue hover:text-accent-blue/80 transition-colors"
+                >
+                  {gridExpanded ? 'Скрыть сетку' : 'Показать сетку'}
+                </button>
+                {gridExpanded && (
+                  <div className="mt-1.5 space-y-2">
+                    {/* DCA cells table */}
+                    {dcaCells.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-medium text-text-secondary mb-1">DCA cells</p>
+                        <div className="rounded-lg border border-border overflow-hidden">
+                          <table className="w-full text-[10px]">
+                            <thead>
+                              <tr className="bg-bg-tertiary text-text-secondary">
+                                <th className="px-2 py-1 text-left font-medium">k</th>
+                                <th className="px-2 py-1 text-right font-medium">Buy</th>
+                                <th className="px-2 py-1 text-right font-medium">Sell</th>
+                                <th className="px-2 py-1 text-center font-medium">Paired</th>
+                                <th className="px-2 py-1 text-right font-medium">Qty</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {dcaCells.map((c) => (
+                                <tr key={c.k} className="border-t border-border/50">
+                                  <td className="px-2 py-0.5 text-text-secondary">{c.k}</td>
+                                  <td className="px-2 py-0.5 text-right font-mono text-text-primary">{c.buyPrice}</td>
+                                  <td className="px-2 py-0.5 text-right font-mono text-text-primary">{c.sellPrice}</td>
+                                  <td className="px-2 py-0.5 text-center">{c.paired ? <span className="text-accent-green">✓</span> : <span className="text-text-secondary/40">—</span>}</td>
+                                  <td className="px-2 py-0.5 text-right font-mono text-text-secondary">{c.paired ? trimCoins(c.qtyCoins) : '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Skim cells table */}
+                    {showSkimCells && skimCells.length > 0 && (
+                      <div>
+                        <p className="text-[10px] font-medium text-text-secondary mb-1">Skim cells ({SGH_SKIM_LABELS[skimMode]})</p>
+                        <div className="rounded-lg border border-border overflow-hidden">
+                          <table className="w-full text-[10px]">
+                            <thead>
+                              <tr className="bg-bg-tertiary text-text-secondary">
+                                <th className="px-2 py-1 text-left font-medium">k</th>
+                                <th className="px-2 py-1 text-right font-medium">Sell</th>
+                                <th className="px-2 py-1 text-right font-medium">Cover</th>
+                                <th className="px-2 py-1 text-center font-medium">{skimMode === 0 ? 'Fired' : 'Paired'}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {skimCells.map((c) => (
+                                <tr key={c.k} className="border-t border-border/50">
+                                  <td className="px-2 py-0.5 text-text-secondary">{c.k}</td>
+                                  <td className="px-2 py-0.5 text-right font-mono text-text-primary">{c.sellPrice}</td>
+                                  <td className="px-2 py-0.5 text-right font-mono text-text-primary">{skimMode === 0 ? '—' : c.coverPrice}</td>
+                                  <td className="px-2 py-0.5 text-center">
+                                    {(skimMode === 0 ? c.firedOnceShot : c.paired)
+                                      ? <span className="text-accent-green">✓</span>
+                                      : <span className="text-text-secondary/40">—</span>}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* PnL block */}
+            <div className="pt-1 space-y-0.5">
+              {/* Cycle PnL */}
+              <div className="flex items-center gap-2 flex-wrap text-[10px]">
+                <span className="font-medium text-text-secondary">Цикл:</span>
+                <span className={`font-medium ${(state.cycleGridRealized ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  Grid {(state.cycleGridRealized ?? 0) >= 0 ? '+' : ''}${(state.cycleGridRealized ?? 0).toFixed(2)}
+                </span>
+                <span className={`font-medium ${(state.cycleHedgeRealized ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  Hedge {(state.cycleHedgeRealized ?? 0) >= 0 ? '+' : ''}${(state.cycleHedgeRealized ?? 0).toFixed(2)}
+                </span>
+                <span className="text-text-secondary">
+                  Fees −${(state.cycleFees ?? 0).toFixed(2)}
+                </span>
+                <span className={`font-semibold ${cycleNet >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  Net {cycleNet >= 0 ? '+' : ''}${cycleNet.toFixed(2)}
+                </span>
+                {state.lastCycleEndReason && (
+                  <span className="px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary/70 italic">
+                    last: {state.lastCycleEndReason}
+                  </span>
+                )}
+              </div>
+              {/* Lifetime PnL */}
+              <div className="flex items-center gap-2 flex-wrap text-[10px]">
+                <span className="font-medium text-text-secondary">Total:</span>
+                <span className={`font-medium ${(state.gridRealizedPnl ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  Grid {(state.gridRealizedPnl ?? 0) >= 0 ? '+' : ''}${(state.gridRealizedPnl ?? 0).toFixed(2)}
+                </span>
+                <span className={`font-medium ${(state.hedgeRealizedPnl ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  Hedge {(state.hedgeRealizedPnl ?? 0) >= 0 ? '+' : ''}${(state.hedgeRealizedPnl ?? 0).toFixed(2)}
+                </span>
+                <span className="text-text-secondary">
+                  Fees −${(state.totalFees ?? 0).toFixed(2)}
+                </span>
+                <span className={`font-semibold ${totalNet >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  Net {totalNet >= 0 ? '+' : ''}${totalNet.toFixed(2)}
+                </span>
+                <span className="text-text-secondary/60">
+                  ({state.completedCycles ?? 0} cycles)
+                </span>
+              </div>
+            </div>
+
+            {/* Closed hint */}
+            {phase === 4 && (
+              <div className="text-[10px] italic text-text-secondary/70">
+                Цикл завершён. Stop → Start чтобы начать новый (или AutoRestart запустит сам).
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Divider */}
+      <div className="border-t border-border/50" />
+
+      {/* Actions */}
+      <div className="px-3 py-2 flex items-center gap-1">
+        <button
+          onClick={onLogs}
+          title="Логи"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+        </button>
+
+        {telegramBots && telegramBots.length > 0 && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                if (s.telegramBotId) {
+                  onSetTelegramBot(null);
+                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
+                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
+                }
+              }}
+              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
+              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                s.telegramBotId
+                  ? 'bg-accent-blue/15 text-accent-blue'
+                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
+              }`}
+            >
+              TG
+            </button>
+            {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                value=""
+                onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
+              >
+                <option value="">Select bot...</option>
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+            {s.telegramBotId && (
+              <select
+                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                value={s.telegramBotId}
+                onChange={(e) => onSetTelegramBot(e.target.value || null)}
+              >
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {hasPosition && isRunning && (
+          <button
+            onClick={() => { if (confirm('Закрыть все позиции по рынку?')) onClosePosition(); }}
+            disabled={closePositionPending}
+            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
+          >
+            {closePositionPending ? '...' : 'Закрыть'}
+          </button>
+        )}
+
+        {isRunning ? (
+          <button
+            onClick={onStop}
+            className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+          >
+            Стоп
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={onStart}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+            >
+              Старт
+            </button>
+            <button
+              onClick={onEdit}
+              title="Редактировать"
+              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        <button
+          onClick={onDelete}
+          title="Удалить"
+          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── Stat Card ─────────────────────────────────────────── */
 
 function StatCard({
@@ -3564,7 +4174,7 @@ function AddStrategyModal({
     dcaStepPercent: '1',
     tpStepPercent: '1',
     betUsdt: '100',
-    hedgeNotionalUsdt: '836',
+    hedgeNotionalUsdt: '332',
     hedgeLeverage: '5',
     gridLeverage: '1',
   });
@@ -3613,6 +4223,54 @@ function AddStrategyModal({
   }, [isBybit, ghForm.positionMode]);
 
   const [error, setError] = useState('');
+
+  // SmartGridHedge fields
+  const [sghForm, setSghForm] = useState({
+    lotUsd: '50',
+    stepPct: '1.0',   // display as %, stored as fraction on submit (÷100)
+    nUp: '10',
+    nDown: '10',
+    skimMode: 0 as 0 | 1 | 2,
+    leverage: '5',
+    qHedgeOverride: '',  // empty = null (auto)
+    autoRestart: true,
+    makerFeeBps: '2',
+    takerFeeBps: '5.5',
+  });
+  const [sghOptResult, setSghOptResult] = useState<OptimizeSmartGridHedgeResponse | null>(null);
+  const [sghOptLoading, setSghOptLoading] = useState(false);
+  const [sghAdvanced, setSghAdvanced] = useState(false);
+
+  const handleSghOptimize = async () => {
+    if (!symbol || !accountId) {
+      setError('Выберите аккаунт и символ перед расчётом Q_hedge');
+      return;
+    }
+    setSghOptLoading(true);
+    setSghOptResult(null);
+    try {
+      // Fetch current ticker price to use as P0
+      const tickerRes = await api.get(`/exchange/${accountId}/ticker`, { params: { symbol: symbol.trim().toUpperCase() } });
+      const p0: number = tickerRes.data.price;
+      const result = await optimizeSmartGridHedge({
+        p0,
+        step: Number(sghForm.stepPct) / 100,
+        nUp: Number(sghForm.nUp),
+        nDown: Number(sghForm.nDown),
+        lotUsd: Number(sghForm.lotUsd),
+        skimMode: sghForm.skimMode,
+        makerFeeBps: Number(sghForm.makerFeeBps),
+        takerFeeBps: Number(sghForm.takerFeeBps),
+      });
+      setSghOptResult(result);
+      setSghForm((prev) => ({ ...prev, qHedgeOverride: parseFloat(result.qHedgeCoins.toFixed(6)).toString() }));
+    } catch (err) {
+      const e = err as { response?: { data?: { message?: string } } };
+      setError(e.response?.data?.message ?? 'Не удалось рассчитать Q_hedge');
+    } finally {
+      setSghOptLoading(false);
+    }
+  };
 
   const mutation = useMutation({
     mutationFn: (data: { accountId: string; workspaceId: string; name: string; type: string; configJson: string }) =>
@@ -3769,6 +4427,44 @@ function AddStrategyModal({
         hedgeNotionalUsdt: Number(ghForm.hedgeNotionalUsdt),
         hedgeLeverage: Number(ghForm.hedgeLeverage),
         gridLeverage: Number(ghForm.gridLeverage),
+      });
+    } else if (strategyType === 'SmartGridHedge') {
+      const stepFraction = Number(sghForm.stepPct) / 100;
+      if (!(stepFraction > 0) || !(stepFraction < 1)) {
+        setError('Шаг % должен быть от 0.05 до 99 (хранится как дробь)');
+        return;
+      }
+      if (Number(sghForm.lotUsd) <= 0) {
+        setError('Лот USDT должен быть > 0');
+        return;
+      }
+      if (Number(sghForm.nUp) < 1 || Number(sghForm.nDown) < 1) {
+        setError('NUp и NDown должны быть ≥ 1');
+        return;
+      }
+      if (Number(sghForm.leverage) < 1) {
+        setError('Плечо должно быть ≥ 1');
+        return;
+      }
+      const qHedgeOverride = sghForm.qHedgeOverride.trim() === ''
+        ? null
+        : Number(sghForm.qHedgeOverride);
+      if (qHedgeOverride !== null && !(qHedgeOverride >= 0)) {
+        setError('Q_hedge override должен быть ≥ 0 или оставьте пустым (авто)');
+        return;
+      }
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        lotUsd: Number(sghForm.lotUsd),
+        step: stepFraction,
+        nUp: Number(sghForm.nUp),
+        nDown: Number(sghForm.nDown),
+        skimMode: sghForm.skimMode,
+        leverage: Number(sghForm.leverage),
+        qHedgeOverride,
+        autoRestart: sghForm.autoRestart,
+        makerFeeBps: Number(sghForm.makerFeeBps),
+        takerFeeBps: Number(sghForm.takerFeeBps),
       });
     } else {
       configJson = JSON.stringify({
@@ -4471,22 +5167,24 @@ function AddStrategyModal({
               {/* Recommendation panel */}
               {(() => {
                 const R = Number(ghForm.rangePercent);
+                const U = Number(ghForm.upperExitPercent);
                 const step = Number(ghForm.dcaStepPercent);
+                const tp = Number(ghForm.tpStepPercent);
                 const G = Number(ghForm.betUsdt);
-                const rec = gridHedgeRecommendation(R, step, G);
+                const rec = gridHedgeRecommendation(R, U, step, tp, G);
                 if (!rec) return null;
                 const hedgeR = Math.round(rec.hedge);
-                const maxL = Math.round(rec.maxLoss);
+                const lossR = Math.round(Math.abs(rec.equalLoss));
                 return (
                   <div className="rounded-lg border border-accent-blue/30 bg-accent-blue/5 p-3 text-xs space-y-1">
                     <div className="font-medium text-accent-blue">
                       Рекомендуемый хедж: ~${hedgeR}
                     </div>
                     <div className="text-text-secondary">
-                      Максимальный убыток (при просадке до −{R}%): ~${maxL}
+                      Одинаковый убыток на резком +{U}% и резком −{R}%: ~${lossR}
                     </div>
                     <div className="text-text-secondary/70 italic">
-                      Расчёт: ставка ${G} × ({(2*R-1).toFixed(0)}/{step}) исполнений × коэф. 0.88. При меньшем шаге уровней больше — хедж и убыток растут пропорционально.
+                      Хедж выравнивает PnL в двух наиболее вероятных сценариях (выход вверх и выход вниз без отскоков). Зигзаг с многократными ладдер-апами и обвалом останется хуже — это редкий путь.
                     </div>
                   </div>
                 );
@@ -4507,7 +5205,13 @@ function AddStrategyModal({
                   <button
                     type="button"
                     onClick={() => {
-                      const rec = gridHedgeRecommendation(Number(ghForm.rangePercent), Number(ghForm.dcaStepPercent), Number(ghForm.betUsdt));
+                      const rec = gridHedgeRecommendation(
+                        Number(ghForm.rangePercent),
+                        Number(ghForm.upperExitPercent),
+                        Number(ghForm.dcaStepPercent),
+                        Number(ghForm.tpStepPercent),
+                        Number(ghForm.betUsdt),
+                      );
                       if (rec) setGhForm({ ...ghForm, hedgeNotionalUsdt: String(Math.round(rec.hedge)) });
                     }}
                     className="px-3 py-2 text-xs font-medium bg-accent-blue/15 text-accent-blue rounded-lg hover:bg-accent-blue/25 transition-colors whitespace-nowrap"
@@ -4544,6 +5248,205 @@ function AddStrategyModal({
                 Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой.
                 Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь бот.
                 После Done — Stop → Start чтобы начать новый цикл.
+              </p>
+            </>
+          ) : strategyType === 'SmartGridHedge' ? (
+            <>
+              {/* Lot USDT */}
+              <div>
+                <label className={labelCls}>Лот USDT</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  value={sghForm.lotUsd}
+                  onChange={(e) => setSghForm({ ...sghForm, lotUsd: e.target.value })}
+                  className={inputCls}
+                />
+                <p className="text-xs text-text-secondary mt-0.5">Базовый размер позиции в USDT (начальный лонг, каждая DCA-ячейка).</p>
+              </div>
+
+              {/* Step % */}
+              <div>
+                <label className={labelCls}>Шаг сетки, %</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.05"
+                  max="10"
+                  value={sghForm.stepPct}
+                  onChange={(e) => setSghForm({ ...sghForm, stepPct: e.target.value })}
+                  className={inputCls}
+                />
+                <p className="text-xs text-text-secondary mt-0.5">Геометрический шаг между уровнями сетки (например 1.0 = 1%).</p>
+              </div>
+
+              {/* NDown + NUp */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>NDown (нижних уровней)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    max="50"
+                    value={sghForm.nDown}
+                    onChange={(e) => setSghForm({ ...sghForm, nDown: e.target.value })}
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">LBreak = P0 × (1−step)^NDown</p>
+                </div>
+                <div>
+                  <label className={labelCls}>NUp (верхних уровней)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    max="50"
+                    value={sghForm.nUp}
+                    onChange={(e) => setSghForm({ ...sghForm, nUp: e.target.value })}
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">HBreak = P0 × (1+step)^NUp</p>
+                </div>
+              </div>
+
+              {/* SkimMode */}
+              <div>
+                <label className={labelCls}>SkimMode (поведение верхних ячеек)</label>
+                <div className="space-y-1.5 mt-1">
+                  {([
+                    [0, 'OneShot', 'Самый безопасный. Однократно обрезает лонг при достижении U_k. Нет повторного цикла.'],
+                    [1, 'ExcessRecycle (Вариант A)', 'Минимальный риск HBreak. Парный шорт только на "избыток" лота.'],
+                    [2, 'FullRecycle (Вариант B)', 'Макс. прибыль в боковике, макс. риск HBreak. Парный шорт на полный лот.'],
+                  ] as const).map(([val, label, hint]) => (
+                    <label key={val} className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="sghSkimMode"
+                        value={val}
+                        checked={sghForm.skimMode === val}
+                        onChange={() => setSghForm({ ...sghForm, skimMode: val })}
+                        className="mt-0.5 w-3.5 h-3.5 border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                      />
+                      <span className="text-sm">
+                        <span className="font-medium text-text-primary">{label}</span>
+                        <span className="text-xs text-text-secondary block">{hint}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Leverage */}
+              <div>
+                <label className={labelCls}>Плечо</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  max="50"
+                  value={sghForm.leverage}
+                  onChange={(e) => setSghForm({ ...sghForm, leverage: e.target.value })}
+                  className={inputCls}
+                />
+              </div>
+
+              {/* Auto-restart */}
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={sghForm.autoRestart}
+                  onChange={(e) => setSghForm({ ...sghForm, autoRestart: e.target.checked })}
+                  className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                />
+                <span className="text-sm text-text-primary">Auto-restart после закрытия цикла</span>
+                <span className="text-xs text-text-secondary">(новый цикл сразу с текущей ценой)</span>
+              </label>
+
+              {/* Q_hedge field + Calculate button */}
+              <div>
+                <label className={labelCls}>Q_hedge (монет) — пустое = авто</label>
+                <div className="flex gap-2 items-stretch">
+                  <input
+                    type="number"
+                    step="0.000001"
+                    min="0"
+                    value={sghForm.qHedgeOverride}
+                    onChange={(e) => { setSghForm({ ...sghForm, qHedgeOverride: e.target.value }); setSghOptResult(null); }}
+                    placeholder="авто"
+                    className={inputCls + ' flex-1'}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSghOptimize}
+                    disabled={sghOptLoading || !symbol || !accountId}
+                    className="px-3 py-2 text-xs font-medium bg-accent-blue/15 text-accent-blue rounded-lg hover:bg-accent-blue/25 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    {sghOptLoading ? 'Расчёт...' : 'Рассчитать Q_hedge*'}
+                  </button>
+                </div>
+                {sghOptResult && (
+                  <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                    <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-accent-green/10 text-accent-green">
+                      Worst-case loss: ${sghOptResult.worstCaseLoss.toFixed(2)}
+                    </span>
+                    <span className="text-xs text-text-secondary/60 italic">
+                      * Рассчитано по текущей цене тикера как P0.
+                    </span>
+                  </div>
+                )}
+                <p className="text-xs text-text-secondary mt-0.5">
+                  Размер шорт-хеджа в монетах. Пустое поле — бэкенд запустит оптимайзер при старте цикла.
+                </p>
+              </div>
+
+              {/* Advanced (fees) */}
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setSghAdvanced((v) => !v)}
+                  className="text-xs text-text-secondary hover:text-text-primary transition-colors flex items-center gap-1"
+                >
+                  <svg
+                    className={`w-3 h-3 transition-transform ${sghAdvanced ? 'rotate-90' : ''}`}
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                  </svg>
+                  Дополнительно (тарифы комиссий)
+                </button>
+                {sghAdvanced && (
+                  <div className="mt-2 grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={labelCls}>Maker fee, bps</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={sghForm.makerFeeBps}
+                        onChange={(e) => setSghForm({ ...sghForm, makerFeeBps: e.target.value })}
+                        className={inputCls}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Taker fee, bps</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={sghForm.takerFeeBps}
+                        onChange={(e) => setSghForm({ ...sghForm, takerFeeBps: e.target.value })}
+                        className={inputCls}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <p className="text-xs text-text-secondary italic">
+                Геометрическая сетка вокруг якоря P0. Нижние ячейки: DCA пары buy/sell с автоперезапуском.
+                Верхние ячейки: skim в выбранном режиме. HBreak/LBreak = жёсткое закрытие. Только Bybit hedge mode.
               </p>
             </>
           ) : strategyType === 'HuntingFunding' ? (
@@ -4855,6 +5758,7 @@ function EditStrategyModal({
   const isFC = strategy.type === 'FundingClaim';
   const isGF = strategy.type === 'GridFloat';
   const isGH = strategy.type === 'GridHedge';
+  const isGSH = strategy.type === 'SmartGridHedge';
 
   const [name, setName] = useState(strategy.name);
   const [symbol, setSymbol] = useState(cfg.symbol || 'BTCUSDT');
@@ -4964,7 +5868,7 @@ function EditStrategyModal({
     dcaStepPercent: String(cfg.dcaStepPercent ?? 1),
     tpStepPercent: String(cfg.tpStepPercent ?? 1),
     betUsdt: String(cfg.betUsdt ?? 100),
-    hedgeNotionalUsdt: String(cfg.hedgeNotionalUsdt ?? 836),
+    hedgeNotionalUsdt: String(cfg.hedgeNotionalUsdt ?? 332),
     hedgeLeverage: String(cfg.hedgeLeverage ?? 5),
     gridLeverage: String(cfg.gridLeverage ?? 1),
   });
@@ -5016,6 +5920,54 @@ function EditStrategyModal({
   }, [isBybit, ghForm.positionMode]);
 
   const [error, setError] = useState('');
+
+  // SmartGridHedge form state — initialise from existing configJson
+  // step is stored as fraction (0.01), displayed as percent (1.0)
+  const [sghForm, setSghForm] = useState({
+    lotUsd: String(cfg.lotUsd ?? 50),
+    stepPct: String(((cfg.step ?? 0.01) * 100).toFixed(4).replace(/\.?0+$/, '')),
+    nUp: String(cfg.nUp ?? 10),
+    nDown: String(cfg.nDown ?? 10),
+    skimMode: (cfg.skimMode ?? 0) as 0 | 1 | 2,
+    leverage: String(cfg.leverage ?? 5),
+    qHedgeOverride: cfg.qHedgeOverride != null ? String(cfg.qHedgeOverride) : '',
+    autoRestart: cfg.autoRestart !== false,
+    makerFeeBps: String(cfg.makerFeeBps ?? 2),
+    takerFeeBps: String(cfg.takerFeeBps ?? 5.5),
+  });
+  const [sghOptResult, setSghOptResult] = useState<OptimizeSmartGridHedgeResponse | null>(null);
+  const [sghOptLoading, setSghOptLoading] = useState(false);
+  const [sghAdvanced, setSghAdvanced] = useState(false);
+
+  const handleSghOptimize = async () => {
+    if (!symbol) {
+      setError('Укажите символ перед расчётом Q_hedge');
+      return;
+    }
+    setSghOptLoading(true);
+    setSghOptResult(null);
+    try {
+      const tickerRes = await api.get(`/exchange/${strategy.accountId}/ticker`, { params: { symbol: symbol.trim().toUpperCase() } });
+      const p0: number = tickerRes.data.price;
+      const result = await optimizeSmartGridHedge({
+        p0,
+        step: Number(sghForm.stepPct) / 100,
+        nUp: Number(sghForm.nUp),
+        nDown: Number(sghForm.nDown),
+        lotUsd: Number(sghForm.lotUsd),
+        skimMode: sghForm.skimMode,
+        makerFeeBps: Number(sghForm.makerFeeBps),
+        takerFeeBps: Number(sghForm.takerFeeBps),
+      });
+      setSghOptResult(result);
+      setSghForm((prev) => ({ ...prev, qHedgeOverride: parseFloat(result.qHedgeCoins.toFixed(6)).toString() }));
+    } catch (err) {
+      const e = err as { response?: { data?: { message?: string } } };
+      setError(e.response?.data?.message ?? 'Не удалось рассчитать Q_hedge');
+    } finally {
+      setSghOptLoading(false);
+    }
+  };
 
   const mutation = useMutation({
     mutationFn: (data: { name: string; configJson: string }) =>
@@ -5169,6 +6121,44 @@ function EditStrategyModal({
         hedgeNotionalUsdt: Number(ghForm.hedgeNotionalUsdt),
         hedgeLeverage: Number(ghForm.hedgeLeverage),
         gridLeverage: Number(ghForm.gridLeverage),
+      });
+    } else if (isGSH) {
+      const stepFraction = Number(sghForm.stepPct) / 100;
+      if (!(stepFraction > 0) || !(stepFraction < 1)) {
+        setError('Шаг % должен быть от 0.05 до 99');
+        return;
+      }
+      if (Number(sghForm.lotUsd) <= 0) {
+        setError('Лот USDT должен быть > 0');
+        return;
+      }
+      if (Number(sghForm.nUp) < 1 || Number(sghForm.nDown) < 1) {
+        setError('NUp и NDown должны быть ≥ 1');
+        return;
+      }
+      if (Number(sghForm.leverage) < 1) {
+        setError('Плечо должно быть ≥ 1');
+        return;
+      }
+      const qHedgeOverride = sghForm.qHedgeOverride.trim() === ''
+        ? null
+        : Number(sghForm.qHedgeOverride);
+      if (qHedgeOverride !== null && !(qHedgeOverride >= 0)) {
+        setError('Q_hedge override должен быть ≥ 0 или оставьте пустым');
+        return;
+      }
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        lotUsd: Number(sghForm.lotUsd),
+        step: stepFraction,
+        nUp: Number(sghForm.nUp),
+        nDown: Number(sghForm.nDown),
+        skimMode: sghForm.skimMode,
+        leverage: Number(sghForm.leverage),
+        qHedgeOverride,
+        autoRestart: sghForm.autoRestart,
+        makerFeeBps: Number(sghForm.makerFeeBps),
+        takerFeeBps: Number(sghForm.takerFeeBps),
       });
     } else {
       configJson = JSON.stringify({
@@ -5794,22 +6784,24 @@ function EditStrategyModal({
               {/* Recommendation panel */}
               {(() => {
                 const R = Number(ghForm.rangePercent);
+                const U = Number(ghForm.upperExitPercent);
                 const step = Number(ghForm.dcaStepPercent);
+                const tp = Number(ghForm.tpStepPercent);
                 const G = Number(ghForm.betUsdt);
-                const rec = gridHedgeRecommendation(R, step, G);
+                const rec = gridHedgeRecommendation(R, U, step, tp, G);
                 if (!rec) return null;
                 const hedgeR = Math.round(rec.hedge);
-                const maxL = Math.round(rec.maxLoss);
+                const lossR = Math.round(Math.abs(rec.equalLoss));
                 return (
                   <div className="rounded-lg border border-accent-blue/30 bg-accent-blue/5 p-3 text-xs space-y-1">
                     <div className="font-medium text-accent-blue">
                       Рекомендуемый хедж: ~${hedgeR}
                     </div>
                     <div className="text-text-secondary">
-                      Максимальный убыток (при просадке до −{R}%): ~${maxL}
+                      Одинаковый убыток на резком +{U}% и резком −{R}%: ~${lossR}
                     </div>
                     <div className="text-text-secondary/70 italic">
-                      Расчёт: ставка ${G} × ({(2*R-1).toFixed(0)}/{step}) исполнений × коэф. 0.88. При меньшем шаге уровней больше — хедж и убыток растут пропорционально.
+                      Хедж выравнивает PnL в двух наиболее вероятных сценариях (выход вверх и выход вниз без отскоков). Зигзаг с многократными ладдер-апами и обвалом останется хуже — это редкий путь.
                     </div>
                   </div>
                 );
@@ -5830,7 +6822,13 @@ function EditStrategyModal({
                   <button
                     type="button"
                     onClick={() => {
-                      const rec = gridHedgeRecommendation(Number(ghForm.rangePercent), Number(ghForm.dcaStepPercent), Number(ghForm.betUsdt));
+                      const rec = gridHedgeRecommendation(
+                        Number(ghForm.rangePercent),
+                        Number(ghForm.upperExitPercent),
+                        Number(ghForm.dcaStepPercent),
+                        Number(ghForm.tpStepPercent),
+                        Number(ghForm.betUsdt),
+                      );
                       if (rec) setGhForm({ ...ghForm, hedgeNotionalUsdt: String(Math.round(rec.hedge)) });
                     }}
                     className="px-3 py-2 text-xs font-medium bg-accent-blue/15 text-accent-blue rounded-lg hover:bg-accent-blue/25 transition-colors whitespace-nowrap"
@@ -5867,6 +6865,205 @@ function EditStrategyModal({
                 Сетка лонгов ниже якоря. Хедж SHORT на фьючерсах того же или коррелированного тикера, открывается одной маркет-сделкой.
                 Каждый филл сетки имеет свой reduce-only TP. Триггеры верх/низ закрывают весь бот.
                 После Done — Stop → Start чтобы начать новый цикл.
+              </p>
+            </>
+          ) : isGSH ? (
+            <>
+              {/* Lot USDT */}
+              <div>
+                <label className={labelCls}>Лот USDT</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  value={sghForm.lotUsd}
+                  onChange={(e) => setSghForm({ ...sghForm, lotUsd: e.target.value })}
+                  className={inputCls}
+                />
+                <p className="text-xs text-text-secondary mt-0.5">Базовый размер позиции в USDT (начальный лонг, каждая DCA-ячейка).</p>
+              </div>
+
+              {/* Step % */}
+              <div>
+                <label className={labelCls}>Шаг сетки, %</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.05"
+                  max="10"
+                  value={sghForm.stepPct}
+                  onChange={(e) => setSghForm({ ...sghForm, stepPct: e.target.value })}
+                  className={inputCls}
+                />
+                <p className="text-xs text-text-secondary mt-0.5">Геометрический шаг между уровнями сетки (1.0 = 1%). Хранится как дробь.</p>
+              </div>
+
+              {/* NDown + NUp */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>NDown (нижних уровней)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    max="50"
+                    value={sghForm.nDown}
+                    onChange={(e) => setSghForm({ ...sghForm, nDown: e.target.value })}
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">LBreak = P0 × (1−step)^NDown</p>
+                </div>
+                <div>
+                  <label className={labelCls}>NUp (верхних уровней)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    max="50"
+                    value={sghForm.nUp}
+                    onChange={(e) => setSghForm({ ...sghForm, nUp: e.target.value })}
+                    className={inputCls}
+                  />
+                  <p className="text-xs text-text-secondary mt-0.5">HBreak = P0 × (1+step)^NUp</p>
+                </div>
+              </div>
+
+              {/* SkimMode */}
+              <div>
+                <label className={labelCls}>SkimMode (поведение верхних ячеек)</label>
+                <div className="space-y-1.5 mt-1">
+                  {([
+                    [0, 'OneShot', 'Самый безопасный. Однократно обрезает лонг при достижении U_k. Нет повторного цикла.'],
+                    [1, 'ExcessRecycle (Вариант A)', 'Минимальный риск HBreak. Парный шорт только на "избыток" лота.'],
+                    [2, 'FullRecycle (Вариант B)', 'Макс. прибыль в боковике, макс. риск HBreak. Парный шорт на полный лот.'],
+                  ] as const).map(([val, label, hint]) => (
+                    <label key={val} className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="sghSkimModeEdit"
+                        value={val}
+                        checked={sghForm.skimMode === val}
+                        onChange={() => setSghForm({ ...sghForm, skimMode: val })}
+                        className="mt-0.5 w-3.5 h-3.5 border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                      />
+                      <span className="text-sm">
+                        <span className="font-medium text-text-primary">{label}</span>
+                        <span className="text-xs text-text-secondary block">{hint}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Leverage */}
+              <div>
+                <label className={labelCls}>Плечо</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  max="50"
+                  value={sghForm.leverage}
+                  onChange={(e) => setSghForm({ ...sghForm, leverage: e.target.value })}
+                  className={inputCls}
+                />
+              </div>
+
+              {/* Auto-restart */}
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={sghForm.autoRestart}
+                  onChange={(e) => setSghForm({ ...sghForm, autoRestart: e.target.checked })}
+                  className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                />
+                <span className="text-sm text-text-primary">Auto-restart после закрытия цикла</span>
+                <span className="text-xs text-text-secondary">(новый цикл сразу с текущей ценой)</span>
+              </label>
+
+              {/* Q_hedge field + Calculate button */}
+              <div>
+                <label className={labelCls}>Q_hedge (монет) — пустое = авто</label>
+                <div className="flex gap-2 items-stretch">
+                  <input
+                    type="number"
+                    step="0.000001"
+                    min="0"
+                    value={sghForm.qHedgeOverride}
+                    onChange={(e) => { setSghForm({ ...sghForm, qHedgeOverride: e.target.value }); setSghOptResult(null); }}
+                    placeholder="авто"
+                    className={inputCls + ' flex-1'}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSghOptimize}
+                    disabled={sghOptLoading || !symbol}
+                    className="px-3 py-2 text-xs font-medium bg-accent-blue/15 text-accent-blue rounded-lg hover:bg-accent-blue/25 transition-colors disabled:opacity-40 whitespace-nowrap"
+                  >
+                    {sghOptLoading ? 'Расчёт...' : 'Рассчитать Q_hedge*'}
+                  </button>
+                </div>
+                {sghOptResult && (
+                  <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                    <span className="px-2 py-0.5 rounded-full text-[11px] font-medium bg-accent-green/10 text-accent-green">
+                      Worst-case loss: ${sghOptResult.worstCaseLoss.toFixed(2)}
+                    </span>
+                    <span className="text-xs text-text-secondary/60 italic">
+                      * Рассчитано по текущей цене тикера как P0.
+                    </span>
+                  </div>
+                )}
+                <p className="text-xs text-text-secondary mt-0.5">
+                  Размер шорт-хеджа в монетах. Пустое поле — бэкенд запустит оптимайзер при старте цикла.
+                </p>
+              </div>
+
+              {/* Advanced (fees) */}
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setSghAdvanced((v) => !v)}
+                  className="text-xs text-text-secondary hover:text-text-primary transition-colors flex items-center gap-1"
+                >
+                  <svg
+                    className={`w-3 h-3 transition-transform ${sghAdvanced ? 'rotate-90' : ''}`}
+                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                  </svg>
+                  Дополнительно (тарифы комиссий)
+                </button>
+                {sghAdvanced && (
+                  <div className="mt-2 grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={labelCls}>Maker fee, bps</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={sghForm.makerFeeBps}
+                        onChange={(e) => setSghForm({ ...sghForm, makerFeeBps: e.target.value })}
+                        className={inputCls}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Taker fee, bps</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        value={sghForm.takerFeeBps}
+                        onChange={(e) => setSghForm({ ...sghForm, takerFeeBps: e.target.value })}
+                        className={inputCls}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <p className="text-xs text-text-secondary italic">
+                Геометрическая сетка вокруг якоря P0. Нижние ячейки: DCA пары buy/sell с автоперезапуском.
+                Верхние ячейки: skim в выбранном режиме. HBreak/LBreak = жёсткое закрытие. Только Bybit hedge mode.
               </p>
             </>
           ) : isHF ? (

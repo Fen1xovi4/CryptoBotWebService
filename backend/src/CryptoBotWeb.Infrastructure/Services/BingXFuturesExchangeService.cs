@@ -338,7 +338,11 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
             if (!result.Success || result.Data == null)
                 return new List<LimitOrderDto>();
 
+            // BingX has been observed returning orders for all symbols on the account regardless of
+            // the symbol filter. Enforce the filter client-side so callers can rely on the symbol
+            // contract (otherwise SmaDca's orphan-order reconcile would cancel sibling bots' orders).
             return result.Data
+                .Where(o => string.Equals(o.Symbol, bingxSymbol, StringComparison.OrdinalIgnoreCase))
                 .Select(o => new LimitOrderDto
                 {
                     OrderId = o.OrderId.ToString(),

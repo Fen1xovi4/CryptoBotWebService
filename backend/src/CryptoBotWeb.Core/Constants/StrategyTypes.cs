@@ -8,4 +8,5 @@ public static class StrategyTypes
     public const string FundingClaim = "FundingClaim";
     public const string GridFloat = "GridFloat";
     public const string GridHedge = "GridHedge";
+    public const string SmartGridHedge = "SmartGridHedge";
 }

@@ -50,4 +50,26 @@ api.interceptors.response.use(
   }
 );
 
+export interface OptimizeSmartGridHedgeRequest {
+  p0: number;
+  step: number;
+  nUp: number;
+  nDown: number;
+  lotUsd: number;
+  skimMode: number; // 0=OneShot, 1=ExcessRecycle, 2=FullRecycle
+  makerFeeBps: number;
+  takerFeeBps: number;
+}
+
+export interface OptimizeSmartGridHedgeResponse {
+  qHedgeCoins: number;
+  worstCaseLoss: number;
+}
+
+export function optimizeSmartGridHedge(
+  body: OptimizeSmartGridHedgeRequest,
+): Promise<OptimizeSmartGridHedgeResponse> {
+  return api.post('/strategies/smart-grid-hedge/optimize-hedge', body).then((r) => r.data);
+}
+
 export default api;

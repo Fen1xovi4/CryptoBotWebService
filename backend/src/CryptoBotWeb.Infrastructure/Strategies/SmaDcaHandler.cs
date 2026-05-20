@@ -112,6 +112,17 @@ public class SmaDcaHandler : IStrategyHandler
             await _db.SaveChangesAsync(ct);
         }
 
+        // 1c. Adoption — BingX only. If state thinks we're flat but the exchange holds a matching
+        // position, take ownership of it and place a TP limit. Covers the "false EXIT" scenario
+        // where a transient API hiccup made the bot reset state while the position was actually
+        // alive. Reuses the reconcile throttle so we don't poll positions on every 5s tick.
+        if (state.LastReconcileAt != preReconcileAt)
+        {
+            await TryAdoptBingXPosition(strategy, config, state, exchange, isLongConfig, ct);
+            SaveState(strategy, state);
+            await _db.SaveChangesAsync(ct);
+        }
+
         // 2. Poll pending ENTRY limit (if any). On fill → adopt as entry, place TP limit.
         if (!string.IsNullOrEmpty(state.EntryOrderId))
         {
@@ -835,6 +846,84 @@ public class SmaDcaHandler : IStrategyHandler
     }
 
     /// <summary>
+    /// BingX-only periodic position adoption. SyncFromExchangeOnStartup runs once per worker boot;
+    /// this covers the live-runtime case where the bot's state went flat (false EXIT, manual state
+    /// edit, transient API hiccup during close-detection) while the position is actually still alive
+    /// on the exchange. We pick it up, recompute TP off the current avg, wipe any stale orders, and
+    /// place a fresh reduce-only TP limit on the same tick so the user sees the order immediately.
+    ///
+    /// Scoped to BingX by class name — other exchanges don't have the failure mode that motivated
+    /// this and we don't want to silently take ownership of positions on accounts that may be
+    /// shared with other tooling. Throttled by reusing reconcile's LastReconcileAt cadence.
+    /// </summary>
+    private async Task TryAdoptBingXPosition(Strategy strategy, SmaDcaConfig config, SmaDcaState state,
+        IFuturesExchangeService exchange, bool isLongConfig, CancellationToken ct)
+    {
+        if (exchange.GetType().Name != "BingXFuturesExchangeService") return;
+        if (state.InPosition) return;
+        if (!string.IsNullOrEmpty(state.EntryOrderId)) return;
+        if (!string.IsNullOrEmpty(state.DcaOrderId)) return;
+
+        PositionDto? pos;
+        try
+        {
+            pos = await exchange.GetPositionAsync(config.Symbol, config.Direction);
+        }
+        catch (NotSupportedException) { return; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SmaDca adoption: GetPositionAsync failed for {Symbol}", config.Symbol);
+            return;
+        }
+
+        if (pos == null || pos.Quantity <= 0) return;
+
+        // Refuse to adopt a position whose side disagrees with the bot's configured direction —
+        // it likely belongs to a different bot/manual trade.
+        var posIsLong = string.Equals(pos.Side, "Long", StringComparison.OrdinalIgnoreCase);
+        if (posIsLong != isLongConfig)
+        {
+            Log(strategy, "Warning",
+                $"🪝 ADOPT: на бирже найдена позиция {pos.Side} qty={pos.Quantity}, " +
+                $"но направление бота — {config.Direction}. Подхват пропущен.");
+            return;
+        }
+
+        state.InPosition = true;
+        state.IsLong = isLongConfig;
+        state.TotalQuantity = pos.Quantity;
+        state.AverageEntryPrice = pos.EntryPrice > 0 ? pos.EntryPrice : state.AverageEntryPrice;
+        state.TotalCost = state.AverageEntryPrice * state.TotalQuantity;
+        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice, config.TakeProfitPercent, isLongConfig);
+        state.DcaLevel = await EstimateDcaLevelFromHistory(strategy.Id, isLongConfig, ct);
+        if (state.LastDcaPrice <= 0) state.LastDcaPrice = state.AverageEntryPrice;
+        state.PositionOpenedAt ??= DateTime.UtcNow;
+        state.SkipNextCandle = true;
+        state.DcaCooldownUntil = null;
+
+        // Wipe any stale orders on the symbol (manual TP, leftover limits from before state went
+        // flat) so PlaceTakeProfitLimit below has a clean slate. The Reconcile fix and BingX
+        // symbol filter mean this won't touch sibling bots' orders.
+        try { await exchange.CancelAllOrdersAsync(config.Symbol); }
+        catch (NotSupportedException) { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SmaDca adoption: CancelAllOrdersAsync failed for {Symbol}", config.Symbol);
+        }
+        state.TakeProfitOrderId = null;
+
+        Log(strategy, "Info",
+            $"🪝 ADOPT: подхвачена позиция с биржи (BingX) — {config.Direction} qty={state.TotalQuantity}, " +
+            $"avg={Math.Round(state.AverageEntryPrice, 6)}, " +
+            $"PnL={Math.Round(pos.UnrealizedPnl, 4)}$, dcaLvl={state.DcaLevel}, " +
+            $"TP={Math.Round(state.CurrentTakeProfit, 6)} ({config.TakeProfitPercent}%)");
+
+        // Place TP immediately so the user sees the order this tick instead of waiting for the
+        // heal path in step 4 next iteration.
+        await PlaceTakeProfitLimit(strategy, config, state, exchange);
+    }
+
+    /// <summary>
     /// Detects position closed externally (e.g. manual close via API/UI) by comparing
     /// in-memory state against DB state. Matches EmaBounce semantics.
     /// </summary>
@@ -1033,6 +1122,12 @@ public class SmaDcaHandler : IStrategyHandler
         {
             if (tracked.Contains(o.OrderId)) continue;
             if (!string.Equals(o.Side, counterSide, StringComparison.OrdinalIgnoreCase)) continue;
+
+            // Defensive — GetOpenOrdersAsync is contracted to return only the requested symbol,
+            // but BingX has been observed returning the whole account. Skipping unrelated symbols
+            // here prevents reconcile from cancel-spamming sibling bots' orders.
+            if (!string.IsNullOrEmpty(o.Symbol)
+                && !string.Equals(o.Symbol, config.Symbol, StringComparison.OrdinalIgnoreCase)) continue;
 
             try
             {

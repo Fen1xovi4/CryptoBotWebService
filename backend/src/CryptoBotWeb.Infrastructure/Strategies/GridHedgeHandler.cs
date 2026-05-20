@@ -33,6 +33,11 @@ namespace CryptoBotWeb.Infrastructure.Strategies;
 /// exit triggers are evaluated against StartAnchor, NOT the laddering Anchor, so stop-loss
 /// and upper take-profit remain at the prices set when the bot was first started.
 ///
+/// Deep-level re-arm: when a non-zero-level batch's TP closes (full OR partial-then-cancel),
+/// a fresh buy-limit of BetUsdt is re-placed at the same absolute price (the original level
+/// price). The level keeps cycling — buy → sell → buy → sell — until the upper or lower
+/// exit trigger fires. The cycle is bounded by those triggers, not by the count of re-arms.
+///
 /// Exit triggers (both close the whole bot — evaluated against the START anchor):
 ///   - price ≥ StartAnchor × (1 + UpperExitPercent/100) → ExitingUp (most grid in profit, hedge in loss)
 ///   - price ≤ StartAnchor × (1 − RangePercent/100)     → ExitingDown (stop-loss; hedge in profit)
@@ -172,6 +177,102 @@ public class GridHedgeHandler : IStrategyHandler
             SaveState(strategy, state);
             await _db.SaveChangesAsync(ct);
         }
+    }
+
+    // ────────────────────────── Manual force-close (controller entry) ──────────────────────────
+
+    /// <summary>
+    /// Manual "Close" button entry point. Mirrors the Exiting* phase: cancels every tracked
+    /// limit + TP, market-sells each batch on the grid leg (spot OR futures depending on mode),
+    /// and buys back the hedge short. Sets Phase=Done and persists state.
+    ///
+    /// Also fires a defensive `CancelAllOrdersAsync` sweep on the grid+hedge symbols so any
+    /// orphan order the state list missed (e.g. from a previously crashed tick) gets killed.
+    /// </summary>
+    public async Task<GridHedgeForceCloseResult> ForceCloseAsync(
+        Strategy strategy, IFuturesExchangeService futures, CancellationToken ct)
+    {
+        await _db.Entry(strategy).ReloadAsync(ct);
+
+        var config = JsonSerializer.Deserialize<GridHedgeConfig>(strategy.ConfigJson, JsonOptions);
+        if (config == null || string.IsNullOrWhiteSpace(config.GridSymbol))
+            return new GridHedgeForceCloseResult(false, "Некорректная конфигурация GridHedge", 0, 0, 0m);
+
+        var state = JsonSerializer.Deserialize<GridHedgeState>(strategy.StateJson, JsonOptions)
+                    ?? new GridHedgeState();
+
+        var hedgeSymbol = (config.Mode == GridHedgeMode.SameTicker || string.IsNullOrWhiteSpace(config.HedgeSymbol))
+            ? config.GridSymbol
+            : config.HedgeSymbol;
+
+        var openBatchesBefore = state.Batches.Count(b => !b.Closed);
+        var pendingBuysBefore = state.PendingBuys.Count;
+        var hedgeQtyBefore = state.HedgeQty;
+
+        if (openBatchesBefore == 0 && pendingBuysBefore == 0 && hedgeQtyBefore == 0)
+            return new GridHedgeForceCloseResult(false, "Нет открытых позиций или ордеров", 0, 0, 0m);
+
+        ISpotExchangeService? spotForDispose = null;
+        IGridLeg gridLeg;
+        try
+        {
+            if (config.PositionMode == GridHedgePositionMode.Hedge)
+            {
+                if (!futures.IsHedgeModeSupported)
+                    return new GridHedgeForceCloseResult(false,
+                        "PositionMode=Hedge не поддерживается этой биржей", 0, 0, 0m);
+                gridLeg = new HedgedFuturesGridLeg(futures, config.GridSymbol);
+            }
+            else if (config.Mode == GridHedgeMode.SameTicker)
+            {
+                spotForDispose = _factory.CreateSpot(strategy.Account);
+                gridLeg = new SpotGridLeg(spotForDispose, config.GridSymbol);
+            }
+            else
+            {
+                gridLeg = new FuturesGridLeg(futures, config.GridSymbol);
+            }
+        }
+        catch (Exception ex)
+        {
+            return new GridHedgeForceCloseResult(false,
+                $"Не удалось создать grid leg: {ex.Message}", 0, 0, 0m);
+        }
+
+        try
+        {
+            Log(strategy, "Info",
+                $"🛑 Ручное закрытие: открытых батчей={openBatchesBefore}, " +
+                $"pendingBuys={pendingBuysBefore}, hedgeQty={hedgeQtyBefore}");
+
+            // Defensive sweep: kill any orphaned orders the state list didn't track.
+            try
+            {
+                if (spotForDispose != null)
+                    await spotForDispose.CancelAllOrdersAsync(config.GridSymbol);
+                else
+                    await futures.CancelAllOrdersAsync(config.GridSymbol);
+
+                if (config.Mode == GridHedgeMode.CrossTicker && hedgeSymbol != config.GridSymbol)
+                    await futures.CancelAllOrdersAsync(hedgeSymbol);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GridHedge: defensive CancelAllOrders failed (continuing)");
+            }
+
+            await CloseEverythingAsync(strategy, config, state, hedgeSymbol, gridLeg, futures, ct);
+        }
+        finally
+        {
+            spotForDispose?.Dispose();
+            SaveState(strategy, state);
+            await _db.SaveChangesAsync(ct);
+        }
+
+        return new GridHedgeForceCloseResult(true,
+            "Позиции закрыты, ордера отменены",
+            openBatchesBefore, pendingBuysBefore, hedgeQtyBefore);
     }
 
     // ────────────────────────── Validation ──────────────────────────
@@ -641,6 +742,8 @@ public class GridHedgeHandler : IStrategyHandler
                 {
                     var closePrice = status.AverageFilledPrice > 0 ? status.AverageFilledPrice : batch.TpPrice;
                     var isLevelZero = batch.LevelPercent == 0m;
+                    var rearmLevelPercent = batch.LevelPercent;
+                    var rearmPrice = batch.FilledPrice;
                     RecordBatchClosure(strategy, state, gridLeg, batch, closePrice, status.FilledQuantity, "TpFill");
                     state.Batches.Remove(batch);
 
@@ -649,6 +752,7 @@ public class GridHedgeHandler : IStrategyHandler
                         await LadderUpAsync(strategy, state, gridLeg, closePrice, ct);
                         return; // Stop polling — Phase is now GridArming, next tick re-arms.
                     }
+                    await ReArmDeepLevelAsync(strategy, config, state, gridLeg, rearmLevelPercent, rearmPrice);
                     break;
                 }
 
@@ -658,6 +762,8 @@ public class GridHedgeHandler : IStrategyHandler
                     {
                         var closePrice = status.AverageFilledPrice > 0 ? status.AverageFilledPrice : batch.TpPrice;
                         var isLevelZero = batch.LevelPercent == 0m;
+                        var rearmLevelPercent = batch.LevelPercent;
+                        var rearmPrice = batch.FilledPrice;
                         RecordBatchClosure(strategy, state, gridLeg, batch, closePrice, status.FilledQuantity, "TpCancelPart");
                         state.Batches.Remove(batch);
 
@@ -666,6 +772,7 @@ public class GridHedgeHandler : IStrategyHandler
                             await LadderUpAsync(strategy, state, gridLeg, closePrice, ct);
                             return;
                         }
+                        await ReArmDeepLevelAsync(strategy, config, state, gridLeg, rearmLevelPercent, rearmPrice);
                     }
                     else
                     {
@@ -719,6 +826,67 @@ public class GridHedgeHandler : IStrategyHandler
         state.GridArmingFailureCount = 0;
         state.PlacementCooldownUntil = null;
         state.Phase = GridHedgePhase.GridArming;
+    }
+
+    // ────────────────────────── Re-arm deep level after TP ──────────────────────────
+
+    /// <summary>
+    /// After a non-zero-level batch closes by TP fill (full or partial), re-place a fresh
+    /// buy-limit at the SAME absolute price the batch originally filled at. This makes the
+    /// deep grid levels continuously cyclable — a level can be bought, sold, bought again
+    /// any number of times within one cycle. The cycle still terminates via the upper/lower
+    /// exit triggers (pinned to StartAnchor), so this does not create an infinite loop.
+    ///
+    /// We re-arm at <c>batch.FilledPrice</c> (the original limit price) rather than
+    /// <c>state.Anchor × (1 - LevelPercent/100)</c> because the working anchor may have
+    /// laddered up since the batch was placed — the original level price is the user's
+    /// intended buy point and stays fixed for the duration of the cycle.
+    ///
+    /// On placement failure we log and skip — the level stays empty for this cycle. Matches
+    /// the "cancelled without fill" behavior in PollPendingBuysAsync.
+    /// </summary>
+    private async Task ReArmDeepLevelAsync(
+        Strategy strategy, GridHedgeConfig config, GridHedgeState state, IGridLeg gridLeg,
+        decimal levelPercent, decimal price)
+    {
+        if (price <= 0 || config.BetUsdt <= 0) return;
+
+        var qty = config.BetUsdt / price;
+        if (qty <= 0)
+        {
+            Log(strategy, "Warning",
+                $"Перевыставление -{levelPercent}%: qty=0 (bet={config.BetUsdt}, price={price}) — пропуск");
+            return;
+        }
+
+        OrderResultDto result;
+        try { result = await gridLeg.PlaceLimitBuyAsync(price, qty); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridHedge re-arm: PlaceLimitBuy threw for {Symbol} @-{Pct}%",
+                gridLeg.Symbol, levelPercent);
+            Log(strategy, "Error",
+                $"Перевыставление -{levelPercent}% исключение: {ex.Message} — уровень пуст до следующего цикла");
+            return;
+        }
+
+        if (result.Success && !string.IsNullOrEmpty(result.OrderId))
+        {
+            state.PendingBuys.Add(new GridHedgePendingBuy
+            {
+                OrderId = result.OrderId,
+                Price = result.FilledPrice ?? price,
+                Qty = result.FilledQuantity ?? qty,
+                LevelPercent = levelPercent
+            });
+            Log(strategy, "Info",
+                $"🔁 Перевыставлен уровень -{levelPercent}%: BUY {Math.Round(qty, 6)} @ {Math.Round(price, 6)} (id={result.OrderId})");
+        }
+        else
+        {
+            Log(strategy, "Warning",
+                $"Перевыставление -{levelPercent}% не выставлено: {result.ErrorMessage} — уровень пуст до следующего цикла");
+        }
     }
 
     private void RecordBatchClosure(Strategy strategy, GridHedgeState state, IGridLeg gridLeg,

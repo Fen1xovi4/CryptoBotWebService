@@ -21,11 +21,19 @@ public class StrategiesController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IExchangeServiceFactory _exchangeFactory;
+    private readonly GridHedgeHandler _gridHedgeHandler;
+    private readonly SmartGridHedgeHandler _smartGridHedgeHandler;
 
-    public StrategiesController(AppDbContext db, IExchangeServiceFactory exchangeFactory)
+    public StrategiesController(
+        AppDbContext db,
+        IExchangeServiceFactory exchangeFactory,
+        GridHedgeHandler gridHedgeHandler,
+        SmartGridHedgeHandler smartGridHedgeHandler)
     {
         _db = db;
         _exchangeFactory = exchangeFactory;
+        _gridHedgeHandler = gridHedgeHandler;
+        _smartGridHedgeHandler = smartGridHedgeHandler;
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -281,6 +289,40 @@ public class StrategiesController : ControllerBase
         return Ok(strategy);
     }
 
+    // Analytic min-max optimizer for SmartGridHedge — used by the create-bot form to compute
+    // a Q_hedge suggestion before submitting Create. The endpoint is anonymous to any specific
+    // strategy (we don't need an id); it just runs the closed-form formula and returns coins.
+    [HttpPost("smart-grid-hedge/optimize-hedge")]
+    public IActionResult OptimizeSmartGridHedge([FromBody] SmartGridHedgeOptimizeRequest request)
+    {
+        try
+        {
+            var result = SymmetricHedgeOptimizer.Optimize(
+                request.P0, request.Step, request.NUp, request.NDown, request.LotUsd,
+                request.SkimMode, request.MakerFeeBps, request.TakerFeeBps);
+
+            return Ok(new
+            {
+                qHedgeCoins = result.QHedgeCoins,
+                worstCaseLoss = result.WorstCaseLoss
+            });
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            return BadRequest(new { message = ex.Message, param = ex.ParamName });
+        }
+    }
+
+    public record SmartGridHedgeOptimizeRequest(
+        decimal P0,
+        decimal Step,
+        int NUp,
+        int NDown,
+        decimal LotUsd,
+        SmartGridSkimMode SkimMode,
+        decimal MakerFeeBps,
+        decimal TakerFeeBps);
+
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateStrategyRequest request)
     {
@@ -412,6 +454,38 @@ public class StrategiesController : ControllerBase
                 CycleTotalFundingPnl = prevFcState.CycleTotalFundingPnl
             };
             strategy.StateJson = JsonSerializer.Serialize(freshFcState, jsonOpts);
+        }
+        else if (strategy.Type == StrategyTypes.SmartGridHedge)
+        {
+            // SmartGridHedge Start semantics:
+            //   - Empty state OR Phase == Closed → fresh cycle (preserve cumulative PnL +
+            //     CompletedCycles so the user sees a continuous history).
+            //   - Mid-cycle (Opening/Active/HardClosing with anything still open) → resume.
+            var prevSghState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
+                ? new SmartGridHedgeState()
+                : JsonSerializer.Deserialize<SmartGridHedgeState>(strategy.StateJson, jsonOpts) ?? new SmartGridHedgeState();
+
+            var sghMidCycle = prevSghState.Phase is not (SmartGridHedgePhase.NotStarted or SmartGridHedgePhase.Closed)
+                && (prevSghState.QInitCoins > 0 || prevSghState.QHedgeCoins > 0
+                    || prevSghState.DcaCells.Count > 0 || prevSghState.SkimCells.Count > 0);
+
+            SmartGridHedgeState freshSghState;
+            if (sghMidCycle)
+            {
+                freshSghState = prevSghState;
+            }
+            else
+            {
+                freshSghState = new SmartGridHedgeState
+                {
+                    Phase = SmartGridHedgePhase.NotStarted,
+                    GridRealizedPnl = prevSghState.GridRealizedPnl,
+                    HedgeRealizedPnl = prevSghState.HedgeRealizedPnl,
+                    TotalFees = prevSghState.TotalFees,
+                    CompletedCycles = prevSghState.CompletedCycles
+                };
+            }
+            strategy.StateJson = JsonSerializer.Serialize(freshSghState, jsonOpts);
         }
         else if (strategy.Type == StrategyTypes.GridHedge)
         {
@@ -1072,6 +1146,46 @@ public class StrategiesController : ControllerBase
                 details = new[]
                 {
                     $"{gfDirection} closed: qty={Math.Round(totalQty, 6)}, price={Math.Round(gfClosePrice, 6)}, PnL=${Math.Round(gfNetPnl, 2)}"
+                }
+            });
+        }
+
+        // --- GridHedge path ---
+        if (strategy.Type == StrategyTypes.GridHedge)
+        {
+            using var ghFutures = _exchangeFactory.CreateFutures(strategy.Account);
+            var ghResult = await _gridHedgeHandler.ForceCloseAsync(strategy, ghFutures, HttpContext.RequestAborted);
+
+            if (!ghResult.Ok)
+                return BadRequest(new { message = ghResult.Message });
+
+            return Ok(new
+            {
+                message = ghResult.Message,
+                details = new[]
+                {
+                    $"GridHedge closed: батчей={ghResult.ClosedBatches}, " +
+                    $"pendingBuys={ghResult.CancelledPendings}, hedgeQty={ghResult.HedgeClosedQty}"
+                }
+            });
+        }
+
+        // --- SmartGridHedge path ---
+        if (strategy.Type == StrategyTypes.SmartGridHedge)
+        {
+            using var sghFutures = _exchangeFactory.CreateFutures(strategy.Account);
+            var sghResult = await _smartGridHedgeHandler.ForceCloseAsync(strategy, sghFutures, HttpContext.RequestAborted);
+
+            if (!sghResult.Ok)
+                return BadRequest(new { message = sghResult.Message });
+
+            return Ok(new
+            {
+                message = sghResult.Message,
+                details = new[]
+                {
+                    $"SmartGridHedge closed: long={Math.Round(sghResult.LongCoinsClosed, 8)} coins, " +
+                    $"short={Math.Round(sghResult.ShortCoinsClosed, 8)} coins"
                 }
             });
         }
