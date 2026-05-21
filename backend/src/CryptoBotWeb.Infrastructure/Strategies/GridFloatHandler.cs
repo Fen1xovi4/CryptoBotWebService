@@ -110,6 +110,19 @@ public class GridFloatHandler : IStrategyHandler
             await _db.SaveChangesAsync(ct);
         }
 
+        // 1.5. Orphan-cancel retry. While the flag is live and state is flat, keep sweeping any
+        // limit orders the exchange still has for this symbol. Single-shot CancelAllOrdersAsync
+        // in OnFullClose is best-effort (catches all exceptions silently); without this retry, a
+        // single failed cancel (timestamp drift, network blip, rate limit) leaves DCA buy limits
+        // resting → one fires below market → dust position appears that state can't track.
+        if (state.OrphanCancelPendingUntil.HasValue
+            && state.Batches.Count == 0 && state.DcaOrders.Count == 0)
+        {
+            await SweepOrphanOrders(strategy, config, state, exchange);
+            SaveState(strategy, state);
+            await _db.SaveChangesAsync(ct);
+        }
+
         // 2. Poll pending DCA limits → detected fills become new batches with their own TPs.
         if (state.DcaOrders.Count > 0)
         {
@@ -199,8 +212,13 @@ public class GridFloatHandler : IStrategyHandler
             state.OpenAfterTime = null;
         }
 
-        // 9. Open new anchor if we're flat.
-        if (state.Batches.Count == 0 && state.DcaOrders.Count == 0 && !state.OpenAfterTime.HasValue)
+        // 9. Open new anchor if we're flat. Also gated on OrphanCancelPendingUntil — if a
+        // previous close left limit orders still resting on the exchange we MUST clear them
+        // before placing a new anchor, otherwise a stale DCA could fire moments later and add
+        // to the fresh anchor's qty as untracked dust.
+        if (state.Batches.Count == 0 && state.DcaOrders.Count == 0
+            && !state.OpenAfterTime.HasValue
+            && !state.OrphanCancelPendingUntil.HasValue)
         {
             await OpenAnchor(strategy, config, state, exchange, lastClosed, isLongConfig, ct);
             if (state.AnchorPrice > 0)
@@ -1018,6 +1036,66 @@ public class GridFloatHandler : IStrategyHandler
         }
     }
 
+    /// <summary>
+    /// Verify the exchange's open-orders list for the symbol is empty, re-cancelling if
+    /// anything still rests on the book. Driven by <see cref="GridFloatState.OrphanCancelPendingUntil"/>;
+    /// runs each tick (while state is flat) until either the book is verified empty or the
+    /// deadline expires.
+    ///
+    /// Why this exists: OnFullClose's single-shot CancelAllOrdersAsync is wrapped in a silent
+    /// try/catch (it can't block closure on a transient API error), so a failed cancel used to
+    /// leak DCA buy limits onto the book. After the user manually closed the bulk of the
+    /// position, one of those leaked DCAs would fire below market and produce a dust orphan
+    /// position (e.g. 0.1 XRP @ 1.4222) that state knew nothing about and couldn't adopt.
+    /// </summary>
+    private async Task SweepOrphanOrders(Strategy strategy, GridFloatConfig config,
+        GridFloatState state, IFuturesExchangeService exchange)
+    {
+        if (!state.OrphanCancelPendingUntil.HasValue) return;
+
+        if (DateTime.UtcNow > state.OrphanCancelPendingUntil.Value)
+        {
+            Log(strategy, "Warning",
+                "🧹 Orphan-cancel: дедлайн истёк, не удалось подтвердить пустой ордербук. " +
+                "Снимаю флаг — проверьте Bybit Orders вручную, могут остаться брошенные лимиты.");
+            state.OrphanCancelPendingUntil = null;
+            return;
+        }
+
+        List<LimitOrderDto> open;
+        try { open = await exchange.GetOpenOrdersAsync(config.Symbol); }
+        catch (NotSupportedException)
+        {
+            // Exchange doesn't expose the listing endpoint — best-effort cancel once and let go.
+            try { await exchange.CancelAllOrdersAsync(config.Symbol); } catch { }
+            state.OrphanCancelPendingUntil = null;
+            return;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat orphan-cancel: GetOpenOrdersAsync failed for {Symbol}", config.Symbol);
+            return; // try again next tick — flag stays set
+        }
+
+        if (open.Count == 0)
+        {
+            Log(strategy, "Info",
+                "🧹 Orphan-cancel: на бирже нет открытых ордеров — ордербук чист, снимаю флаг.");
+            state.OrphanCancelPendingUntil = null;
+            return;
+        }
+
+        Log(strategy, "Warning",
+            $"🧹 Orphan-cancel: обнаружено {open.Count} незакрытых ордеров после полного закрытия " +
+            $"(пример: id={open[0].OrderId} side={open[0].Side} price={open[0].Price} qty={open[0].Quantity}) — отменяю.");
+        try { await exchange.CancelAllOrdersAsync(config.Symbol); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat orphan-cancel: CancelAllOrdersAsync failed for {Symbol}", config.Symbol);
+            // Flag stays set — we'll re-try next tick.
+        }
+    }
+
     private async Task OnFullClose(Strategy strategy, GridFloatConfig config, GridFloatState state,
         IFuturesExchangeService exchange, CancellationToken ct)
     {
@@ -1033,6 +1111,12 @@ public class GridFloatHandler : IStrategyHandler
         // has already been processed in this tick.
         state.OpenAfterTime = DateTime.UtcNow;
         state.PlacementCooldownUntil = null;
+        // Arm the orphan-cancel retry. Even though we just called CancelAllOrdersAsync above,
+        // it's wrapped in a silent catch — any failure (timestamp, 5xx, rate limit) would
+        // silently leave limit orders alive. The retry step in ProcessAsync confirms the book
+        // is empty via GetOpenOrdersAsync and re-cancels if needed; OpenAnchor is gated on this
+        // flag being clear, so we never overlap a fresh anchor with a stale DCA.
+        state.OrphanCancelPendingUntil = DateTime.UtcNow.AddMinutes(30);
 
         Log(strategy, "Info",
             $"🏁 Полное закрытие сетки: realized={Math.Round(state.RealizedPnlDollar, 2)}USD, " +
@@ -1136,6 +1220,11 @@ public class GridFloatHandler : IStrategyHandler
             state.DcaOrders.Clear();
             state.AnchorPrice = 0;
             state.OpenAfterTime = DateTime.UtcNow;
+            // Arm the orphan-cancel retry: the user closed the position out-of-band (UI or
+            // account-level button), so any DCA/TP limits the bot left on the book before
+            // shutdown are still alive. ProcessAsync will keep re-cancelling each tick until
+            // GetOpenOrdersAsync reports a clean book.
+            state.OrphanCancelPendingUntil = DateTime.UtcNow.AddMinutes(30);
             return;
         }
 
