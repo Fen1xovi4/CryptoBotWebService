@@ -253,20 +253,53 @@ public class FundingClaimHandler : IStrategyHandler
         state.MissedPositionChecks = 0;
 
         // ── Stop-loss: close if unrealized PnL is worse than -FcStopLossPercent ──
+        // Grace window: SL is disabled within ±FcSlGraceMinutes of a funding event (both before next
+        // and after the last paid one) — funding payouts often cause sharp moves we don't want to chase.
         var slCfg = await GetWorkspaceConfigAsync(strategy, ct);
         if (slCfg.FcStopLossPercent > 0 && exchangePos.EntryPrice > 0 && currentPrice.HasValue)
         {
+            var nowUtc = DateTime.UtcNow;
+            bool inGraceWindow = false;
+            string? graceReason = null;
+
+            if (slCfg.FcSlGraceMinutes > 0)
+            {
+                if (state.NextFundingTime.HasValue)
+                {
+                    var minsUntilFunding = (state.NextFundingTime.Value - nowUtc).TotalMinutes;
+                    if (minsUntilFunding >= 0 && minsUntilFunding < slCfg.FcSlGraceMinutes)
+                    {
+                        inGraceWindow = true;
+                        graceReason = $"pre-funding ({Math.Round(minsUntilFunding, 1)} min left)";
+                    }
+                }
+                if (!inGraceWindow && state.LastFundingPaidAt.HasValue)
+                {
+                    var minsSinceFunding = (nowUtc - state.LastFundingPaidAt.Value).TotalMinutes;
+                    if (minsSinceFunding >= 0 && minsSinceFunding < slCfg.FcSlGraceMinutes)
+                    {
+                        inGraceWindow = true;
+                        graceReason = $"post-funding ({Math.Round(minsSinceFunding, 1)} min since payout)";
+                    }
+                }
+            }
+
             decimal adversePct = posSide == "Long"
                 ? (exchangePos.EntryPrice - currentPrice.Value) / exchangePos.EntryPrice * 100m
                 : (currentPrice.Value - exchangePos.EntryPrice) / exchangePos.EntryPrice * 100m;
 
-            if (adversePct >= slCfg.FcStopLossPercent)
+            if (adversePct >= slCfg.FcStopLossPercent && !inGraceWindow)
             {
                 Log(strategy, "Warning",
                     $"Stop-loss triggered: adverse={Math.Round(adversePct, 3)}% ≥ threshold {slCfg.FcStopLossPercent}% " +
                     $"(entry={Math.Round(exchangePos.EntryPrice, 6)}, price={Math.Round(currentPrice.Value, 6)})");
                 await ClosePosition(strategy, config, state, exchange, currentPrice.Value, "StopLoss", ct);
                 return;
+            }
+            if (adversePct >= slCfg.FcStopLossPercent && inGraceWindow)
+            {
+                _logger.LogDebug("Strategy {Id}: SL would trigger ({Adv}%) but in grace window: {Reason}",
+                    strategy.Id, Math.Round(adversePct, 3), graceReason);
             }
         }
 
@@ -330,6 +363,7 @@ public class FundingClaimHandler : IStrategyHandler
                 if (delta != 0)
                 {
                     state.CurrentCycleFundingPnl = totalFunding;
+                    state.LastFundingPaidAt = DateTime.UtcNow; // anchor SL post-funding grace window
                     Log(strategy, "Info",
                         $"Funding payment: +${Math.Round(delta, 4)}, " +
                         $"position funding=${Math.Round(state.CurrentCycleFundingPnl, 4)}");
@@ -472,6 +506,7 @@ public class FundingClaimHandler : IStrategyHandler
         state.EntrySizeUsdt = null;
         state.PositionOpenedAt = null;
         state.LastHourlyCheckAt = null;
+        state.LastFundingPaidAt = null;
         state.CurrentCycleFundingPnl = 0;
         state.MissedPositionChecks = 0;
         state.Phase = FundingClaimPhase.Idle;

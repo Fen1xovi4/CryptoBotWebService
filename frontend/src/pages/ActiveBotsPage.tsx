@@ -70,6 +70,7 @@ interface WorkspaceConfig {
   fcMaxFundingRatePercent: number;
   fcStopLossPercent: number;
   fcLeverage: number;
+  fcSlGraceMinutes: number;
 }
 
 interface WorkspaceStats {
@@ -102,6 +103,7 @@ const defaultConfig: WorkspaceConfig = {
   fcMaxFundingRatePercent: 2.0,
   fcStopLossPercent: 2.5,
   fcLeverage: 3,
+  fcSlGraceMinutes: 10,
 };
 
 const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
@@ -576,6 +578,23 @@ export default function ActiveBotsPage() {
               <span className="text-xs text-text-secondary">%</span>
               <span className="text-xs text-text-secondary italic">
                 закрыть позицию при просадке. 0 = выключен.
+              </span>
+            </div>
+            <div className="h-6 w-px bg-border" />
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text-secondary">SL grace:</span>
+              <span className="text-xs text-text-secondary">±</span>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                value={localConfig.fcSlGraceMinutes}
+                onChange={(e) => updateConfig({ fcSlGraceMinutes: Number(e.target.value) })}
+                className="w-16 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+              />
+              <span className="text-xs text-text-secondary">мин</span>
+              <span className="text-xs text-text-secondary italic">
+                окно вокруг фандинга где SL отключён. 0 = всегда активен.
               </span>
             </div>
             <div className="h-6 w-px bg-border" />

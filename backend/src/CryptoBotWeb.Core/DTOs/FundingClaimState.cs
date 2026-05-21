@@ -24,4 +24,5 @@ public class FundingClaimState
     public decimal? LastPrice { get; set; }
     public DateTime? LastHourlyCheckAt { get; set; } // throttle: one check per hour
     public int MissedPositionChecks { get; set; } // consecutive null GetPosition results — debounces ExternalClose
+    public DateTime? LastFundingPaidAt { get; set; } // last detected funding payment — anchors SL grace window
 }
