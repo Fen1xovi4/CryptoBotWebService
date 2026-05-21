@@ -17,4 +17,5 @@ public class WorkspaceFundingClaimConfig
     public decimal FcMaxFundingRatePercent { get; set; } = 2.0m;
     public decimal FcStopLossPercent { get; set; } = 2.5m;
     public int FcLeverage { get; set; } = 3;
+    public int FcSlGraceMinutes { get; set; } = 10; // SL disabled within ±this many minutes of a funding event
 }

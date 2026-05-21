@@ -120,6 +120,7 @@ public class SmaDcaHandler : IStrategyHandler
         if (state.LastReconcileAt != preReconcileAt)
         {
             await TryAdoptOrphanPosition(strategy, config, state, exchange, isLongConfig, ct);
+            await ReconcileLivePositionDrift(strategy, config, state, exchange, isLongConfig, ct);
             SaveState(strategy, state);
             await _db.SaveChangesAsync(ct);
         }
@@ -709,9 +710,47 @@ public class SmaDcaHandler : IStrategyHandler
         // Cancel any limits (TP/Entry/DCA) on this symbol before market-closing.
         try { await exchange.CancelAllOrdersAsync(config.Symbol); } catch { }
 
+        // Reconcile with live exchange position before closing. State.TotalQuantity can drift past
+        // the actual position when the limit TP has already (partially) filled — closing the stale
+        // in-memory qty makes Bitget reject with "closed positions cannot exceed positions held"
+        // and the safety-net spins forever.
+        decimal closeQty = state.TotalQuantity;
+        PositionDto? livePos = null;
+        try
+        {
+            livePos = await exchange.GetPositionAsync(config.Symbol, state.IsLong ? "Long" : "Short");
+        }
+        catch (NotSupportedException) { /* fall back to state qty */ }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SmaDca safety-net: GetPositionAsync failed for {Symbol}", config.Symbol);
+        }
+
+        if (livePos != null)
+        {
+            if (livePos.Quantity <= 0)
+            {
+                // Position vanished from the exchange between TP-cross and now — treat as already
+                // closed externally. Don't spam closes; reset state and let the next cycle start.
+                Log(strategy, "Warning",
+                    $"⚠️ Safety-net: позиция уже закрыта на бирже (state.qty={state.TotalQuantity}, " +
+                    $"exchange.qty=0) — очищаем state без market-close");
+                ResetPositionState(state);
+                state.SkipNextCandle = true;
+                return true;
+            }
+            if (livePos.Quantity < state.TotalQuantity)
+            {
+                Log(strategy, "Warning",
+                    $"⚠️ Safety-net: state.qty={state.TotalQuantity} > exchange.qty={livePos.Quantity} " +
+                    "(лимитный TP отработал частично) — закрываю фактический остаток");
+                closeQty = livePos.Quantity;
+            }
+        }
+
         var closeResult = state.IsLong
-            ? await exchange.CloseLongAsync(config.Symbol, state.TotalQuantity)
-            : await exchange.CloseShortAsync(config.Symbol, state.TotalQuantity);
+            ? await exchange.CloseLongAsync(config.Symbol, closeQty)
+            : await exchange.CloseShortAsync(config.Symbol, closeQty);
 
         if (!closeResult.Success)
         {
@@ -722,11 +761,14 @@ public class SmaDcaHandler : IStrategyHandler
             return false;
         }
 
-        var qtyClosed = state.TotalQuantity;
+        var qtyClosed = closeQty;
         var closePrice = closeResult.FilledPrice ?? price.Value;
         var pnlPct = ComputePnlPercent(state.IsLong, state.AverageEntryPrice, closePrice);
-        var grossPnl = state.TotalCost * pnlPct / 100m;
-        var commission = state.TotalCost * exchange.TakerFeeRate * 2m;
+        // Cost basis must scale with what we actually closed, not state.TotalCost — otherwise
+        // PnL/commission get over-reported when only a remnant is closed.
+        var closedCost = qtyClosed * state.AverageEntryPrice;
+        var grossPnl = closedCost * pnlPct / 100m;
+        var commission = closedCost * exchange.TakerFeeRate * 2m;
         var netPnl = grossPnl - commission;
         var direction = state.IsLong ? "Long" : "Short";
 
@@ -990,6 +1032,93 @@ public class SmaDcaHandler : IStrategyHandler
 
         // Place TP immediately so the user sees the order this tick instead of waiting for the
         // heal path in step 4 next iteration.
+        await PlaceTakeProfitLimit(strategy, config, state, exchange);
+    }
+
+    /// <summary>
+    /// In-position drift reconcile. Covers the case where state.InPosition is correct but
+    /// state.TotalQuantity / AverageEntryPrice have fallen behind reality — e.g. a DCA limit
+    /// filled on the exchange but ProcessPendingDca missed the fill (transient API hiccup,
+    /// worker restart while the limit was open, manual DCA via UI). Without this, the bot
+    /// undersizes its TP order, misreports the position card, and never catches up.
+    ///
+    /// Distinct from TryAdoptOrphanPosition (which only fires when state is flat). Shares the
+    /// LastReconcileAt throttle and the same Bingx/Bybit/Bitget-applicable scope: updating
+    /// quantity/avg to match the live position is safe on any exchange — we're not adopting
+    /// anything new, just refreshing fields that already belong to the bot.
+    /// </summary>
+    private async Task ReconcileLivePositionDrift(Strategy strategy, SmaDcaConfig config, SmaDcaState state,
+        IFuturesExchangeService exchange, bool isLongConfig, CancellationToken ct)
+    {
+        if (!state.InPosition) return;
+        if (!string.IsNullOrEmpty(state.EntryOrderId)) return;
+        if (!string.IsNullOrEmpty(state.DcaOrderId)) return;
+        if (state.TotalQuantity <= 0) return;
+
+        PositionDto? pos;
+        try
+        {
+            pos = await exchange.GetPositionAsync(config.Symbol, isLongConfig ? "Long" : "Short");
+        }
+        catch (NotSupportedException) { return; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SmaDca drift-reconcile: GetPositionAsync failed for {Symbol}", config.Symbol);
+            return;
+        }
+
+        if (pos == null) return;
+
+        // Live position vanished while state says we hold one. Don't reset here — CheckLimitTpFilled
+        // / VerifyTakeProfitAlive / safety-net own that detection and credit PnL correctly. We just
+        // bail to avoid clobbering state with zeros.
+        if (pos.Quantity <= 0) return;
+
+        var posIsLong = string.Equals(pos.Side, "Long", StringComparison.OrdinalIgnoreCase);
+        if (posIsLong != isLongConfig) return;
+
+        // Drift threshold: 2% relative or one full configured PositionSize qty-equivalent — large
+        // enough to ignore rounding/display jitter, small enough to catch a single missed DCA fill.
+        var absDelta = Math.Abs(pos.Quantity - state.TotalQuantity);
+        var relDelta = state.TotalQuantity > 0 ? absDelta / state.TotalQuantity : 0m;
+        if (relDelta < 0.02m) return;
+
+        var oldQty = state.TotalQuantity;
+        var oldAvg = state.AverageEntryPrice;
+
+        state.TotalQuantity = pos.Quantity;
+        state.AverageEntryPrice = pos.EntryPrice > 0 ? pos.EntryPrice : oldAvg;
+        state.TotalCost = state.AverageEntryPrice * state.TotalQuantity;
+        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice, config.TakeProfitPercent, isLongConfig);
+
+        var effectiveLevels = GetEffectiveLevels(config);
+        var historyLevel = await EstimateDcaLevelFromHistory(strategy.Id, isLongConfig, ct);
+        var notionalLevel = EstimateDcaLevelFromNotional(state.TotalCost, config.PositionSizeUsd, effectiveLevels);
+        var totalMaxLevels = GetTotalMaxLevels(config);
+        state.DcaLevel = Math.Min(Math.Max(historyLevel, notionalLevel), totalMaxLevels);
+
+        if (state.LastDcaPrice <= 0) state.LastDcaPrice = state.AverageEntryPrice;
+
+        // Old TP is sized for the stale qty — cancel it and let PlaceTakeProfitLimit re-place
+        // against the new qty/avg.
+        try { await exchange.CancelAllOrdersAsync(config.Symbol); }
+        catch (NotSupportedException) { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SmaDca drift-reconcile: CancelAllOrdersAsync failed for {Symbol}", config.Symbol);
+        }
+        state.TakeProfitOrderId = null;
+
+        var notionalRatio = config.PositionSizeUsd > 0
+            ? Math.Round(state.TotalCost / config.PositionSizeUsd, 2)
+            : 0m;
+        Log(strategy, "Warning",
+            $"🔄 DRIFT-SYNC: state не совпадал с биржей — qty {oldQty}→{state.TotalQuantity}, " +
+            $"avg {Math.Round(oldAvg, 6)}→{Math.Round(state.AverageEntryPrice, 6)}, " +
+            $"PnL={Math.Round(pos.UnrealizedPnl, 4)}$, " +
+            $"dcaLvl→{state.DcaLevel}/{totalMaxLevels} (history={historyLevel}, notional={notionalLevel} @ ratio={notionalRatio}× from {config.PositionSizeUsd}$), " +
+            $"TP→{Math.Round(state.CurrentTakeProfit, 6)} ({config.TakeProfitPercent}%) — TP перевыставится");
+
         await PlaceTakeProfitLimit(strategy, config, state, exchange);
     }
 

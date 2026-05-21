@@ -937,14 +937,77 @@ public class GridFloatHandler : IStrategyHandler
 
         if (qtyExcess > stateQty * 0.01m)
         {
-            Log(strategy, "Warning",
-                $"После reconcile DCA остаток qtyExcess={Math.Round(qtyExcess, 8)} — нет больше DCA-уровней для адаптации. " +
-                "Возможно ручное открытие извне или повреждение state.");
+            // Fix #7: orphan can't be absorbed into any existing DCA slot (grid fully filled
+            // or DCAs already adopted in the loop above) but the residue is big enough to
+            // trade. Without this branch the bot loops forever in the heartbeat warning storm
+            // documented in Fix #6's dedupe — the orphan never resolves on its own because
+            // there's no slot to attach it to. Synthesize an "orphan-absorption" batch at the
+            // current ticker price + standard TP step so the dust gets tracked and exits for
+            // +tpStep% PnL on the next upcross. Sub-lot-step residue stays as untracked
+            // exchange dust (≤ 1 lot, negligible). Uses LevelIdx=-1 as a sentinel so it never
+            // collides with grid levels in HealMissingDcas' occupiedLevels set.
+            //
+            // Using price (current ticker) as the synthetic fillPrice is intentionally
+            // conservative — the true fill price is unknowable (that's why it's an orphan).
+            // The synthetic batch will realize only +tpStep% PnL when its TP fills, which is
+            // a small but positive amount; refusing to absorb leaves the qty stuck on the
+            // exchange forever.
+            var absorbed = false;
+            if (state.AnchorPrice > 0 && price > 0)
+            {
+                decimal qtyStep = 0m, minQty = 0m;
+                try { (qtyStep, minQty) = await exchange.GetSymbolInfoAsync(config.Symbol); }
+                catch (NotSupportedException) { /* exchange doesn't expose; fall through to warn */ }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "GridFloat Fix #7: GetSymbolInfoAsync failed for {Symbol}", config.Symbol);
+                }
 
-            // Fix #6 (dedupe): remember this orphan qty + timestamp so subsequent identical
-            // observations get suppressed by the gate at the top of this method.
-            state.LastReconcileOrphanQty = qtyExcess;
-            state.LastReconcileOrphanLoggedAt = DateTime.UtcNow;
+                var absorbQty = qtyStep > 0 ? Math.Floor(qtyExcess / qtyStep) * qtyStep : qtyExcess;
+                if (minQty > 0 && absorbQty >= minQty)
+                {
+                    var tpStep = EffectiveTpStep(config, state.AnchorPrice, price);
+                    var tpPrice = ComputeTp(price, tpStep, state.IsLong);
+                    var synth = new GridFloatBatch
+                    {
+                        LevelIdx = -1,
+                        FillPrice = price,
+                        Qty = absorbQty,
+                        TpPrice = tpPrice,
+                        FilledAt = DateTime.UtcNow,
+                    };
+                    state.Batches.Add(synth);
+
+                    var dust = qtyExcess - absorbQty;
+                    Log(strategy, "Warning",
+                        $"🩹 Fix #7 orphan-absorption: создан synth-батч qty={absorbQty} @ {Math.Round(price, 8)} → " +
+                        $"TP={Math.Round(tpPrice, 8)} ({tpStep}% step). " +
+                        (dust > 0 ? $"Sub-lot dust={Math.Round(dust, 8)} списан." : "Полное поглощение."));
+
+                    RecordTrade(strategy, config.Symbol, state.IsLong ? "Buy" : "Sell", absorbQty, price,
+                        null, "OrphanAbsorb");
+
+                    await PlaceBatchTpLimit(strategy, config, state, exchange, synth);
+                    absorbed = true;
+                }
+            }
+
+            if (absorbed)
+            {
+                state.LastReconcileOrphanQty = null;
+                state.LastReconcileOrphanLoggedAt = null;
+            }
+            else
+            {
+                Log(strategy, "Warning",
+                    $"После reconcile DCA остаток qtyExcess={Math.Round(qtyExcess, 8)} — нет больше DCA-уровней для адаптации. " +
+                    "Возможно ручное открытие извне или повреждение state.");
+
+                // Fix #6 (dedupe): remember this orphan qty + timestamp so subsequent identical
+                // observations get suppressed by the gate at the top of this method.
+                state.LastReconcileOrphanQty = qtyExcess;
+                state.LastReconcileOrphanLoggedAt = DateTime.UtcNow;
+            }
         }
         else
         {
