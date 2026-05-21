@@ -160,6 +160,10 @@ export default function AccountsPage() {
       queryClient.invalidateQueries({ queryKey: ['accounts'] });
       useSubscriptionStore.getState().fetchSubscription();
     },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message || 'Failed to delete account';
+      alert(msg);
+    },
   });
 
   const toggleActiveMutation = useMutation({

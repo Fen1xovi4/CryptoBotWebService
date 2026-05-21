@@ -93,6 +93,7 @@ public class DashboardController : ControllerBase
 
         var wsStrategies = await _db.Strategies
             .Include(s => s.Trades)
+            .Include(s => s.Account)
             .Where(s => s.WorkspaceId == id && s.Account.UserId == targetUserId)
             .ToListAsync();
 
@@ -169,7 +170,9 @@ public class DashboardController : ControllerBase
                 HasPosition = hasPos,
                 PositionDirection = posDir,
                 RealizedPnl = s.Trades.Where(t => t.PnlDollar != null).Sum(t => t.PnlDollar ?? 0m),
-                TotalTrades = s.Trades.Count
+                TotalTrades = s.Trades.Count,
+                AccountId = s.AccountId,
+                AccountName = s.Account.Name
             };
         }).ToList();
 

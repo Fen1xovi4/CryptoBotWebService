@@ -138,7 +138,7 @@ public class AppDbContext : DbContext
             e.HasOne(x => x.Account)
                 .WithMany(a => a.Trades)
                 .HasForeignKey(x => x.AccountId)
-                .OnDelete(DeleteBehavior.Restrict);
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<StrategyLog>(e =>
