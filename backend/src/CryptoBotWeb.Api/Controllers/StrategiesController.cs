@@ -1057,27 +1057,61 @@ public class StrategiesController : ControllerBase
         // --- GridFloat path ---
         if (strategy.Type == StrategyTypes.GridFloat)
         {
-            var gfState = JsonSerializer.Deserialize<GridFloatState>(strategy.StateJson, jsonOpts);
-            if (gfState == null || gfState.Batches == null || gfState.Batches.Count == 0)
-                return BadRequest(new { message = "Нет открытой позиции" });
+            var gfState = JsonSerializer.Deserialize<GridFloatState>(strategy.StateJson, jsonOpts)
+                          ?? new GridFloatState();
 
             var gfConfig = JsonSerializer.Deserialize<GridFloatConfig>(strategy.ConfigJson, jsonOpts);
             if (gfConfig == null || string.IsNullOrEmpty(gfConfig.Symbol))
                 return BadRequest(new { message = "Некорректная конфигурация (symbol пуст)" });
+
+            // Direction comes from config (user intent) — state.IsLong defaults to false on a
+            // wiped/never-opened state, which would otherwise misroute the close as Short.
+            var gfDirection = gfConfig.Direction;
+            var gfIsLong = gfDirection.Equals("Long", StringComparison.OrdinalIgnoreCase);
 
             using var gfExchange = _exchangeFactory.CreateFutures(strategy.Account);
 
             // Cancel every limit (TPs + DCAs) before market-closing the aggregate position.
             try { await gfExchange.CancelAllOrdersAsync(gfConfig.Symbol); } catch { }
 
-            var totalQty = gfState.Batches.Sum(b => b.Qty);
-            var totalCost = gfState.Batches.Sum(b => b.FillPrice * b.Qty);
-            var avgEntry = totalQty > 0 ? totalCost / totalQty : 0m;
+            // Use LIVE exchange position quantity, not state-tracked sum. State can drift from
+            // reality (orphan DCA fills after a partial reconcile, Fix #6 dust on partial TPs,
+            // wiped state after the timestamp phantom-close bug) — closing state-qty would then
+            // leave the difference as untracked dust on the exchange. Falling back to state-qty
+            // only if the live lookup fails entirely.
+            PositionDto? gfLivePos = null;
+            try { gfLivePos = await gfExchange.GetPositionAsync(gfConfig.Symbol, gfDirection); }
+            catch (Exception ex)
+            {
+                _db.StrategyLogs.Add(new StrategyLog
+                {
+                    Id = Guid.NewGuid(),
+                    StrategyId = strategy.Id,
+                    Level = "Warning",
+                    Message = $"Manual close: GetPositionAsync failed ({ex.Message}) — fallback на state-qty",
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+
+            var gfStateBatches = gfState.Batches ?? new List<GridFloatBatch>();
+            var gfStateQty = gfStateBatches.Sum(b => b.Qty);
+            var gfStateCost = gfStateBatches.Sum(b => b.FillPrice * b.Qty);
+            var totalQty = gfLivePos != null && gfLivePos.Quantity > 0 ? gfLivePos.Quantity : gfStateQty;
+
+            if (totalQty <= 0)
+                return BadRequest(new { message = "Нет открытой позиции ни в state, ни на бирже" });
+
+            // avgEntry — prefer state batches (multiple fill prices give a proper VWAP); fall
+            // back to exchange's reported entry price when state is wiped.
+            var avgEntry = gfStateQty > 0 ? gfStateCost / gfStateQty
+                         : gfLivePos != null ? gfLivePos.EntryPrice
+                         : 0m;
+            var totalCost = avgEntry * totalQty;
             var gfCurrentPrice = await gfExchange.GetTickerPriceAsync(gfConfig.Symbol);
 
             OrderResultDto gfResult;
             string gfCloseSide;
-            if (gfState.IsLong)
+            if (gfIsLong)
             {
                 gfResult = await gfExchange.CloseLongAsync(gfConfig.Symbol, totalQty);
                 gfCloseSide = "Sell";
@@ -1088,16 +1122,21 @@ public class StrategiesController : ControllerBase
                 gfCloseSide = "Buy";
             }
 
+            // Second cancel-all AFTER the market close — catches the race where a DCA limit
+            // we just-cancelled actually filled in the few hundred ms between cancel and
+            // close (Bybit doesn't strictly serialise cancel-then-market on the same symbol).
+            // Without this, that fill would sit as a fresh tiny position with no state.
+            try { await gfExchange.CancelAllOrdersAsync(gfConfig.Symbol); } catch { }
+
             var gfClosePrice = gfCurrentPrice ?? avgEntry;
             var gfPnlPct = avgEntry > 0
-                ? (gfState.IsLong
+                ? (gfIsLong
                     ? (gfClosePrice - avgEntry) / avgEntry * 100m
                     : (avgEntry - gfClosePrice) / avgEntry * 100m)
                 : 0m;
             var gfGrossPnl = totalCost * gfPnlPct / 100m;
             var gfCommission = totalCost * 2m * 0.0005m;
             var gfNetPnl = gfGrossPnl - gfCommission;
-            var gfDirection = gfState.IsLong ? "Long" : "Short";
 
             _db.Trades.Add(new Trade
             {
@@ -1115,27 +1154,32 @@ public class StrategiesController : ControllerBase
                 Commission = gfCommission
             });
 
+            var qtySource = gfLivePos != null && gfLivePos.Quantity > 0 ? "exchange" : "state";
             _db.StrategyLogs.Add(new StrategyLog
             {
                 Id = Guid.NewGuid(),
                 StrategyId = strategy.Id,
                 Level = "Info",
                 Message = $"{gfDirection.ToUpper()} закрыт вручную (GridFloat): " +
-                          $"qty={Math.Round(totalQty, 6)} @ {Math.Round(gfClosePrice, 6)}, " +
-                          $"avg={Math.Round(avgEntry, 6)}, батчей={gfState.Batches.Count}, " +
+                          $"qty={Math.Round(totalQty, 6)} (источник={qtySource}) @ {Math.Round(gfClosePrice, 6)}, " +
+                          $"avg={Math.Round(avgEntry, 6)}, батчей={gfStateBatches.Count}, " +
                           $"PnL={Math.Round(gfPnlPct, 4)}% (${Math.Round(gfNetPnl, 2)}, комиссия≈${Math.Round(gfCommission, 4)})",
                 CreatedAt = DateTime.UtcNow
             });
 
-            // Reset position state — mirrors GridFloatHandler.OnFullClose. SkipNextCandle
-            // prevents an instant re-entry on the same bar; StateInitialized is preserved so
-            // restart-sync doesn't fire again.
+            // Reset position state — mirrors GridFloatHandler.OnFullClose.
             gfState.RealizedPnlDollar += gfNetPnl;
+            gfState.Batches ??= new List<GridFloatBatch>();
+            gfState.DcaOrders ??= new List<GridFloatDcaOrder>();
             gfState.Batches.Clear();
             gfState.DcaOrders.Clear();
             gfState.AnchorPrice = 0;
             gfState.OpenAfterTime = DateTime.UtcNow;
             gfState.PlacementCooldownUntil = null;
+            // Arm orphan-cancel retry — ProcessAsync will keep verifying the order book is
+            // clean across the next ticks (defends against the race where a DCA fills between
+            // our two CancelAllOrdersAsync calls).
+            gfState.OrphanCancelPendingUntil = DateTime.UtcNow.AddMinutes(30);
 
             strategy.StateJson = JsonSerializer.Serialize(gfState, saveOpts);
             await _db.SaveChangesAsync();
@@ -1145,7 +1189,7 @@ public class StrategiesController : ControllerBase
                 message = "Позиция закрыта по рынку",
                 details = new[]
                 {
-                    $"{gfDirection} closed: qty={Math.Round(totalQty, 6)}, price={Math.Round(gfClosePrice, 6)}, PnL=${Math.Round(gfNetPnl, 2)}"
+                    $"{gfDirection} closed: qty={Math.Round(totalQty, 6)} ({qtySource}), price={Math.Round(gfClosePrice, 6)}, PnL=${Math.Round(gfNetPnl, 2)}"
                 }
             });
         }

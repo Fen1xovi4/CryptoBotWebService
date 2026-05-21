@@ -22,6 +22,13 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         {
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret);
             if (proxy != null) options.Proxy = proxy;
+
+            // Server-time auto-sync — see BybitFuturesExchangeService ctor for the rationale.
+            // BingX rejects signed requests where the host clock skews beyond ReceiveWindow
+            // (default 5s); AutoTimestamp removes the dependency on host clock accuracy.
+            options.FuturesOptions.AutoTimestamp = true;
+            options.FuturesOptions.TimestampRecalculationInterval = TimeSpan.FromMinutes(10);
+            options.ReceiveWindow = TimeSpan.FromSeconds(15);
         });
     }
 
@@ -363,35 +370,34 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
 
     public async Task<PositionDto?> GetPositionAsync(string symbol, string side)
     {
-        try
-        {
-            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
-            var result = await _client.PerpetualFuturesApi.Trading.GetPositionsAsync(bingxSymbol);
+        // No top-level try/catch: API errors MUST surface as exceptions so callers can skip the
+        // tick instead of phantom-closing on a transient API failure. See parallel comment in
+        // BybitFuturesExchangeService.GetPositionAsync.
+        var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+        var result = await _client.PerpetualFuturesApi.Trading.GetPositionsAsync(bingxSymbol);
 
-            if (!result.Success || result.Data == null)
-                return null;
+        if (!result.Success)
+            throw new Exception($"BingX GetPositions failed for {symbol}: {result.Error?.Message ?? "unknown error"} (code={result.Error?.Code})");
 
-            var pos = result.Data.FirstOrDefault(p =>
-                p.Symbol == bingxSymbol &&
-                p.Size != 0);
-
-            if (pos == null)
-                return null;
-
-            // In one-way mode Size sign indicates direction: positive = long, negative = short
-            return new PositionDto
-            {
-                Symbol = symbol,
-                Side = pos.Size >= 0 ? "Long" : "Short",
-                Quantity = Math.Abs(pos.Size),
-                EntryPrice = pos.AveragePrice,
-                UnrealizedPnl = pos.UnrealizedProfit
-            };
-        }
-        catch (Exception)
-        {
+        if (result.Data == null)
             return null;
-        }
+
+        var pos = result.Data.FirstOrDefault(p =>
+            p.Symbol == bingxSymbol &&
+            p.Size != 0);
+
+        if (pos == null)
+            return null;
+
+        // In one-way mode Size sign indicates direction: positive = long, negative = short
+        return new PositionDto
+        {
+            Symbol = symbol,
+            Side = pos.Size >= 0 ? "Long" : "Short",
+            Quantity = Math.Abs(pos.Size),
+            EntryPrice = pos.AveragePrice,
+            UnrealizedPnl = pos.UnrealizedProfit
+        };
     }
 
     public async Task<List<PositionDto>> GetOpenPositionsAsync()

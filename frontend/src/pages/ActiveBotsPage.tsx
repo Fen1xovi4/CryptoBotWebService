@@ -141,6 +141,7 @@ export default function ActiveBotsPage() {
   const [chartStrategy, setChartStrategy] = useState<Strategy | null>(null);
   const [logStrategy, setLogStrategy] = useState<Strategy | null>(null);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
+  const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(new Set());
 
   // Local config state for instant UI response
   const [localConfig, setLocalConfig] = useState<WorkspaceConfig>(defaultConfig);
@@ -328,6 +329,35 @@ export default function ActiveBotsPage() {
     totalTrades: 0,
     pnl: 0,
     unrealizedPnl: 0,
+  };
+
+  const accountOptions = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; count: number }>();
+    for (const s of filteredStrategies) {
+      const existing = map.get(s.accountId);
+      if (existing) existing.count += 1;
+      else map.set(s.accountId, { id: s.accountId, name: s.accountName, count: 1 });
+    }
+    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [filteredStrategies]);
+
+  useEffect(() => {
+    setSelectedAccounts(new Set());
+  }, [activeWorkspaceId]);
+
+  const visibleStrategies = useMemo(() => {
+    if (selectedAccounts.size === 0) return filteredStrategies;
+    return filteredStrategies.filter((s) => selectedAccounts.has(s.accountId));
+  }, [filteredStrategies, selectedAccounts]);
+
+  const isAllAccountsSelected = selectedAccounts.size === 0;
+  const toggleAccount = (accountId: string) => {
+    setSelectedAccounts((prev) => {
+      const next = new Set(prev);
+      if (next.has(accountId)) next.delete(accountId);
+      else next.add(accountId);
+      return next;
+    });
   };
 
   const handleCreateWorkspace = () => {
@@ -810,7 +840,7 @@ export default function ActiveBotsPage() {
       {/* Bots Header */}
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-widest">
-          Мои боты
+          Мои боты{!isAllAccountsSelected && ` · показано ${visibleStrategies.length} из ${filteredStrategies.length}`}
         </h3>
         <button
           onClick={() => setShowModal(true)}
@@ -820,6 +850,38 @@ export default function ActiveBotsPage() {
         </button>
       </div>
 
+      {/* Account filter chips */}
+      {accountOptions.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1.5 mb-4">
+          <button
+            onClick={() => setSelectedAccounts(new Set())}
+            className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${
+              isAllAccountsSelected
+                ? 'bg-accent-blue/15 text-accent-blue'
+                : 'bg-bg-tertiary text-text-secondary hover:bg-border'
+            }`}
+          >
+            Все ({filteredStrategies.length})
+          </button>
+          {accountOptions.map((opt) => {
+            const active = selectedAccounts.has(opt.id);
+            return (
+              <button
+                key={opt.id}
+                onClick={() => toggleAccount(opt.id)}
+                className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${
+                  active
+                    ? 'bg-accent-blue/15 text-accent-blue'
+                    : 'bg-bg-tertiary text-text-secondary hover:bg-border'
+                }`}
+              >
+                {opt.name} ({opt.count})
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Bots Grid */}
       {isLoading ? (
         <div className="text-center py-12 text-text-secondary text-sm">Загрузка...</div>
@@ -827,9 +889,13 @@ export default function ActiveBotsPage() {
         <div className="text-center py-12 text-text-secondary text-sm">
           Нет ботов в этом пространстве
         </div>
+      ) : visibleStrategies.length === 0 ? (
+        <div className="text-center py-12 text-text-secondary text-sm">
+          Нет ботов для выбранных аккаунтов
+        </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {filteredStrategies.map((s) => {
+          {visibleStrategies.map((s) => {
             const cfg = parseJson(s.configJson);
             const state = parseJson(s.stateJson);
             const isRunning = s.status === 'Running';

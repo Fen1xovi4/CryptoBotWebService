@@ -28,6 +28,14 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
             // actual JSON the exchange returned — otherwise it's impossible to tell whether the
             // SDK lost the id or the exchange never sent it.
             options.OutputOriginalData = true;
+
+            // Server-time auto-sync — see BybitFuturesExchangeService ctor for the rationale.
+            // Bitget V2 enforces a 5-second receive-window on signed requests; a host clock
+            // drifting forward by more than that produces failed signatures that the SDK can't
+            // distinguish from real errors. AutoTimestamp eliminates the dependency on host
+            // clock accuracy.
+            options.FuturesOptions.AutoTimestamp = true;
+            options.FuturesOptions.TimestampRecalculationInterval = TimeSpan.FromMinutes(10);
         });
     }
 
@@ -553,35 +561,34 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<PositionDto?> GetPositionAsync(string symbol, string side)
     {
-        try
-        {
-            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
-            var result = await _client.FuturesApiV2.Trading.GetPositionAsync(
-                BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT");
+        // No top-level try/catch: API errors MUST surface as exceptions so callers can skip the
+        // tick instead of phantom-closing on a transient API failure. See parallel comment in
+        // BybitFuturesExchangeService.GetPositionAsync.
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+        var result = await _client.FuturesApiV2.Trading.GetPositionAsync(
+            BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT");
 
-            if (!result.Success || result.Data == null)
-                return null;
+        if (!result.Success)
+            throw new Exception($"Bitget GetPosition failed for {symbol}: {result.Error?.Message ?? "unknown error"} (code={result.Error?.Code})");
 
-            var pos = result.Data.FirstOrDefault(p =>
-                p.PositionSide.ToString().Equals(side, StringComparison.OrdinalIgnoreCase) &&
-                p.Total != 0);
-
-            if (pos == null)
-                return null;
-
-            return new PositionDto
-            {
-                Symbol = symbol,
-                Side = side,
-                Quantity = Math.Abs(pos.Total),
-                EntryPrice = pos.AverageOpenPrice,
-                UnrealizedPnl = pos.UnrealizedProfitAndLoss
-            };
-        }
-        catch (Exception)
-        {
+        if (result.Data == null)
             return null;
-        }
+
+        var pos = result.Data.FirstOrDefault(p =>
+            p.PositionSide.ToString().Equals(side, StringComparison.OrdinalIgnoreCase) &&
+            p.Total != 0);
+
+        if (pos == null)
+            return null;
+
+        return new PositionDto
+        {
+            Symbol = symbol,
+            Side = side,
+            Quantity = Math.Abs(pos.Total),
+            EntryPrice = pos.AverageOpenPrice,
+            UnrealizedPnl = pos.UnrealizedProfitAndLoss
+        };
     }
 
     public async Task<List<PositionDto>> GetOpenPositionsAsync()

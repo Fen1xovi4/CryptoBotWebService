@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { createChart, LineSeries, ColorType } from 'lightweight-charts';
@@ -31,6 +31,8 @@ interface BotSummary {
   positionDirection: string | null;
   realizedPnl: number;
   totalTrades: number;
+  accountId: string;
+  accountName: string;
 }
 
 interface WorkspaceDetail {
@@ -64,11 +66,52 @@ export default function WorkspaceDetailPage() {
     retry: 1,
   });
 
+  const [selectedAccounts, setSelectedAccounts] = useState<Set<string>>(new Set());
+
+  const accountOptions = useMemo(() => {
+    if (!ws) return [] as { id: string; name: string; count: number }[];
+    const map = new Map<string, { id: string; name: string; count: number }>();
+    for (const b of ws.bots) {
+      const existing = map.get(b.accountId);
+      if (existing) existing.count += 1;
+      else map.set(b.accountId, { id: b.accountId, name: b.accountName, count: 1 });
+    }
+    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [ws]);
+
+  useEffect(() => {
+    if (selectedAccounts.size === 0) return;
+    const validIds = new Set(accountOptions.map((a) => a.id));
+    let changed = false;
+    const next = new Set<string>();
+    for (const id of selectedAccounts) {
+      if (validIds.has(id)) next.add(id);
+      else changed = true;
+    }
+    if (changed) setSelectedAccounts(next);
+  }, [accountOptions, selectedAccounts]);
+
+  const visibleBots = useMemo(() => {
+    if (!ws) return [] as BotSummary[];
+    if (selectedAccounts.size === 0) return ws.bots;
+    return ws.bots.filter((b) => selectedAccounts.has(b.accountId));
+  }, [ws, selectedAccounts]);
+
+  const toggleAccount = (accountId: string) => {
+    setSelectedAccounts((prev) => {
+      const next = new Set(prev);
+      if (next.has(accountId)) next.delete(accountId);
+      else next.add(accountId);
+      return next;
+    });
+  };
+
   if (isLoading) return <div className="text-text-secondary text-sm p-4">Загрузка воркспейса...</div>;
   if (error) return <div className="text-accent-red text-sm p-4">Ошибка: {String((error as any)?.response?.data || (error as Error).message)}</div>;
   if (!ws) return <div className="text-text-secondary text-sm p-4">Воркспейс не найден</div>;
 
   const totalPnl = ws.realizedPnl + ws.unrealizedPnl;
+  const isAllSelected = selectedAccounts.size === 0;
 
   return (
     <div>
@@ -109,16 +152,48 @@ export default function WorkspaceDetailPage() {
 
       {/* Bots table */}
       <div className="bg-bg-secondary rounded-xl border border-border overflow-hidden mb-6">
-        <div className="px-5 py-3.5 border-b border-border">
+        <div className="px-5 py-3.5 border-b border-border flex flex-wrap items-center gap-3">
           <h3 className="text-sm font-semibold text-text-primary">
-            Боты ({ws.runningBots}/{ws.totalBots} активных, {ws.botsInPosition} в позиции)
+            Боты ({ws.runningBots}/{ws.totalBots} активных, {ws.botsInPosition} в позиции
+            {!isAllSelected && `, показано ${visibleBots.length}`})
           </h3>
+          {accountOptions.length > 1 && (
+            <div className="flex flex-wrap items-center gap-1.5 ml-auto">
+              <button
+                onClick={() => setSelectedAccounts(new Set())}
+                className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${
+                  isAllSelected
+                    ? 'bg-accent-blue/15 text-accent-blue'
+                    : 'bg-bg-tertiary text-text-secondary hover:bg-border'
+                }`}
+              >
+                Все ({ws.bots.length})
+              </button>
+              {accountOptions.map((opt) => {
+                const active = selectedAccounts.has(opt.id);
+                return (
+                  <button
+                    key={opt.id}
+                    onClick={() => toggleAccount(opt.id)}
+                    className={`text-xs px-2.5 py-1 rounded-full font-medium transition-colors ${
+                      active
+                        ? 'bg-accent-blue/15 text-accent-blue'
+                        : 'bg-bg-tertiary text-text-secondary hover:bg-border'
+                    }`}
+                  >
+                    {opt.name} ({opt.count})
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
         <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="text-xs text-text-secondary border-b border-border">
               <th className="text-left px-5 py-2.5 font-medium">Имя</th>
+              <th className="text-left px-5 py-2.5 font-medium">Аккаунт</th>
               <th className="text-left px-5 py-2.5 font-medium">Символ</th>
               <th className="text-left px-5 py-2.5 font-medium">Статус</th>
               <th className="text-left px-5 py-2.5 font-medium">Позиция</th>
@@ -127,9 +202,10 @@ export default function WorkspaceDetailPage() {
             </tr>
           </thead>
           <tbody>
-            {ws.bots.map((bot) => (
+            {visibleBots.map((bot) => (
               <tr key={bot.strategyId} className="border-b border-border/50 hover:bg-bg-tertiary/30 transition-colors">
                 <td className="px-5 py-2.5 text-sm font-medium">{bot.name || bot.symbol}</td>
+                <td className="px-5 py-2.5 text-sm text-text-secondary">{bot.accountName}</td>
                 <td className="px-5 py-2.5 text-sm text-text-secondary">{bot.symbol}</td>
                 <td className="px-5 py-2.5">
                   <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
@@ -155,8 +231,10 @@ export default function WorkspaceDetailPage() {
                 </td>
               </tr>
             ))}
-            {!ws.bots.length && (
-              <tr><td colSpan={6} className="px-5 py-8 text-center text-text-secondary text-sm">Нет ботов</td></tr>
+            {!visibleBots.length && (
+              <tr><td colSpan={7} className="px-5 py-8 text-center text-text-secondary text-sm">
+                {ws.bots.length === 0 ? 'Нет ботов' : 'Нет ботов для выбранных аккаунтов'}
+              </td></tr>
             )}
           </tbody>
         </table>

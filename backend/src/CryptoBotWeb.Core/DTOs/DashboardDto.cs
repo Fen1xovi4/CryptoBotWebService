@@ -70,6 +70,8 @@ public class BotSummaryDto
     public string? PositionDirection { get; set; }
     public decimal RealizedPnl { get; set; }
     public int TotalTrades { get; set; }
+    public Guid AccountId { get; set; }
+    public string AccountName { get; set; } = string.Empty;
 }
 
 public class TopBotDto

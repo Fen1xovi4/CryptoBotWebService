@@ -75,4 +75,17 @@ public class GridFloatState
     // Re-logs only when the value moves > 0.1% or > 30 min elapsed.
     public decimal? LastReconcileOrphanQty { get; set; }
     public DateTime? LastReconcileOrphanLoggedAt { get; set; }
+
+    // Orphan-cancel retry deadline. Set whenever state transitions to flat (OnFullClose,
+    // manual close, restart-sync wiping stale state, phantom-close-via-reconcile) so the
+    // next ProcessAsync ticks keep verifying the orderbook is clean. Cleared as soon as
+    // GetOpenOrdersAsync returns zero rows for the symbol, OR when the deadline expires
+    // (best-effort give-up — exchange unreachable).
+    //
+    // Why this exists: OnFullClose calls CancelAllOrdersAsync once, swallowing any exception.
+    // A single failed cancel (timestamp drift / 5xx / rate limit) used to leave a DCA buy
+    // limit resting on the book → one fired below current price after the manual close →
+    // a dust position (e.g. 0.1 XRP @ DCA price) appeared that state knew nothing about
+    // and couldn't be re-adopted because state.AnchorPrice was already zeroed.
+    public DateTime? OrphanCancelPendingUntil { get; set; }
 }

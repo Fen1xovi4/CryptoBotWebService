@@ -34,6 +34,21 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             options.ApiCredentials = new ApiCredentials(apiKey, apiSecret);
             if (proxy != null) options.Proxy = proxy;
             if (!string.IsNullOrWhiteSpace(brokerId)) options.Referer = brokerId;
+
+            // Server-time auto-sync. Bybit V5 rejects signed requests where the host clock is
+            // outside [server-recv_window, server+1000ms]; the +1000ms upper bound is hard
+            // regardless of recv_window, so a host clock drifting forward by even a few seconds
+            // produces a flood of retCode=10002 errors. Without AutoTimestamp those errors
+            // collapse into result.Success=false → GetPositionAsync returns null → GridFloat
+            // reconcile interprets that as "no position" and phantom-closes the entire grid.
+            // AutoTimestamp makes the SDK probe GetServerTime at startup and every
+            // TimestampRecalculationInterval, stamp each signed request with the synced offset,
+            // and ignore host time drift entirely.
+            options.V5Options.AutoTimestamp = true;
+            options.V5Options.TimestampRecalculationInterval = TimeSpan.FromMinutes(10);
+            // Wider receive-window cushion for the rare case the host clock spikes between
+            // recalculation intervals (default 5s is tight on a busy host).
+            options.ReceiveWindow = TimeSpan.FromSeconds(15);
         });
     }
 
@@ -468,41 +483,42 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     public async Task<PositionDto?> GetPositionAsync(string symbol, string side)
     {
-        try
-        {
-            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
-            var result = await _client.V5Api.Trading.GetPositionsAsync(Category.Linear, bybitSymbol);
+        // No top-level try/catch: API errors MUST surface as exceptions so callers (GridFloat
+        // reconcile, SmaDca safety net, etc.) can skip the tick instead of phantom-closing on
+        // a transient API failure. Returning null for both "no position" and "API failed" was
+        // the bug that wiped GridFloat batches when the host clock drifted past Bybit's
+        // recv_window — see AutoTimestamp note in the ctor.
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        var result = await _client.V5Api.Trading.GetPositionsAsync(Category.Linear, bybitSymbol);
 
-            if (!result.Success || result.Data?.List == null)
-                return null;
+        if (!result.Success)
+            throw new Exception($"Bybit GetPositions failed for {symbol}: {result.Error?.Message ?? "unknown error"} (code={result.Error?.Code})");
 
-            // In one-way mode, Bybit returns Side as Buy/Sell, but callers pass Long/Short
-            var mappedSide = side.Equals("Long", StringComparison.OrdinalIgnoreCase) ? "Buy"
-                           : side.Equals("Short", StringComparison.OrdinalIgnoreCase) ? "Sell"
-                           : side;
-
-            var pos = result.Data.List.FirstOrDefault(p =>
-                p.Symbol == bybitSymbol &&
-                (p.Side.ToString().Equals(side, StringComparison.OrdinalIgnoreCase) ||
-                 p.Side.ToString().Equals(mappedSide, StringComparison.OrdinalIgnoreCase)) &&
-                p.Quantity != 0);
-
-            if (pos == null)
-                return null;
-
-            return new PositionDto
-            {
-                Symbol = symbol,
-                Side = side,
-                Quantity = Math.Abs(pos.Quantity),
-                EntryPrice = pos.AveragePrice ?? 0m,
-                UnrealizedPnl = pos.UnrealizedPnl ?? 0m
-            };
-        }
-        catch (Exception)
-        {
+        if (result.Data?.List == null)
             return null;
-        }
+
+        // In one-way mode, Bybit returns Side as Buy/Sell, but callers pass Long/Short
+        var mappedSide = side.Equals("Long", StringComparison.OrdinalIgnoreCase) ? "Buy"
+                       : side.Equals("Short", StringComparison.OrdinalIgnoreCase) ? "Sell"
+                       : side;
+
+        var pos = result.Data.List.FirstOrDefault(p =>
+            p.Symbol == bybitSymbol &&
+            (p.Side.ToString().Equals(side, StringComparison.OrdinalIgnoreCase) ||
+             p.Side.ToString().Equals(mappedSide, StringComparison.OrdinalIgnoreCase)) &&
+            p.Quantity != 0);
+
+        if (pos == null)
+            return null;
+
+        return new PositionDto
+        {
+            Symbol = symbol,
+            Side = side,
+            Quantity = Math.Abs(pos.Quantity),
+            EntryPrice = pos.AveragePrice ?? 0m,
+            UnrealizedPnl = pos.UnrealizedPnl ?? 0m
+        };
     }
 
     public async Task<List<PositionDto>> GetOpenPositionsAsync()
