@@ -240,7 +240,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
                 // funding+60s. Runs every rotation tick (even when symbol didn't change) so
                 // bots stay armed across hourly cycles.
                 if (strategy.Type == StrategyTypes.HuntingFunding)
-                    PreArmHuntingFunding(strategy, picked);
+                    await PreArmHuntingFundingAsync(strategy, picked, ct);
 
                 occupiedTickers.Add(picked.Symbol);
             }
@@ -252,50 +252,71 @@ public class FundingTickerRotationService : IFundingTickerRotationService
         _logger.LogInformation("Ticker rotation completed: {Count} strategies with ticker changes", updatedCount);
     }
 
-    private void PreArmHuntingFunding(Strategy strategy, FundingRateDto picked)
+    private async Task PreArmHuntingFundingAsync(Strategy strategy, FundingRateDto picked, CancellationToken ct)
     {
-        HuntingFundingState state;
-        try
-        {
-            state = JsonSerializer.Deserialize<HuntingFundingState>(strategy.StateJson, JsonOptions)
-                    ?? new HuntingFundingState();
-        }
-        catch
-        {
-            return;
-        }
-
-        // Only arm bots sitting idle in WaitingForFunding — never disturb an
-        // active cycle (OrdersPlaced / InPosition / Cooldown).
-        if (state.Phase != HuntingFundingPhase.WaitingForFunding)
-            return;
-
         var direction = picked.Rate < 0 ? "Long" : "Short";
-        state.Direction = direction;
-        state.CurrentFundingRate = picked.Rate;
-        state.LastSkipLogAt = null;
 
         // BingX (and sometimes other exchanges) occasionally return a stale
-        // `NextFundingTime` that is ~now or in the past — e.g. we observed
-        // 15:50:08Z at a 15:50:08 rotation tick. Writing that blindly would
-        // trip the threshold check immediately and cause a spurious early
-        // placement → 60s timeout → cancel-all → Cooldown (wastes a cycle).
-        // Only accept `picked.NextFundingTime` when it's genuinely in the
-        // future (> now + 2 min). Otherwise leave whatever the handler has
-        // already validated via its own drift/rollover guard.
-        var nowUtc = DateTime.UtcNow;
-        var nextFundingForLog = state.NextFundingTime;
-        if (picked.NextFundingTime > nowUtc.AddMinutes(2))
+        // `NextFundingTime` that is ~now or in the past. Only accept it when
+        // genuinely future (> now + 2 min); otherwise leave the value the
+        // handler has already validated via its own drift/rollover guard.
+        var updateNextFunding = picked.NextFundingTime > DateTime.UtcNow.AddMinutes(2);
+
+        // Atomic JSON patch with phase-guard in WHERE. The previous version mutated
+        // `strategy.StateJson` from a snapshot loaded seconds earlier at the top of
+        // RotateTickersAsync, and a parallel worker tick could save Phase=OrdersPlaced
+        // (with PlacedOrders) in between — which the subsequent SaveChangesAsync here
+        // would silently overwrite, dropping the placed orders. That left orphan
+        // positions on the exchange when one of the lost limits later filled.
+        // jsonb_set only touches the three fields PreArm owns; the WHERE clause
+        // skips the update entirely once the bot has moved past WaitingForFunding.
+        int rowsAffected;
+        if (updateNextFunding)
         {
-            state.NextFundingTime = picked.NextFundingTime;
-            nextFundingForLog = picked.NextFundingTime;
+            rowsAffected = await _db.Database.ExecuteSqlInterpolatedAsync($@"
+                UPDATE strategies
+                SET ""StateJson"" = jsonb_set(
+                    jsonb_set(
+                        jsonb_set(
+                            jsonb_set(""StateJson"", '{{direction}}', to_jsonb({direction}::text)),
+                            '{{currentFundingRate}}', to_jsonb({picked.Rate}::numeric)),
+                        '{{nextFundingTime}}', to_jsonb({picked.NextFundingTime}::timestamptz)),
+                    '{{lastSkipLogAt}}', 'null'::jsonb)
+                WHERE ""Id"" = {strategy.Id}
+                  AND COALESCE((""StateJson""->>'phase')::int, 0) = 0
+                  AND COALESCE(jsonb_array_length(""StateJson""->'placedOrders'), 0) = 0", ct);
+        }
+        else
+        {
+            rowsAffected = await _db.Database.ExecuteSqlInterpolatedAsync($@"
+                UPDATE strategies
+                SET ""StateJson"" = jsonb_set(
+                    jsonb_set(
+                        jsonb_set(""StateJson"", '{{direction}}', to_jsonb({direction}::text)),
+                        '{{currentFundingRate}}', to_jsonb({picked.Rate}::numeric)),
+                    '{{lastSkipLogAt}}', 'null'::jsonb)
+                WHERE ""Id"" = {strategy.Id}
+                  AND COALESCE((""StateJson""->>'phase')::int, 0) = 0
+                  AND COALESCE(jsonb_array_length(""StateJson""->'placedOrders'), 0) = 0", ct);
         }
 
-        strategy.StateJson = JsonSerializer.Serialize(state, JsonOptions);
+        if (rowsAffected == 0)
+            return;
 
-        var nextFundingStr = nextFundingForLog.HasValue
-            ? nextFundingForLog.Value.ToString("u")
-            : "(unset)";
+        // Log only after a successful arm. Read existing NextFundingTime from the
+        // in-memory snapshot purely for display — slightly stale is fine for a log.
+        DateTime? existingNextFunding = null;
+        try
+        {
+            var st = JsonSerializer.Deserialize<HuntingFundingState>(strategy.StateJson, JsonOptions);
+            existingNextFunding = st?.NextFundingTime;
+        }
+        catch { }
+
+        var nextFundingStr = updateNextFunding
+            ? picked.NextFundingTime.ToString("u")
+            : (existingNextFunding?.ToString("u") ?? "(unset)");
+
         _db.StrategyLogs.Add(new StrategyLog
         {
             Id = Guid.NewGuid(),

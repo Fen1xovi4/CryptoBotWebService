@@ -733,6 +733,41 @@ public class SmartGridHedgeHandler : IStrategyHandler
             return;
         }
 
+        // ───────── 2b. Take-profit check ─────────
+        // Per-cycle realized (net of fees) + mark-to-market unrealized on every open leg.
+        // Long-side legs = qInit @ PAvgInit + each paired DCA buy @ BuyPrice.
+        // Short-side legs = qHedge @ HedgeEntryPrice + each paired skim short @ SellPrice
+        // (recycle modes only; OneShot trims qInit directly and never opens a paired short).
+        if (config.TakeProfitEnabled && config.TakeProfitTargetUsd > 0m)
+        {
+            var longUnreal = state.QInitCoins * (mark - state.PAvgInit);
+            foreach (var dca in state.DcaCells)
+            {
+                if (dca.Paired && dca.QtyCoins > 0m)
+                    longUnreal += dca.QtyCoins * (mark - dca.BuyPrice);
+            }
+            var shortUnreal = state.QHedgeCoins * (state.HedgeEntryPrice - mark);
+            foreach (var skim in state.SkimCells)
+            {
+                if (skim.Paired && skim.ShortQtyCoins > 0m)
+                    shortUnreal += skim.ShortQtyCoins * (skim.SellPrice - mark);
+            }
+            var cycleRealizedNet = state.CycleGridRealized + state.CycleHedgeRealized - state.CycleFees;
+            var totalCyclePnl = cycleRealizedNet + longUnreal + shortUnreal;
+
+            if (totalCyclePnl >= config.TakeProfitTargetUsd)
+            {
+                state.Phase = SmartGridHedgePhase.HardClosing;
+                state.LastCycleEndReason = "TakeProfit";
+                Log(strategy, "Warning",
+                    $"🎯 TAKE-PROFIT: цикл PnL = ${Math.Round(totalCyclePnl, 2)} " +
+                    $"(realized ${Math.Round(cycleRealizedNet, 2)} + unreal long ${Math.Round(longUnreal, 2)} " +
+                    $"+ unreal short ${Math.Round(shortUnreal, 2)}) ≥ цели ${Math.Round(config.TakeProfitTargetUsd, 2)}. " +
+                    "Закрываю всё и останавливаю бота (AutoRestart игнорируется).");
+                return;
+            }
+        }
+
         // ───────── 3. Poll DCA cells ─────────
         await PollDcaCellsAsync(strategy, config, state, futures, ct);
 
@@ -1295,7 +1330,10 @@ public class SmartGridHedgeHandler : IStrategyHandler
             $"total fees = ${Math.Round(state.TotalFees, 2)}.");
 
         // ───────── 5. Auto-restart branch ─────────
-        if (!isManual && config.AutoRestart)
+        // TakeProfit overrides AutoRestart: lock in the gain by stopping the bot, otherwise
+        // the next cycle would immediately open and the user's "fix profit" intent is lost.
+        var isTakeProfit = state.LastCycleEndReason == "TakeProfit";
+        if (!isManual && !isTakeProfit && config.AutoRestart)
         {
             state.Phase = SmartGridHedgePhase.Opening;
             // Tag LastTickAt so the Opening cooldown gate keeps us out for AutoRestartCooldownSeconds.
@@ -1309,10 +1347,20 @@ public class SmartGridHedgeHandler : IStrategyHandler
         else
         {
             state.Phase = SmartGridHedgePhase.Closed;
-            Log(strategy, "Info",
-                isManual
-                    ? "✋ Ручное закрытие: Phase = Closed. Stop → Start чтобы начать новый цикл."
-                    : "🛑 AutoRestart = false: Phase = Closed. Stop → Start чтобы начать новый цикл.");
+            if (isTakeProfit)
+            {
+                strategy.Status = Core.Enums.StrategyStatus.Stopped;
+                Log(strategy, "Info",
+                    "🎯 TakeProfit достигнут: Phase = Closed, бот остановлен. " +
+                    "Запустите вручную, чтобы начать новый цикл.");
+            }
+            else
+            {
+                Log(strategy, "Info",
+                    isManual
+                        ? "✋ Ручное закрытие: Phase = Closed. Stop → Start чтобы начать новый цикл."
+                        : "🛑 AutoRestart = false: Phase = Closed. Stop → Start чтобы начать новый цикл.");
+            }
         }
     }
 

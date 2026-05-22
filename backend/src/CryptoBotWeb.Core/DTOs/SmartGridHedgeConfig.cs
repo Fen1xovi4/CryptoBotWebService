@@ -65,4 +65,10 @@ public class SmartGridHedgeConfig
     // maker 2 bps, taker 5.5 bps. UI exposes these as overridable for VIP accounts.
     public decimal MakerFeeBps { get; set; } = 2m;
     public decimal TakerFeeBps { get; set; } = 5.5m;
+
+    // Per-cycle take-profit. When enabled, the handler closes everything and stops the bot
+    // (overriding AutoRestart) once the current cycle's realized PnL net of fees plus the
+    // mark-to-market unrealized on all open legs reaches TakeProfitTargetUsd.
+    public bool TakeProfitEnabled { get; set; } = false;
+    public decimal TakeProfitTargetUsd { get; set; } = 100m;
 }

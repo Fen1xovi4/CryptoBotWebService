@@ -3602,6 +3602,8 @@ interface SmartGridHedgeCfg {
   autoRestart: boolean;
   makerFeeBps: number;
   takerFeeBps: number;
+  takeProfitEnabled?: boolean;
+  takeProfitTargetUsd?: number;
 }
 
 interface SmartGridDcaCellData {
@@ -3647,7 +3649,7 @@ interface SmartGridHedgeStateData {
   lastMarkPrice: number | null;
   cycleStartedAt: string | null;
   lastTickAt: string | null;
-  lastCycleEndReason: 'HBreak' | 'LBreak' | 'Manual' | null;
+  lastCycleEndReason: 'HBreak' | 'LBreak' | 'Manual' | 'TakeProfit' | null;
 }
 
 const SGH_PHASE_LABELS: Record<number, string> = {
@@ -4321,6 +4323,8 @@ function AddStrategyModal({
     autoRestart: true,
     makerFeeBps: '2',
     takerFeeBps: '5.5',
+    takeProfitEnabled: false,
+    takeProfitTargetUsd: '100',
   });
   const [sghOptResult, setSghOptResult] = useState<OptimizeSmartGridHedgeResponse | null>(null);
   const [sghOptLoading, setSghOptLoading] = useState(false);
@@ -4538,6 +4542,11 @@ function AddStrategyModal({
         setError('Q_hedge override должен быть ≥ 0 или оставьте пустым (авто)');
         return;
       }
+      const tpTarget = Number(sghForm.takeProfitTargetUsd);
+      if (sghForm.takeProfitEnabled && !(tpTarget > 0)) {
+        setError('Цель Take-Profit должна быть > 0 USDT');
+        return;
+      }
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         lotUsd: Number(sghForm.lotUsd),
@@ -4550,6 +4559,8 @@ function AddStrategyModal({
         autoRestart: sghForm.autoRestart,
         makerFeeBps: Number(sghForm.makerFeeBps),
         takerFeeBps: Number(sghForm.takerFeeBps),
+        takeProfitEnabled: sghForm.takeProfitEnabled,
+        takeProfitTargetUsd: tpTarget,
       });
     } else {
       configJson = JSON.stringify({
@@ -5449,6 +5460,32 @@ function AddStrategyModal({
                 <span className="text-xs text-text-secondary">(новый цикл сразу с текущей ценой)</span>
               </label>
 
+              {/* Take-profit */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={sghForm.takeProfitEnabled}
+                    onChange={(e) => setSghForm({ ...sghForm, takeProfitEnabled: e.target.checked })}
+                    className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                  />
+                  <span className="text-sm text-text-primary">Зафиксировать при достижении прибыли</span>
+                </label>
+                {sghForm.takeProfitEnabled && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={sghForm.takeProfitTargetUsd}
+                      onChange={(e) => setSghForm({ ...sghForm, takeProfitTargetUsd: e.target.value })}
+                      className={inputCls + ' max-w-[140px]'}
+                    />
+                    <span className="text-xs text-text-secondary">USDT (realized + unrealized текущего цикла, AutoRestart игнорируется)</span>
+                  </div>
+                )}
+              </div>
+
               {/* Q_hedge field + Calculate button */}
               <div>
                 <label className={labelCls}>Q_hedge (монет) — пустое = авто</label>
@@ -6019,6 +6056,8 @@ function EditStrategyModal({
     autoRestart: cfg.autoRestart !== false,
     makerFeeBps: String(cfg.makerFeeBps ?? 2),
     takerFeeBps: String(cfg.takerFeeBps ?? 5.5),
+    takeProfitEnabled: cfg.takeProfitEnabled === true,
+    takeProfitTargetUsd: String(cfg.takeProfitTargetUsd ?? 100),
   });
   const [sghOptResult, setSghOptResult] = useState<OptimizeSmartGridHedgeResponse | null>(null);
   const [sghOptLoading, setSghOptLoading] = useState(false);
@@ -6232,6 +6271,11 @@ function EditStrategyModal({
         setError('Q_hedge override должен быть ≥ 0 или оставьте пустым');
         return;
       }
+      const tpTarget = Number(sghForm.takeProfitTargetUsd);
+      if (sghForm.takeProfitEnabled && !(tpTarget > 0)) {
+        setError('Цель Take-Profit должна быть > 0 USDT');
+        return;
+      }
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         lotUsd: Number(sghForm.lotUsd),
@@ -6244,6 +6288,8 @@ function EditStrategyModal({
         autoRestart: sghForm.autoRestart,
         makerFeeBps: Number(sghForm.makerFeeBps),
         takerFeeBps: Number(sghForm.takerFeeBps),
+        takeProfitEnabled: sghForm.takeProfitEnabled,
+        takeProfitTargetUsd: tpTarget,
       });
     } else {
       configJson = JSON.stringify({
@@ -7065,6 +7111,32 @@ function EditStrategyModal({
                 <span className="text-sm text-text-primary">Auto-restart после закрытия цикла</span>
                 <span className="text-xs text-text-secondary">(новый цикл сразу с текущей ценой)</span>
               </label>
+
+              {/* Take-profit */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={sghForm.takeProfitEnabled}
+                    onChange={(e) => setSghForm({ ...sghForm, takeProfitEnabled: e.target.checked })}
+                    className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                  />
+                  <span className="text-sm text-text-primary">Зафиксировать при достижении прибыли</span>
+                </label>
+                {sghForm.takeProfitEnabled && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={sghForm.takeProfitTargetUsd}
+                      onChange={(e) => setSghForm({ ...sghForm, takeProfitTargetUsd: e.target.value })}
+                      className={inputCls + ' max-w-[140px]'}
+                    />
+                    <span className="text-xs text-text-secondary">USDT (realized + unrealized текущего цикла, AutoRestart игнорируется)</span>
+                  </div>
+                )}
+              </div>
 
               {/* Q_hedge field + Calculate button */}
               <div>

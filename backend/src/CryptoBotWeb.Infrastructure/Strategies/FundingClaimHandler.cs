@@ -252,6 +252,39 @@ public class FundingClaimHandler : IStrategyHandler
         // Position confirmed — clear miss counter
         state.MissedPositionChecks = 0;
 
+        // ── Refresh funding info FIRST so SL grace window has up-to-date NextFundingTime
+        //    and LastFundingPaidAt is anchored to the actual funding event the moment it happens.
+        var funding = await exchange.GetFundingRateAsync(symbol);
+        if (funding != null)
+        {
+            // Detect funding event: NextFundingTime advanced (Bybit refreshes within seconds of payout).
+            // Anchor LastFundingPaidAt to the OLD NextFundingTime (= actual funding event UTC time)
+            // so the post-grace window covers the real moment, not a delayed detection.
+            if (state.NextFundingTime.HasValue && funding.NextFundingTime > state.NextFundingTime.Value)
+            {
+                state.LastFundingPaidAt = state.NextFundingTime;
+
+                // Best-effort fetch of realized funding amount. Bybit may not have propagated the
+                // payment yet on the very first tick after the event — close-time fetch is the
+                // authoritative fallback.
+                var payments = await exchange.GetFundingPaymentsAsync(symbol, state.PositionOpenedAt);
+                if (payments.Count > 0)
+                {
+                    decimal totalFunding = payments.Sum(p => p.Amount);
+                    decimal delta = totalFunding - state.CurrentCycleFundingPnl;
+                    if (delta != 0)
+                    {
+                        state.CurrentCycleFundingPnl = totalFunding;
+                        Log(strategy, "Info",
+                            $"Funding payment: +${Math.Round(delta, 4)}, " +
+                            $"position funding=${Math.Round(state.CurrentCycleFundingPnl, 4)}");
+                    }
+                }
+            }
+            state.CurrentFundingRate = funding.Rate;
+            state.NextFundingTime = funding.NextFundingTime;
+        }
+
         // ── Stop-loss: close if unrealized PnL is worse than -FcStopLossPercent ──
         // Grace window: SL is disabled within ±FcSlGraceMinutes of a funding event (both before next
         // and after the last paid one) — funding payouts often cause sharp moves we don't want to chase.
@@ -303,14 +336,6 @@ public class FundingClaimHandler : IStrategyHandler
             }
         }
 
-        // Update funding info for display
-        var funding = await exchange.GetFundingRateAsync(symbol);
-        if (funding != null)
-        {
-            state.CurrentFundingRate = funding.Rate;
-            state.NextFundingTime = funding.NextFundingTime;
-        }
-
         // ── Hourly check: N minutes before each hour ──
         // We check at minute (60 - CheckBeforeFundingMinutes) .. 59 of each hour.
         // Throttled by LastHourlyCheckAt to avoid re-checking every 5 seconds.
@@ -351,33 +376,6 @@ public class FundingClaimHandler : IStrategyHandler
                 $"threshold={wsCfg.FcMinFundingRatePercent}%) — keeping position");
         }
 
-        // ── After funding payment: fetch payment data ──
-        if (state.NextFundingTime.HasValue && now > state.NextFundingTime.Value.AddSeconds(30))
-        {
-            var payments = await exchange.GetFundingPaymentsAsync(symbol, state.PositionOpenedAt);
-            if (payments.Count > 0)
-            {
-                // Use the full sum as the definitive total for this position
-                decimal totalFunding = payments.Sum(p => p.Amount);
-                decimal delta = totalFunding - state.CurrentCycleFundingPnl;
-                if (delta != 0)
-                {
-                    state.CurrentCycleFundingPnl = totalFunding;
-                    state.LastFundingPaidAt = DateTime.UtcNow; // anchor SL post-funding grace window
-                    Log(strategy, "Info",
-                        $"Funding payment: +${Math.Round(delta, 4)}, " +
-                        $"position funding=${Math.Round(state.CurrentCycleFundingPnl, 4)}");
-                }
-            }
-
-            // Refresh next funding time
-            var nextFunding = await exchange.GetFundingRateAsync(symbol);
-            if (nextFunding != null)
-            {
-                state.NextFundingTime = nextFunding.NextFundingTime;
-                // DON'T update CurrentFundingRate here — it just reset after payment
-            }
-        }
     }
 
     // ───────────────────── Close Position ─────────────────────
