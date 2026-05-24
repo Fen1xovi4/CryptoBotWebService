@@ -67,6 +67,13 @@ public class GridFloatConfig
     // Exchange leverage applied before the first market entry of every cycle.
     public int Leverage { get; set; } = 1;
 
+    // Take-profit. When enabled, the handler cancels all orders, market-closes the aggregate
+    // position, and sets Status=Stopped as soon as the cumulative realized PnL plus the
+    // mark-to-market unrealized on all open batches reaches TakeProfitTargetUsd. Survives
+    // OnFullClose / cooldown via the cumulative RealizedPnlDollar on state.
+    public bool TakeProfitEnabled { get; set; } = false;
+    public decimal TakeProfitTargetUsd { get; set; } = 100m;
+
     // ───────────── Legacy fields (back-compat, read-only on load) ─────────────
     // Older configs (pre-tier-grid) used a single BaseSizeUsdt + RangePercent. We keep these
     // optional fields on the DTO so deserialization of stored ConfigJson succeeds; the

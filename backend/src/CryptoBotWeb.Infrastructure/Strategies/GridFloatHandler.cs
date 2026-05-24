@@ -46,6 +46,12 @@ public class GridFloatHandler : IStrategyHandler
 
     private const int PlacementCooldownMinutes = 5;
 
+    // Fix #9: how long state > exchange must persist (without any batch TP getting crossed by
+    // price) before we treat the smallest-matching batch as a phantom and drop it from state.
+    // 30 min covers transient API glitches, partial fills mid-reconcile, and slow manual UI
+    // close sequences while still bounding the warning storm.
+    private const int PhantomBatchStaleMinutes = 30;
+
     // Small delay between sequential REST placements to stay inside per-key rate limits
     // (Bybit ~10/sec on linear post-order, Bitget ~10/sec, BingX ~5/sec). 75ms between calls
     // caps the burst at ~13 req/sec which fits every exchange we support. Applied in
@@ -153,6 +159,40 @@ public class GridFloatHandler : IStrategyHandler
             await ReconcileBatchesFromPosition(strategy, config, state, exchange, ct);
             SaveState(strategy, state);
             await _db.SaveChangesAsync(ct);
+        }
+
+        // 3c. Take-profit check — cumulative realized + mark-to-market unrealized.
+        // Triggers force-close and stops the bot. Cheap when disabled (single bool check);
+        // when enabled and TP is satisfied the ticker fetch is the only extra exchange call
+        // per tick beyond what was already in flight.
+        if (config.TakeProfitEnabled && config.TakeProfitTargetUsd > 0m)
+        {
+            decimal? markN = null;
+            try { markN = await exchange.GetTickerPriceAsync(config.Symbol); }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GridFloat TP check: GetTickerPriceAsync failed for {Symbol}", config.Symbol);
+            }
+            if (markN is > 0m)
+            {
+                var mark = markN.Value;
+                var unrealized = 0m;
+                foreach (var batch in state.Batches)
+                {
+                    unrealized += isLongConfig
+                        ? batch.Qty * (mark - batch.FillPrice)
+                        : batch.Qty * (batch.FillPrice - mark);
+                }
+                var totalPnl = state.RealizedPnlDollar + unrealized;
+                if (totalPnl >= config.TakeProfitTargetUsd)
+                {
+                    await ForceCloseOnTakeProfitAsync(strategy, config, state, exchange,
+                        isLongConfig, mark, totalPnl, unrealized);
+                    SaveState(strategy, state);
+                    await _db.SaveChangesAsync(ct);
+                    return;
+                }
+            }
         }
 
         // 4. Heal: place missing TPs for batches that lost theirs (placement glitch or restart).
@@ -848,6 +888,41 @@ public class GridFloatHandler : IStrategyHandler
         var qtyDelta = stateQty - exchangeQty;
         var exchangeIsFlat = exchangeQty <= stateQty * 0.001m;
 
+        // Fix #8: false-flat sanity check. ReconcileBatchesFromPosition's two-probe gate filters
+        // most transient empties, but it can't distinguish "real flat from a high-bar TP cross"
+        // from "exchange returned 0 for both probes due to a real API glitch (rate-limit empty,
+        // V5 history snapshot mid-write, etc.)". The decisive signal is whether any batch TP
+        // has been crossed by the current price: if exchange says flat but NO batch TP is on
+        // the right side of price, the "flat" reading is almost certainly bogus — closing all
+        // batches at their TpPrice would force-realize fictional PnL and leak the real position
+        // as an untracked orphan (the exact FFUSDT 2026-05-21 cascade). Refuse to act; the next
+        // tick's reconcile probe will re-evaluate. Also refuse if price ≤ 0 — without a real
+        // price we can't tell legit flat from glitch.
+        if (exchangeIsFlat)
+        {
+            if (price <= 0)
+            {
+                Log(strategy, "Warning",
+                    $"⚠️ Fix #8: биржа сообщает flat (qty={Math.Round(exchangeQty, 8)} vs state={Math.Round(stateQty, 8)}), " +
+                    $"но цена недоступна (ticker=0) — отказываюсь закрывать батчи без подтверждения. " +
+                    "Повторная проверка на следующем тике.");
+                return;
+            }
+
+            var anyCrossed = state.Batches.Any(b => state.IsLong ? b.TpPrice <= price : b.TpPrice >= price);
+            if (!anyCrossed)
+            {
+                var minTp = state.Batches.Count > 0 ? state.Batches.Min(b => b.TpPrice) : 0m;
+                var maxTp = state.Batches.Count > 0 ? state.Batches.Max(b => b.TpPrice) : 0m;
+                Log(strategy, "Warning",
+                    $"⚠️ Fix #8: подозрительный flat биржи (qty={Math.Round(exchangeQty, 8)} vs state={Math.Round(stateQty, 8)}) " +
+                    $"при цене {Math.Round(price, 8)} — ни один TP не пересечён " +
+                    $"(диапазон TP: {Math.Round(minTp, 8)}…{Math.Round(maxTp, 8)}, направление={(state.IsLong ? "Long" : "Short")}). " +
+                    "Скорее всего транзитный сбой API; не закрываю батчи. Повторная проверка на следующем тике.");
+                return;
+            }
+        }
+
         Log(strategy, "Warning",
             $"🔎 RECONCILE TP: state qty={Math.Round(stateQty, 8)} vs exchange qty={Math.Round(exchangeQty, 8)} " +
             $"(дельта={Math.Round(qtyDelta, 8)}, цена={Math.Round(price, 8)}). " +
@@ -879,11 +954,84 @@ public class GridFloatHandler : IStrategyHandler
             qtyDelta -= batch.Qty;
         }
 
+        // Fix #9: if the foreach successfully accounted for the discrepancy (any batch got
+        // closed and qtyDelta is now inside the noise floor), the previously-tracked "phantom"
+        // window is moot — clear it so a future independent anomaly starts a fresh 30-min
+        // ripening clock.
+        if (qtyDelta <= stateQty * 0.01m && state.PhantomNegativeDeltaSince.HasValue)
+        {
+            state.PhantomNegativeDeltaSince = null;
+        }
+
         if (qtyDelta > stateQty * 0.01m)
         {
-            Log(strategy, "Warning",
-                $"После reconcile TP остаток qtyDelta={Math.Round(qtyDelta, 8)} — не удалось найти подходящий пересечённый батч. " +
-                "Возможно ручное частичное закрытие извне.");
+            // Fix #9: time-based phantom-batch drop. The "Возможно ручное частичное закрытие
+            // извне" path fires whenever state > exchange and no batch TP was on the right side
+            // of price (so the foreach above couldn't close anything). On the FIRST observation
+            // we just start a clock. If the same negative-delta condition persists for ≥
+            // PhantomBatchStaleMinutes (without ANY batch TP getting crossed and absorbing the
+            // delta in the meantime), we conclude that one of our batches doesn't actually
+            // exist on the exchange — most likely residue from a Fix #8-era false-flat reconcile
+            // that closed everything, a manual UI partial close, or an exchange-side liquidation
+            // we missed. We pick the batch whose Qty is closest to |qtyDelta| and drop it,
+            // cancelling its TP order best-effort. Without this, phantom batches linger forever
+            // and chronically fail TP re-placement with "orderQty will be truncated to zero" on
+            // Bybit (the auto-reduce-only cancellation cascades from sum(reduce-only Sells) >
+            // actual position).
+            if (state.PhantomNegativeDeltaSince == null)
+            {
+                state.PhantomNegativeDeltaSince = DateTime.UtcNow;
+                Log(strategy, "Warning",
+                    $"После reconcile TP остаток qtyDelta={Math.Round(qtyDelta, 8)} — не удалось найти подходящий пересечённый батч. " +
+                    $"Возможно ручное частичное закрытие извне. Запускаю окно созревания Fix #9 ({PhantomBatchStaleMinutes} мин); " +
+                    "если расхождение сохранится без пересечений TP — удалю фантомный батч.");
+            }
+            else
+            {
+                var age = DateTime.UtcNow - state.PhantomNegativeDeltaSince.Value;
+                if (age >= TimeSpan.FromMinutes(PhantomBatchStaleMinutes) && state.Batches.Count > 0)
+                {
+                    // Pick the batch whose qty most closely matches the missing amount —
+                    // typically the same batch that's been failing TP re-placement.
+                    var phantom = state.Batches.OrderBy(b => Math.Abs(b.Qty - qtyDelta)).First();
+                    var minTp = state.Batches.Min(b => b.TpPrice);
+                    var maxTp = state.Batches.Max(b => b.TpPrice);
+
+                    Log(strategy, "Warning",
+                        $"🧹 Fix #9: удаляю фантомный батч #{phantom.LevelIdx} (qty={phantom.Qty} ≈ |delta|={Math.Round(qtyDelta, 8)}, " +
+                        $"TP={Math.Round(phantom.TpPrice, 8)}) после {(int)age.TotalMinutes} мин стабильного расхождения " +
+                        $"state > exchange без пересечения TP (цена={Math.Round(price, 8)}, диапазон TP батчей: " +
+                        $"{Math.Round(minTp, 8)}…{Math.Round(maxTp, 8)}, направление={(state.IsLong ? "Long" : "Short")}). " +
+                        "Этой qty нет на бирже — PnL не реализуется. Скорее всего легаси из false-flat reconcile " +
+                        "или ручного закрытия через UI.");
+
+                    // Best-effort cancel of the orphaned reduce-only TP. If the exchange already
+                    // auto-cancelled it (e.g. Bybit's "qty truncated to zero" auto-reject) the
+                    // call will return an error — swallow it; the state cleanup below is what
+                    // matters.
+                    if (!string.IsNullOrEmpty(phantom.TpOrderId))
+                    {
+                        try { await exchange.CancelOrderAsync(config.Symbol, phantom.TpOrderId!); }
+                        catch (NotSupportedException) { }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex,
+                                "GridFloat Fix #9: CancelOrderAsync for phantom TP {OrderId} failed (likely already cancelled)",
+                                phantom.TpOrderId);
+                        }
+                    }
+
+                    state.Batches.Remove(phantom);
+                    state.PhantomNegativeDeltaSince = null;
+                }
+                else
+                {
+                    Log(strategy, "Warning",
+                        $"После reconcile TP остаток qtyDelta={Math.Round(qtyDelta, 8)} — расхождение сохраняется " +
+                        $"{(int)age.TotalMinutes}/{PhantomBatchStaleMinutes} мин (Fix #9 созревает). " +
+                        "Возможно ручное частичное закрытие извне.");
+                }
+            }
         }
     }
 
@@ -901,6 +1049,11 @@ public class GridFloatHandler : IStrategyHandler
         decimal exchangeQty, decimal stateQty, decimal price, CancellationToken ct)
     {
         var qtyExcess = exchangeQty - stateQty;
+
+        // Fix #9 (cleanup symmetric path): exchange > state means the previous negative-delta
+        // scenario tracked by PhantomNegativeDeltaSince is no longer active — clear the clock so
+        // any future state > exchange anomaly starts a fresh ripening window.
+        state.PhantomNegativeDeltaSince = null;
 
         // Fix #6 (dedupe): when state.DcaOrders is empty (nothing to adopt the orphan into)
         // AND the qtyExcess value hasn't moved more than 0.1% since the last log AND less than
@@ -1094,6 +1247,105 @@ public class GridFloatHandler : IStrategyHandler
             _logger.LogWarning(ex, "GridFloat orphan-cancel: CancelAllOrdersAsync failed for {Symbol}", config.Symbol);
             // Flag stays set — we'll re-try next tick.
         }
+    }
+
+    // Take-profit force-close: cancel everything, market-close whatever's open, mark Stopped.
+    // Mirrors the controller's manual-close logic (StrategiesController GridFloat block) so
+    // residual orphan-cancel retry + state reset behave consistently. Differs only in that
+    // we set Status=Stopped to prevent the next-bar anchor re-open.
+    private async Task ForceCloseOnTakeProfitAsync(Strategy strategy, GridFloatConfig config,
+        GridFloatState state, IFuturesExchangeService exchange, bool isLong, decimal markAtTrigger,
+        decimal totalPnlAtTrigger, decimal unrealizedAtTrigger)
+    {
+        Log(strategy, "Warning",
+            $"🎯 TAKE-PROFIT: total PnL = ${Math.Round(totalPnlAtTrigger, 2)} " +
+            $"(realized ${Math.Round(state.RealizedPnlDollar, 2)} + unreal ${Math.Round(unrealizedAtTrigger, 2)}) " +
+            $"≥ цели ${Math.Round(config.TakeProfitTargetUsd, 2)} @ mark {Math.Round(markAtTrigger, 8)}. " +
+            "Снимаю все лимиты и закрываю позиции по рынку.");
+
+        try { await exchange.CancelAllOrdersAsync(config.Symbol); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat TP force-close: pre-cancel CancelAllOrdersAsync failed for {Symbol}", config.Symbol);
+        }
+
+        // Prefer live exchange qty over state-tracked sum — state may have drifted (orphan DCA
+        // fills, residual dust). Falls back to state if the live lookup throws.
+        PositionDto? livePos = null;
+        try { livePos = await exchange.GetPositionAsync(config.Symbol, config.Direction); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat TP force-close: GetPositionAsync failed for {Symbol}", config.Symbol);
+        }
+        var stateQty = state.Batches.Sum(b => b.Qty);
+        var stateCost = state.Batches.Sum(b => b.FillPrice * b.Qty);
+        var totalQty = livePos != null && livePos.Quantity > 0 ? livePos.Quantity : stateQty;
+        var avgEntry = stateQty > 0 ? stateCost / stateQty
+                     : livePos != null ? livePos.EntryPrice
+                     : 0m;
+
+        OrderResultDto? closeResult = null;
+        if (totalQty > 0m)
+        {
+            try
+            {
+                closeResult = isLong
+                    ? await exchange.CloseLongAsync(config.Symbol, totalQty)
+                    : await exchange.CloseShortAsync(config.Symbol, totalQty);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GridFloat TP force-close: market close failed for {Symbol}", config.Symbol);
+                Log(strategy, "Warning",
+                    $"TP закрытие рынком не выполнено: {ex.Message}. Бот будет остановлен; " +
+                    "позицию проверьте на бирже и закройте вручную.");
+            }
+        }
+
+        // Second cancel-all AFTER the market close — catches the race where a DCA limit
+        // we just-cancelled actually filled in the few hundred ms between cancel and close.
+        try { await exchange.CancelAllOrdersAsync(config.Symbol); }
+        catch { /* best-effort; orphan-cancel flag below will keep sweeping */ }
+
+        // PnL bookkeeping for the trade row + realized counter. Uses markAtTrigger as fallback
+        // when the close result doesn't include a fill price (some exchanges).
+        var closePrice = closeResult?.FilledPrice ?? markAtTrigger;
+        var totalCost = avgEntry * totalQty;
+        var closePnlPct = avgEntry > 0
+            ? (isLong
+                ? (closePrice - avgEntry) / avgEntry * 100m
+                : (avgEntry - closePrice) / avgEntry * 100m)
+            : 0m;
+        var grossClosePnl = totalCost * closePnlPct / 100m;
+        var closeCommission = totalCost * exchange.TakerFeeRate;
+        var netClosePnl = grossClosePnl - closeCommission;
+
+        if (totalQty > 0m)
+        {
+            RecordTrade(strategy, config.Symbol, isLong ? "Sell" : "Buy",
+                totalQty, closePrice, closeResult?.OrderId, "TakeProfitClose",
+                pnlDollar: netClosePnl, commission: closeCommission);
+            state.RealizedPnlDollar += netClosePnl;
+        }
+
+        // Reset position state. We DO NOT set OpenAfterTime here (no cooldown re-open needed —
+        // the bot is going to Stopped) but we DO set OrphanCancelPendingUntil so a subsequent
+        // manual restart still benefits from the orderbook-clean check.
+        state.Batches.Clear();
+        state.DcaOrders.Clear();
+        state.AnchorPrice = 0;
+        state.OpenAfterTime = null;
+        state.PlacementCooldownUntil = null;
+        state.OrphanCancelPendingUntil = DateTime.UtcNow.AddMinutes(30);
+
+        // Halt the bot so the next-bar anchor logic doesn't re-open a position. User flips it
+        // back via Start when they want to resume.
+        strategy.Status = StrategyStatus.Stopped;
+
+        Log(strategy, "Info",
+            $"🎯 TAKE-PROFIT выполнен: закрыто qty={Math.Round(totalQty, 8)} @ {Math.Round(closePrice, 8)}, " +
+            $"PnL закрытия = ${Math.Round(netClosePnl, 2)} (commission ≈ ${Math.Round(closeCommission, 4)}). " +
+            $"Total realized = ${Math.Round(state.RealizedPnlDollar, 2)}. Бот остановлен.");
     }
 
     private async Task OnFullClose(Strategy strategy, GridFloatConfig config, GridFloatState state,

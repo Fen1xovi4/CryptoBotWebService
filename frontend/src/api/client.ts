@@ -72,4 +72,14 @@ export function optimizeSmartGridHedge(
   return api.post('/strategies/smart-grid-hedge/optimize-hedge', body).then((r) => r.data);
 }
 
+export function setStrategyTakeProfit(
+  strategyId: string,
+  enabled: boolean,
+  targetUsd: number,
+): Promise<{ takeProfitEnabled: boolean; takeProfitTargetUsd: number }> {
+  return api
+    .patch(`/strategies/${strategyId}/take-profit`, { enabled, targetUsd })
+    .then((r) => r.data);
+}
+
 export default api;

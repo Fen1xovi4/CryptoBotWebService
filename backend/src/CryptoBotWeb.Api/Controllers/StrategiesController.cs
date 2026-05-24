@@ -811,6 +811,39 @@ public class StrategiesController : ControllerBase
         return Ok(new { message = "Telegram bot updated", telegramBotId = strategy.TelegramBotId });
     }
 
+    // Inline take-profit patch — safe to run while the bot is Active because TP fields only
+    // change the threshold checked by the worker each tick, never any open orders/positions.
+    // JsonNode-based patching so any strategy whose Config DTO has takeProfitEnabled /
+    // takeProfitTargetUsd fields can use this endpoint (SmartGridHedge, GridFloat, …).
+    [HttpPatch("{id:guid}/take-profit")]
+    public async Task<IActionResult> SetTakeProfit(Guid id, [FromBody] SetTakeProfitRequest request)
+    {
+        var strategy = await _db.Strategies
+            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
+
+        if (strategy == null) return NotFound();
+        if (strategy.Type != StrategyTypes.SmartGridHedge && strategy.Type != StrategyTypes.GridFloat)
+            return BadRequest(new { message = "Take-profit is only supported on SmartGridHedge and GridFloat strategies" });
+        if (request.Enabled && !(request.TargetUsd > 0m))
+            return BadRequest(new { message = "Take-profit target must be > 0 USDT" });
+
+        var node = string.IsNullOrWhiteSpace(strategy.ConfigJson)
+            ? new System.Text.Json.Nodes.JsonObject()
+            : System.Text.Json.Nodes.JsonNode.Parse(strategy.ConfigJson) as System.Text.Json.Nodes.JsonObject
+              ?? new System.Text.Json.Nodes.JsonObject();
+        node["takeProfitEnabled"] = request.Enabled;
+        node["takeProfitTargetUsd"] = request.TargetUsd;
+        strategy.ConfigJson = node.ToJsonString();
+        await _db.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = "Take-profit updated",
+            takeProfitEnabled = request.Enabled,
+            takeProfitTargetUsd = request.TargetUsd
+        });
+    }
+
     [HttpPost("{id:guid}/close-position")]
     public async Task<IActionResult> ClosePosition(Guid id)
     {
@@ -1523,6 +1556,12 @@ public class UpdateStrategyRequest
 public class SetTelegramBotRequest
 {
     public Guid? TelegramBotId { get; set; }
+}
+
+public class SetTakeProfitRequest
+{
+    public bool Enabled { get; set; }
+    public decimal TargetUsd { get; set; }
 }
 
 public class UpdateGridFloatTiersRequest

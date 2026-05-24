@@ -185,6 +185,12 @@ export default function ActiveBotsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['strategies'] }),
   });
 
+  const setTakeProfitMutation = useMutation({
+    mutationFn: ({ strategyId, enabled, targetUsd }: { strategyId: string; enabled: boolean; targetUsd: number }) =>
+      api.patch(`/strategies/${strategyId}/take-profit`, { enabled, targetUsd }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['strategies'] }),
+  });
+
   // Auto-select first workspace
   useEffect(() => {
     if (workspaces?.length && !activeWorkspaceId) {
@@ -984,6 +990,8 @@ export default function ActiveBotsPage() {
                   closePositionPending={closePositionMutation.isPending}
                   telegramBots={telegramBots}
                   onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                  onSetTakeProfit={(enabled, targetUsd) => setTakeProfitMutation.mutate({ strategyId: s.id, enabled, targetUsd })}
+                  setTakeProfitPending={setTakeProfitMutation.isPending}
                 />
               );
             }
@@ -1026,6 +1034,8 @@ export default function ActiveBotsPage() {
                   closePositionPending={closePositionMutation.isPending}
                   telegramBots={telegramBots}
                   onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                  onSetTakeProfit={(enabled, targetUsd) => setTakeProfitMutation.mutate({ strategyId: s.id, enabled, targetUsd })}
+                  setTakeProfitPending={setTakeProfitMutation.isPending}
                 />
               );
             }
@@ -2556,6 +2566,8 @@ interface GridFloatCfg {
   tpStepPercent: number;
   leverage: number;
   useStaticRange: boolean;
+  takeProfitEnabled?: boolean;
+  takeProfitTargetUsd?: number;
   // Legacy fields (read-only, kept for back-compat when reading old strategies from API).
   baseSizeUsdt?: number;
   rangePercent?: number;
@@ -2639,6 +2651,8 @@ function GridFloatCard({
   closePositionPending,
   telegramBots,
   onSetTelegramBot,
+  onSetTakeProfit,
+  setTakeProfitPending,
 }: {
   s: Strategy;
   cfg: GridFloatCfg | null;
@@ -2657,8 +2671,17 @@ function GridFloatCard({
   closePositionPending: boolean;
   telegramBots: TelegramBotOption[] | undefined;
   onSetTelegramBot: (botId: string | null) => void;
+  onSetTakeProfit: (enabled: boolean, targetUsd: number) => void;
+  setTakeProfitPending: boolean;
 }) {
   const isPaused = s.status.toLowerCase() === 'paused';
+
+  // Inline take-profit state — initialised from cfg, kept in sync when cfg refetches.
+  const cfgTpEnabled = cfg?.takeProfitEnabled === true;
+  const cfgTpTarget = cfg?.takeProfitTargetUsd ?? 100;
+  const [tpDraftTarget, setTpDraftTarget] = useState<string>(String(cfgTpTarget));
+  useEffect(() => { setTpDraftTarget(String(cfgTpTarget)); }, [cfgTpTarget]);
+  const tpDraftDirty = Number(tpDraftTarget) !== cfgTpTarget;
   const batches = state?.batches ?? [];
   const dcas = state?.dcaOrders ?? [];
   const hasPosition = batches.length > 0;
@@ -3008,6 +3031,46 @@ function GridFloatCard({
           </div>
         </>
       )}
+
+      {/* Inline Take-Profit — applies live, no Stop needed */}
+      <div className="border-t border-border/50 px-4 py-2 flex items-center gap-2 flex-wrap">
+        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={cfgTpEnabled}
+            disabled={setTakeProfitPending}
+            onChange={(e) => {
+              const target = Number(tpDraftTarget);
+              if (e.target.checked && !(target > 0)) return;
+              onSetTakeProfit(e.target.checked, target);
+            }}
+            className="w-3.5 h-3.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer disabled:opacity-40"
+          />
+          <span className="text-[11px] text-text-primary">Зафиксировать прибыль</span>
+        </label>
+        <input
+          type="number"
+          step="1"
+          min="0"
+          value={tpDraftTarget}
+          onChange={(e) => setTpDraftTarget(e.target.value)}
+          className="w-20 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
+        />
+        <span className="text-[10px] text-text-secondary">USDT (realized + unrealized, останавливает бота)</span>
+        {tpDraftDirty && (
+          <button
+            type="button"
+            disabled={setTakeProfitPending || !(Number(tpDraftTarget) > 0)}
+            onClick={() => onSetTakeProfit(cfgTpEnabled, Number(tpDraftTarget))}
+            className="px-2 py-0.5 text-[10px] font-medium bg-accent-blue/15 text-accent-blue rounded hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
+          >
+            {setTakeProfitPending ? '...' : 'Сохранить'}
+          </button>
+        )}
+        {cfgTpEnabled && !tpDraftDirty && (
+          <span className="text-[10px] text-accent-green">✓ активно</span>
+        )}
+      </div>
 
       {/* Divider */}
       <div className="border-t border-border/50" />
@@ -3693,6 +3756,8 @@ function SmartGridHedgeCard({
   closePositionPending,
   telegramBots,
   onSetTelegramBot,
+  onSetTakeProfit,
+  setTakeProfitPending,
 }: {
   s: Strategy;
   cfg: SmartGridHedgeCfg | null;
@@ -3707,8 +3772,17 @@ function SmartGridHedgeCard({
   closePositionPending: boolean;
   telegramBots: TelegramBotOption[] | undefined;
   onSetTelegramBot: (botId: string | null) => void;
+  onSetTakeProfit: (enabled: boolean, targetUsd: number) => void;
+  setTakeProfitPending: boolean;
 }) {
   const [gridExpanded, setGridExpanded] = useState(false);
+
+  // Inline take-profit state — initialised from cfg, kept in sync when cfg refetches.
+  const cfgTpEnabled = cfg?.takeProfitEnabled === true;
+  const cfgTpTarget = cfg?.takeProfitTargetUsd ?? 100;
+  const [tpDraftTarget, setTpDraftTarget] = useState<string>(String(cfgTpTarget));
+  useEffect(() => { setTpDraftTarget(String(cfgTpTarget)); }, [cfgTpTarget]);
+  const tpDraftDirty = Number(tpDraftTarget) !== cfgTpTarget;
 
   const phase = state?.phase ?? 0;
   const dcaCells = (state?.dcaCells ?? []).filter((c) => c.k > 0);
@@ -4016,6 +4090,46 @@ function SmartGridHedgeCard({
         )}
       </div>
 
+      {/* Inline Take-Profit — applies live, no Stop needed */}
+      <div className="border-t border-border/50 px-4 py-2 flex items-center gap-2 flex-wrap">
+        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={cfgTpEnabled}
+            disabled={setTakeProfitPending}
+            onChange={(e) => {
+              const target = Number(tpDraftTarget);
+              if (e.target.checked && !(target > 0)) return;
+              onSetTakeProfit(e.target.checked, target);
+            }}
+            className="w-3.5 h-3.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer disabled:opacity-40"
+          />
+          <span className="text-[11px] text-text-primary">Зафиксировать прибыль</span>
+        </label>
+        <input
+          type="number"
+          step="1"
+          min="0"
+          value={tpDraftTarget}
+          onChange={(e) => setTpDraftTarget(e.target.value)}
+          className="w-20 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
+        />
+        <span className="text-[10px] text-text-secondary">USDT</span>
+        {tpDraftDirty && (
+          <button
+            type="button"
+            disabled={setTakeProfitPending || !(Number(tpDraftTarget) > 0)}
+            onClick={() => onSetTakeProfit(cfgTpEnabled, Number(tpDraftTarget))}
+            className="px-2 py-0.5 text-[10px] font-medium bg-accent-blue/15 text-accent-blue rounded hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
+          >
+            {setTakeProfitPending ? '...' : 'Сохранить'}
+          </button>
+        )}
+        {cfgTpEnabled && !tpDraftDirty && (
+          <span className="text-[10px] text-accent-green">✓ активно</span>
+        )}
+      </div>
+
       {/* Divider */}
       <div className="border-t border-border/50" />
 
@@ -4246,6 +4360,8 @@ function AddStrategyModal({
     tpStepPercent: '1',
     leverage: '1',
     useStaticRange: false,
+    takeProfitEnabled: false,
+    takeProfitTargetUsd: '100',
   });
   const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(
     [{ upTo: '10', size: '100', dca: '', tp: '' }],
@@ -4464,6 +4580,11 @@ function AddStrategyModal({
         ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
         ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
       }));
+      const gfTpTarget = Number(gfForm.takeProfitTargetUsd);
+      if (gfForm.takeProfitEnabled && !(gfTpTarget > 0)) {
+        setError('Цель Take-Profit должна быть > 0 USDT');
+        return;
+      }
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: gfForm.timeframe,
@@ -4473,6 +4594,8 @@ function AddStrategyModal({
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
         useStaticRange: gfForm.useStaticRange,
+        takeProfitEnabled: gfForm.takeProfitEnabled,
+        takeProfitTargetUsd: gfTpTarget,
       });
     } else if (strategyType === 'GridHedge') {
       if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
@@ -5109,6 +5232,32 @@ function AddStrategyModal({
                   </p>
                 </div>
               </label>
+
+              {/* Take-profit */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={gfForm.takeProfitEnabled}
+                    onChange={(e) => setGfForm({ ...gfForm, takeProfitEnabled: e.target.checked })}
+                    className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                  />
+                  <span className="text-sm text-text-primary">Зафиксировать при достижении прибыли</span>
+                </label>
+                {gfForm.takeProfitEnabled && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={gfForm.takeProfitTargetUsd}
+                      onChange={(e) => setGfForm({ ...gfForm, takeProfitTargetUsd: e.target.value })}
+                      className={inputCls + ' max-w-[140px]'}
+                    />
+                    <span className="text-xs text-text-secondary">USDT (realized + unrealized, останавливает бота)</span>
+                  </div>
+                )}
+              </div>
 
               <p className="text-xs text-text-secondary italic">
                 Уровней DCA на старте: ~{(() => {
@@ -5955,6 +6104,8 @@ function EditStrategyModal({
     tpStepPercent: String(cfg.tpStepPercent ?? 1),
     leverage: String(cfg.leverage ?? 1),
     useStaticRange: cfg.useStaticRange ?? false,
+    takeProfitEnabled: cfg.takeProfitEnabled === true,
+    takeProfitTargetUsd: String(cfg.takeProfitTargetUsd ?? 100),
   });
   const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(() => {
     if (Array.isArray(cfg.tiers) && cfg.tiers.length > 0) {
@@ -6193,6 +6344,11 @@ function EditStrategyModal({
         ...(t.dcaStepPercent !== null ? { dcaStepPercent: t.dcaStepPercent } : {}),
         ...(t.tpStepPercent !== null ? { tpStepPercent: t.tpStepPercent } : {}),
       }));
+      const gfTpTarget = Number(gfForm.takeProfitTargetUsd);
+      if (gfForm.takeProfitEnabled && !(gfTpTarget > 0)) {
+        setError('Цель Take-Profit должна быть > 0 USDT');
+        return;
+      }
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: gfForm.timeframe,
@@ -6202,6 +6358,8 @@ function EditStrategyModal({
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
         useStaticRange: gfForm.useStaticRange,
+        takeProfitEnabled: gfForm.takeProfitEnabled,
+        takeProfitTargetUsd: gfTpTarget,
       });
     } else if (isGH) {
       if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
@@ -6782,6 +6940,32 @@ function EditStrategyModal({
                   </p>
                 </div>
               </label>
+
+              {/* Take-profit */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={gfForm.takeProfitEnabled}
+                    onChange={(e) => setGfForm({ ...gfForm, takeProfitEnabled: e.target.checked })}
+                    className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                  />
+                  <span className="text-sm text-text-primary">Зафиксировать при достижении прибыли</span>
+                </label>
+                {gfForm.takeProfitEnabled && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={gfForm.takeProfitTargetUsd}
+                      onChange={(e) => setGfForm({ ...gfForm, takeProfitTargetUsd: e.target.value })}
+                      className={inputCls + ' max-w-[140px]'}
+                    />
+                    <span className="text-xs text-text-secondary">USDT (realized + unrealized, останавливает бота)</span>
+                  </div>
+                )}
+              </div>
             </>
           ) : isGH ? (
             <>

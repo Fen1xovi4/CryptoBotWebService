@@ -88,4 +88,15 @@ public class GridFloatState
     // a dust position (e.g. 0.1 XRP @ DCA price) appeared that state knew nothing about
     // and couldn't be re-adopted because state.AnchorPrice was already zeroed.
     public DateTime? OrphanCancelPendingUntil { get; set; }
+
+    // Fix #9: persistent negative qty delta (state > exchange) tracking. Set the FIRST tick
+    // reconcile sees state > exchange while no batch TP has been crossed by price (i.e. the
+    // "Возможно ручное частичное закрытие извне" path). Cleared whenever delta ≥ 0 or any
+    // batch's TP gets crossed in the meantime. After ≥ 30 min sustained AND no crossing,
+    // the batch whose qty best matches |delta| is treated as a phantom (residue from
+    // false-flat reconciles, manual UI closes, exchange-side liquidation we didn't catch,
+    // etc.) and removed from state with a loud warning. Without this, phantom batches that
+    // arise outside the Fix #8 path linger forever and chronically fail TP re-placement
+    // with "orderQty will be truncated to zero" on Bybit.
+    public DateTime? PhantomNegativeDeltaSince { get; set; }
 }
