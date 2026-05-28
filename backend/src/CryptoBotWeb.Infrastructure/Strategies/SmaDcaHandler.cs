@@ -74,6 +74,18 @@ public class SmaDcaHandler : IStrategyHandler
             return;
         }
 
+        if (config.TakeProfitTierShiftEnabled)
+        {
+            if (config.TakeProfitTierShifts.Count == 0
+                || config.TakeProfitTierShifts.Any(s => s.FromTier <= 0 || s.TakeProfitPercent <= 0))
+            {
+                Log(strategy, "Error",
+                    "Смещение TP по ярусам включено, но лесенка пуста или содержит невалидные значения " +
+                    "(FromTier>0, TakeProfitPercent>0)");
+                return;
+            }
+        }
+
         var effectiveLevels = GetEffectiveLevels(config);
         if (effectiveLevels.Count == 0
             || effectiveLevels.Any(l => l.Count < 1 || l.StepPercent <= 0 || l.Multiplier <= 0))
@@ -393,8 +405,9 @@ public class SmaDcaHandler : IStrategyHandler
         state.TotalQuantity = filledQty;
         state.TotalCost = fillPrice * filledQty;
         state.AverageEntryPrice = fillPrice;
-        state.CurrentTakeProfit = ComputeTakeProfit(fillPrice, config.TakeProfitPercent, isLong);
         state.DcaLevel = 0;
+        state.CurrentTakeProfit = ComputeTakeProfit(fillPrice,
+            GetEffectiveTakeProfitPercent(config, state.DcaLevel), isLong);
         // Seed LastDcaPrice with the entry price so the "LastFill" trigger base has a reference
         // for the very first DCA (which hasn't filled yet).
         state.LastDcaPrice = fillPrice;
@@ -455,8 +468,9 @@ public class SmaDcaHandler : IStrategyHandler
         state.TotalCost += fillPrice * filledQty;
         state.TotalQuantity += filledQty;
         state.AverageEntryPrice = state.TotalCost / state.TotalQuantity;
-        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice, config.TakeProfitPercent, state.IsLong);
         state.DcaLevel++;
+        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice,
+            GetEffectiveTakeProfitPercent(config, state.DcaLevel), state.IsLong);
         state.LastDcaPrice = fillPrice;
         state.DcaCooldownUntil = null;
 
@@ -829,8 +843,9 @@ public class SmaDcaHandler : IStrategyHandler
             state.TotalQuantity = pos!.Quantity;
             state.AverageEntryPrice = pos.EntryPrice > 0 ? pos.EntryPrice : state.AverageEntryPrice;
             state.TotalCost = state.AverageEntryPrice * state.TotalQuantity;
-            state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice, config.TakeProfitPercent, isLongConfig);
             state.DcaLevel = await EstimateDcaLevelFromHistory(strategy.Id, isLongConfig, ct);
+            state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice,
+                GetEffectiveTakeProfitPercent(config, state.DcaLevel), isLongConfig);
             // Individual fill prices aren't available from the exchange — seed with avg so the
             // "LastFill" trigger base has a reference after restart (conservative fallback).
             if (state.LastDcaPrice <= 0)
@@ -991,7 +1006,6 @@ public class SmaDcaHandler : IStrategyHandler
         state.TotalQuantity = pos.Quantity;
         state.AverageEntryPrice = pos.EntryPrice > 0 ? pos.EntryPrice : state.AverageEntryPrice;
         state.TotalCost = state.AverageEntryPrice * state.TotalQuantity;
-        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice, config.TakeProfitPercent, isLongConfig);
 
         // DcaLevel estimation: combine DB history with a notional-ratio fallback. History is
         // authoritative when present; notional fallback covers manually-opened or history-less
@@ -1001,6 +1015,8 @@ public class SmaDcaHandler : IStrategyHandler
         var notionalLevel = EstimateDcaLevelFromNotional(state.TotalCost, config.PositionSizeUsd, effectiveLevels);
         var totalMaxLevels = GetTotalMaxLevels(config);
         state.DcaLevel = Math.Min(Math.Max(historyLevel, notionalLevel), totalMaxLevels);
+        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice,
+            GetEffectiveTakeProfitPercent(config, state.DcaLevel), isLongConfig);
 
         if (state.LastDcaPrice <= 0) state.LastDcaPrice = state.AverageEntryPrice;
         state.PositionOpenedAt ??= DateTime.UtcNow;
@@ -1089,13 +1105,14 @@ public class SmaDcaHandler : IStrategyHandler
         state.TotalQuantity = pos.Quantity;
         state.AverageEntryPrice = pos.EntryPrice > 0 ? pos.EntryPrice : oldAvg;
         state.TotalCost = state.AverageEntryPrice * state.TotalQuantity;
-        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice, config.TakeProfitPercent, isLongConfig);
 
         var effectiveLevels = GetEffectiveLevels(config);
         var historyLevel = await EstimateDcaLevelFromHistory(strategy.Id, isLongConfig, ct);
         var notionalLevel = EstimateDcaLevelFromNotional(state.TotalCost, config.PositionSizeUsd, effectiveLevels);
         var totalMaxLevels = GetTotalMaxLevels(config);
         state.DcaLevel = Math.Min(Math.Max(historyLevel, notionalLevel), totalMaxLevels);
+        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice,
+            GetEffectiveTakeProfitPercent(config, state.DcaLevel), isLongConfig);
 
         if (state.LastDcaPrice <= 0) state.LastDcaPrice = state.AverageEntryPrice;
 
@@ -1558,8 +1575,9 @@ public class SmaDcaHandler : IStrategyHandler
         state.TotalQuantity = qty;
         state.TotalCost = price * qty;
         state.AverageEntryPrice = price;
-        state.CurrentTakeProfit = ComputeTakeProfit(price, config.TakeProfitPercent, isLong);
         state.DcaLevel = 0;
+        state.CurrentTakeProfit = ComputeTakeProfit(price,
+            GetEffectiveTakeProfitPercent(config, state.DcaLevel), isLong);
         state.LastDcaPrice = price;
         state.PositionOpenedAt = DateTime.UtcNow;
         state.SkipNextCandle = false;
@@ -1694,8 +1712,9 @@ public class SmaDcaHandler : IStrategyHandler
         state.TotalCost += fillPrice * filledQty;
         state.TotalQuantity += filledQty;
         state.AverageEntryPrice = state.TotalCost / state.TotalQuantity;
-        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice, config.TakeProfitPercent, state.IsLong);
         state.DcaLevel++;
+        state.CurrentTakeProfit = ComputeTakeProfit(state.AverageEntryPrice,
+            GetEffectiveTakeProfitPercent(config, state.DcaLevel), state.IsLong);
         state.LastDcaPrice = fillPrice;
         state.DcaCooldownUntil = null;
 
@@ -1751,6 +1770,32 @@ public class SmaDcaHandler : IStrategyHandler
         => isLong
             ? averagePrice * (1m + tpPercent / 100m)
             : averagePrice * (1m - tpPercent / 100m);
+
+    // Effective TP% with the optional tier-shift ladder applied. User-facing tier numbering is:
+    // Entry = tier 1, after 1st DCA fill = 2, after 2nd = 3, … Internally state.DcaLevel is the
+    // count of DCA fills (Entry → 0, after 1st DCA → 1), so userTier = dcaLevel + 1. Picks the
+    // ladder step with the highest FromTier ≤ userTier. Returns base TP if the feature is off,
+    // the list is empty, or no step qualifies yet.
+    private static decimal GetEffectiveTakeProfitPercent(SmaDcaConfig config, int dcaLevel)
+    {
+        if (!config.TakeProfitTierShiftEnabled || config.TakeProfitTierShifts.Count == 0)
+            return config.TakeProfitPercent;
+
+        var userTier = dcaLevel + 1;
+        decimal? best = null;
+        var bestFromTier = int.MinValue;
+        foreach (var s in config.TakeProfitTierShifts)
+        {
+            if (s.FromTier <= 0 || s.TakeProfitPercent <= 0) continue;
+            if (userTier < s.FromTier) continue;
+            if (s.FromTier > bestFromTier)
+            {
+                bestFromTier = s.FromTier;
+                best = s.TakeProfitPercent;
+            }
+        }
+        return best ?? config.TakeProfitPercent;
+    }
 
     private static decimal ComputePnlPercent(bool isLong, decimal entry, decimal exit)
         => isLong

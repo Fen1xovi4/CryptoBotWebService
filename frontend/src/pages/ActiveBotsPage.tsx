@@ -71,6 +71,7 @@ interface WorkspaceConfig {
   fcStopLossPercent: number;
   fcLeverage: number;
   fcSlGraceMinutes: number;
+  fcSlCooldownHours: number;
 }
 
 interface WorkspaceStats {
@@ -104,6 +105,7 @@ const defaultConfig: WorkspaceConfig = {
   fcStopLossPercent: 2.5,
   fcLeverage: 3,
   fcSlGraceMinutes: 10,
+  fcSlCooldownHours: 6,
 };
 
 const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
@@ -631,6 +633,22 @@ export default function ActiveBotsPage() {
               <span className="text-xs text-text-secondary">мин</span>
               <span className="text-xs text-text-secondary italic">
                 окно вокруг фандинга где SL отключён. 0 = всегда активен.
+              </span>
+            </div>
+            <div className="h-6 w-px bg-border" />
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-text-secondary">SL cooldown:</span>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                value={localConfig.fcSlCooldownHours}
+                onChange={(e) => updateConfig({ fcSlCooldownHours: Number(e.target.value) })}
+                className="w-16 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+              />
+              <span className="text-xs text-text-secondary">ч</span>
+              <span className="text-xs text-text-secondary italic">
+                после SL не входить в тикер N часов (workspace-wide). 0 = выключен.
               </span>
             </div>
             <div className="h-6 w-px bg-border" />
@@ -4338,9 +4356,14 @@ function AddStrategyModal({
     orderType: 'Market',
     entryLimitOffsetPercent: '0.05',
     entryLimitTimeoutBars: '3',
+    takeProfitTierShiftEnabled: false,
   });
   const [sdLevels, setSdLevels] = useState<Array<{ stepPercent: string; multiplier: string; count: string }>>(
     [{ stepPercent: '3.0', multiplier: '3.0', count: '5' }],
+  );
+  // Optional "shrinking TP" ladder — user-facing tier numbering (Entry = 1, after 1st DCA = 2, …)
+  const [sdTpShifts, setSdTpShifts] = useState<Array<{ fromTier: string; takeProfitPercent: string }>>(
+    [{ fromTier: '3', takeProfitPercent: '0.5' }],
   );
 
   // FundingClaim fields
@@ -4517,6 +4540,14 @@ function AddStrategyModal({
         autoRotateTicker,
       });
     } else if (strategyType === 'SmaDca') {
+      const tpShifts = sdTpShifts
+        .map((s) => ({ fromTier: Number(s.fromTier), takeProfitPercent: Number(s.takeProfitPercent) }))
+        .filter((s) => s.fromTier > 0 && s.takeProfitPercent > 0)
+        .sort((a, b) => a.fromTier - b.fromTier);
+      if (sdForm.takeProfitTierShiftEnabled && tpShifts.length === 0) {
+        setError('Добавьте хотя бы одну ступень смещения TP (или выключите чекбокс)');
+        return;
+      }
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: sdForm.timeframe,
@@ -4533,6 +4564,8 @@ function AddStrategyModal({
           multiplier: Number(l.multiplier),
           count: Number(l.count),
         })),
+        takeProfitTierShiftEnabled: sdForm.takeProfitTierShiftEnabled,
+        takeProfitTierShifts: tpShifts,
       });
     } else if (strategyType === 'FundingClaim') {
       configJson = JSON.stringify({
@@ -4924,6 +4957,71 @@ function AddStrategyModal({
                 >
                   + Добавить уровень
                 </button>
+              </div>
+
+              {/* TP tier shift — optional "shrinking TP" ladder */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sdForm.takeProfitTierShiftEnabled}
+                    onChange={(e) => setSdForm({ ...sdForm, takeProfitTierShiftEnabled: e.target.checked })}
+                    className="rounded border-dark-border"
+                  />
+                  <span className="text-sm text-text-primary">Двигать TP вместе с ярусами</span>
+                </label>
+                {sdForm.takeProfitTierShiftEnabled && (
+                  <div className="mt-2">
+                    <p className="text-xs text-text-secondary mb-2 italic">
+                      Ярус 1 = вход, ярус 2 = после 1-го усреднения, … Применяется наибольший подходящий порог.
+                    </p>
+                    <div className="space-y-2">
+                      {sdTpShifts.map((s, i) => (
+                        <div key={i} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-end">
+                          <div>
+                            <label className={labelCls}>С яруса ≥</label>
+                            <input
+                              type="number"
+                              min="1"
+                              value={s.fromTier}
+                              onChange={(e) => setSdTpShifts(sdTpShifts.map((x, idx) => idx === i ? { ...x, fromTier: e.target.value } : x))}
+                              className={inputCls}
+                            />
+                          </div>
+                          <div>
+                            <label className={labelCls}>Take Profit %</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0.01"
+                              value={s.takeProfitPercent}
+                              onChange={(e) => setSdTpShifts(sdTpShifts.map((x, idx) => idx === i ? { ...x, takeProfitPercent: e.target.value } : x))}
+                              className={inputCls}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            disabled={sdTpShifts.length <= 1}
+                            onClick={() => setSdTpShifts(sdTpShifts.filter((_, idx) => idx !== i))}
+                            className="pb-0.5 text-accent-red/70 hover:text-accent-red disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                            title="Удалить ступень"
+                          >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSdTpShifts([...sdTpShifts, { fromTier: '5', takeProfitPercent: '0.3' }])}
+                      className="mt-2 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors"
+                    >
+                      + Добавить ступень
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* DCA trigger base */}
@@ -6057,6 +6155,7 @@ function EditStrategyModal({
     dcaTriggerBase: cfg.dcaTriggerBase || 'Average',
     orderType: cfg.orderType || 'Market',
     entryLimitOffsetPercent: String(cfg.entryLimitOffsetPercent ?? 0.05),
+    takeProfitTierShiftEnabled: cfg.takeProfitTierShiftEnabled === true,
   });
   // Migrate legacy scalar fields → tiered levels on load
   const [sdLevels, setSdLevels] = useState<Array<{ stepPercent: string; multiplier: string; count: string }>>(
@@ -6067,6 +6166,15 @@ function EditStrategyModal({
           count: String(l.count),
         }))
       : [{ stepPercent: String(cfg.dcaStepPercent ?? 3.0), multiplier: String(cfg.dcaMultiplier ?? 3.0), count: String(cfg.maxDcaLevels ?? 5) }],
+  );
+  // Optional "shrinking TP" ladder, loaded from existing config if present
+  const [sdTpShifts, setSdTpShifts] = useState<Array<{ fromTier: string; takeProfitPercent: string }>>(
+    Array.isArray(cfg.takeProfitTierShifts) && cfg.takeProfitTierShifts.length > 0
+      ? cfg.takeProfitTierShifts.map((s: { fromTier: number; takeProfitPercent: number }) => ({
+          fromTier: String(s.fromTier),
+          takeProfitPercent: String(s.takeProfitPercent),
+        }))
+      : [{ fromTier: '3', takeProfitPercent: '0.5' }],
   );
 
   // HuntingFunding form state
@@ -6284,6 +6392,14 @@ function EditStrategyModal({
         autoRotateTicker,
       });
     } else if (isSD) {
+      const tpShifts = sdTpShifts
+        .map((s) => ({ fromTier: Number(s.fromTier), takeProfitPercent: Number(s.takeProfitPercent) }))
+        .filter((s) => s.fromTier > 0 && s.takeProfitPercent > 0)
+        .sort((a, b) => a.fromTier - b.fromTier);
+      if (sdForm.takeProfitTierShiftEnabled && tpShifts.length === 0) {
+        setError('Добавьте хотя бы одну ступень смещения TP (или выключите чекбокс)');
+        return;
+      }
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: sdForm.timeframe,
@@ -6299,6 +6415,8 @@ function EditStrategyModal({
           multiplier: Number(l.multiplier),
           count: Number(l.count),
         })),
+        takeProfitTierShiftEnabled: sdForm.takeProfitTierShiftEnabled,
+        takeProfitTierShifts: tpShifts,
       });
     } else if (isFC) {
       configJson = JSON.stringify({
@@ -6662,6 +6780,71 @@ function EditStrategyModal({
                 >
                   + Добавить уровень
                 </button>
+              </div>
+
+              {/* TP tier shift — optional "shrinking TP" ladder */}
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sdForm.takeProfitTierShiftEnabled}
+                    onChange={(e) => setSdForm({ ...sdForm, takeProfitTierShiftEnabled: e.target.checked })}
+                    className="rounded border-dark-border"
+                  />
+                  <span className="text-sm text-text-primary">Двигать TP вместе с ярусами</span>
+                </label>
+                {sdForm.takeProfitTierShiftEnabled && (
+                  <div className="mt-2">
+                    <p className="text-xs text-text-secondary mb-2 italic">
+                      Ярус 1 = вход, ярус 2 = после 1-го усреднения, … Применяется наибольший подходящий порог.
+                    </p>
+                    <div className="space-y-2">
+                      {sdTpShifts.map((s, i) => (
+                        <div key={i} className="grid grid-cols-[1fr_1fr_auto] gap-2 items-end">
+                          <div>
+                            <label className={labelCls}>С яруса ≥</label>
+                            <input
+                              type="number"
+                              min="1"
+                              value={s.fromTier}
+                              onChange={(e) => setSdTpShifts(sdTpShifts.map((x, idx) => idx === i ? { ...x, fromTier: e.target.value } : x))}
+                              className={inputCls}
+                            />
+                          </div>
+                          <div>
+                            <label className={labelCls}>Take Profit %</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0.01"
+                              value={s.takeProfitPercent}
+                              onChange={(e) => setSdTpShifts(sdTpShifts.map((x, idx) => idx === i ? { ...x, takeProfitPercent: e.target.value } : x))}
+                              className={inputCls}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            disabled={sdTpShifts.length <= 1}
+                            onClick={() => setSdTpShifts(sdTpShifts.filter((_, idx) => idx !== i))}
+                            className="pb-0.5 text-accent-red/70 hover:text-accent-red disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                            title="Удалить ступень"
+                          >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSdTpShifts([...sdTpShifts, { fromTier: '5', takeProfitPercent: '0.3' }])}
+                      className="mt-2 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors"
+                    >
+                      + Добавить ступень
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div>

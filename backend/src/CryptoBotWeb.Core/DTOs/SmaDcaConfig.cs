@@ -15,6 +15,16 @@ public class SmaDcaLevel
     public int Count { get; set; }
 }
 
+// One step of the optional "shrinking TP" ladder. When TakeProfitTierShiftEnabled is true and
+// the bot has reached FromTier or more (user-facing numbering: Entry = tier 1, after first DCA = 2,
+// after second DCA = 3, …), the bot uses this TakeProfitPercent instead of the base one.
+// If multiple ladder steps qualify, the one with the highest FromTier wins.
+public class TakeProfitTierShift
+{
+    public int FromTier { get; set; }
+    public decimal TakeProfitPercent { get; set; }
+}
+
 public class SmaDcaConfig
 {
     public string Symbol { get; set; } = string.Empty;
@@ -25,8 +35,16 @@ public class SmaDcaConfig
 
     public int SmaPeriod { get; set; } = 50;
 
-    // TP measured from the current average entry; recomputed after every DCA
+    // TP measured from the current average entry; recomputed after every DCA.
+    // When TakeProfitTierShiftEnabled is true and the current tier reaches a configured ladder
+    // step, this base value is replaced by the ladder step's TakeProfitPercent.
     public decimal TakeProfitPercent { get; set; } = 1.0m;
+
+    // Optional "shrinking TP" feature — lets the user gracefully cut their TP after the bot
+    // has averaged down deeply (e.g. base TP 2%, after tier 3 fall back to 0.5%). Disabled by
+    // default, fully backwards compatible.
+    public bool TakeProfitTierShiftEnabled { get; set; } = false;
+    public List<TakeProfitTierShift> TakeProfitTierShifts { get; set; } = new();
 
     // Tiered DCA configuration. Each tier has its own step%/multiplier and applies for `Count`
     // fills before the bot advances to the next tier. Total DCA cap = sum of all tier Counts.
