@@ -25,6 +25,7 @@ public class AppDbContext : DbContext
     public DbSet<TelegramBot> TelegramBots => Set<TelegramBot>();
     public DbSet<TelegramSubscriber> TelegramSubscribers => Set<TelegramSubscriber>();
     public DbSet<SymbolBlacklistEntry> SymbolBlacklist => Set<SymbolBlacklistEntry>();
+    public DbSet<BalanceSnapshot> BalanceSnapshots => Set<BalanceSnapshot>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -321,6 +322,19 @@ public class AppDbContext : DbContext
             e.Property(x => x.Reason).HasMaxLength(500);
             e.HasIndex(x => new { x.ExchangeType, x.Symbol }).IsUnique();
             e.HasIndex(x => x.ExpiresAt);
+        });
+
+        modelBuilder.Entity<BalanceSnapshot>(e =>
+        {
+            e.ToTable("balance_snapshots");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.TotalUsdt).HasPrecision(18, 8);
+            e.HasOne(x => x.User)
+                .WithMany()
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.UserId, x.TakenAt });
         });
     }
 }

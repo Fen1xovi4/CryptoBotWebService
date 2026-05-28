@@ -73,6 +73,24 @@ public class FundingClaimHandler : IStrategyHandler
     {
         var wsCfg = await GetWorkspaceConfigAsync(strategy, ct);
 
+        // Prune expired SL cooldown entries to keep state small.
+        if (state.SlCooldowns != null && state.SlCooldowns.Count > 0)
+        {
+            var nowUtc = DateTime.UtcNow;
+            var expired = state.SlCooldowns.Where(kv => kv.Value <= nowUtc).Select(kv => kv.Key).ToList();
+            foreach (var sym in expired) state.SlCooldowns.Remove(sym);
+        }
+
+        // Skip entry while the assigned ticker is still in re-entry cooldown after a recent SL.
+        if (state.SlCooldowns != null && !string.IsNullOrEmpty(config.Symbol)
+            && state.SlCooldowns.TryGetValue(config.Symbol.ToUpperInvariant(), out var cdExpiry)
+            && cdExpiry > DateTime.UtcNow)
+        {
+            _logger.LogDebug("Strategy {Id}: {Symbol} in SL cooldown until {Until:u}, skipping entry",
+                strategy.Id, config.Symbol, cdExpiry);
+            return;
+        }
+
         var funding = await exchange.GetFundingRateAsync(config.Symbol);
         if (funding == null)
         {
@@ -464,6 +482,20 @@ public class FundingClaimHandler : IStrategyHandler
         state.CycleTotalFundingPnl += positionFundingPnl;
         state.CurrentCycleFundingPnl = 0;
         state.CycleCount++;
+
+        // On SL: block re-entry into this symbol for FcSlCooldownHours (workspace-wide via rotation).
+        if (reason == "StopLoss")
+        {
+            var wsCfg = await GetWorkspaceConfigAsync(strategy, ct);
+            if (wsCfg.FcSlCooldownHours > 0)
+            {
+                state.SlCooldowns ??= new Dictionary<string, DateTime>();
+                var expiry = DateTime.UtcNow.AddHours(wsCfg.FcSlCooldownHours);
+                state.SlCooldowns[symbol.ToUpperInvariant()] = expiry;
+                Log(strategy, "Info",
+                    $"SL cooldown set: {symbol} blocked for {wsCfg.FcSlCooldownHours}h (until {expiry:u})");
+            }
+        }
 
         Log(strategy, "Info",
             $"{state.Direction} closed ({reason}): price={closePrice}, entry={Math.Round(avgEntry, 6)}, " +

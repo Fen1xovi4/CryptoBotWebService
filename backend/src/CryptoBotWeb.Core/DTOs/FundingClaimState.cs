@@ -25,4 +25,5 @@ public class FundingClaimState
     public DateTime? LastHourlyCheckAt { get; set; } // throttle: one check per hour
     public int MissedPositionChecks { get; set; } // consecutive null GetPosition results — debounces ExternalClose
     public DateTime? LastFundingPaidAt { get; set; } // last detected funding payment — anchors SL grace window
+    public Dictionary<string, DateTime> SlCooldowns { get; set; } = new(); // symbol → cooldown-expires UTC (block re-entry after SL)
 }

@@ -18,4 +18,5 @@ public class WorkspaceFundingClaimConfig
     public decimal FcStopLossPercent { get; set; } = 2.5m;
     public int FcLeverage { get; set; } = 3;
     public int FcSlGraceMinutes { get; set; } = 10; // SL disabled within ±this many minutes of a funding event
+    public int FcSlCooldownHours { get; set; } = 6; // re-entry cooldown for a symbol after SL (0 = disabled)
 }

@@ -53,6 +53,20 @@ interface Position {
   unrealizedPnl: number;
 }
 
+interface BalanceSnapshot {
+  id: string;
+  totalUsdt: number;
+  takenAt: string;
+}
+
+function formatSnapshotDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  return `${dd}.${mm}.${d.getFullYear()}`;
+}
+
 function formatAmount(n: number): string {
   if (n === 0) return '0';
   if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -71,6 +85,7 @@ export default function AccountsPage() {
   const [positions, setPositions] = useState<Record<string, Position[] | null>>({});
   const [loadingPositions, setLoadingPositions] = useState<Record<string, boolean>>({});
   const [closingPosition, setClosingPosition] = useState<Record<string, boolean>>({});
+  const [showSnapshotHistory, setShowSnapshotHistory] = useState(false);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { maxAccounts, currentAccounts } = useSubscriptionStore();
@@ -81,6 +96,30 @@ export default function AccountsPage() {
   const { data: accounts, isLoading } = useQuery<ExchangeAccount[]>({
     queryKey: ['accounts'],
     queryFn: () => api.get('/accounts').then((r) => r.data),
+  });
+
+  const { data: snapshots } = useQuery<BalanceSnapshot[]>({
+    queryKey: ['balance-snapshots'],
+    queryFn: () => api.get('/balance-snapshots').then((r) => r.data),
+  });
+
+  const saveSnapshotMutation = useMutation({
+    mutationFn: () => api.post('/balance-snapshots').then((r) => r.data),
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ['balance-snapshots'] });
+      if (data?.errors?.length) {
+        alert(`Snapshot saved (${data.succeededAccounts}/${data.totalAccounts} accounts).\n\nErrors:\n${data.errors.join('\n')}`);
+      }
+    },
+    onError: (err: any) => {
+      const msg = err?.response?.data?.message || 'Failed to save snapshot';
+      alert(msg);
+    },
+  });
+
+  const deleteSnapshotMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/balance-snapshots/${id}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['balance-snapshots'] }),
   });
 
   const fetchPositions = async (accId: string) => {
@@ -186,10 +225,59 @@ export default function AccountsPage() {
     },
   });
 
+  const activeAccountIds = (accounts ?? []).filter((a) => a.isActive).map((a) => a.id);
+  const loadedBalanceIds = activeAccountIds.filter((id) => Array.isArray(balances[id]));
+  const totalUsdt = loadedBalanceIds.reduce((sum, id) => {
+    const usdt = balances[id]!.find((b) => b.asset === 'USDT');
+    return sum + (usdt?.total ?? 0);
+  }, 0);
+  const showTotal = activeAccountIds.length > 0;
+  const totalIsPartial = loadedBalanceIds.length < activeAccountIds.length;
+  const latestSnapshot = snapshots?.[0];
+  const snapshotDelta = latestSnapshot && !totalIsPartial ? totalUsdt - latestSnapshot.totalUsdt : null;
+
   return (
     <div>
       <Header title="Exchange Accounts" subtitle="Manage your exchange API connections">
         <div className="flex items-center gap-3">
+          {showTotal && (
+            <>
+              <span
+                className="text-xs font-medium px-2.5 py-1 rounded-full bg-accent-blue/10 text-accent-blue"
+                title={totalIsPartial ? `Loaded ${loadedBalanceIds.length}/${activeAccountIds.length} accounts` : 'Sum of USDT across active accounts'}
+              >
+                Total: {formatAmount(totalUsdt)} USDT{totalIsPartial ? ' …' : ''}
+              </span>
+              {snapshotDelta !== null && latestSnapshot && (
+                <button
+                  type="button"
+                  onClick={() => setShowSnapshotHistory((v) => !v)}
+                  className={`flex flex-col items-end leading-tight text-xs font-medium px-2.5 py-1 rounded-lg cursor-pointer transition-colors ${
+                    snapshotDelta >= 0
+                      ? 'bg-accent-green/10 hover:bg-accent-green/20'
+                      : 'bg-accent-red/10 hover:bg-accent-red/20'
+                  }`}
+                  title="Click for history"
+                >
+                  <span className="text-text-secondary">
+                    {formatSnapshotDate(latestSnapshot.takenAt)} · {formatAmount(latestSnapshot.totalUsdt)} USDT
+                  </span>
+                  <span className={snapshotDelta >= 0 ? 'text-accent-green' : 'text-accent-red'}>
+                    {snapshotDelta >= 0 ? '+' : ''}{formatAmount(snapshotDelta)} USDT
+                  </span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => saveSnapshotMutation.mutate()}
+                disabled={saveSnapshotMutation.isPending || totalIsPartial}
+                className="text-xs font-medium px-2.5 py-1 rounded-full bg-bg-tertiary text-text-secondary hover:bg-bg-tertiary/70 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                title={totalIsPartial ? 'Waiting for all balances to load…' : 'Save current total as a snapshot'}
+              >
+                {saveSnapshotMutation.isPending ? 'Saving…' : 'Save snapshot'}
+              </button>
+            </>
+          )}
           {!isAdmin && maxAccounts > 0 && (
             <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${
               atLimit
@@ -218,6 +306,57 @@ export default function AccountsPage() {
           </div>
         </div>
       </Header>
+
+      {showSnapshotHistory && (
+        <div className="mb-4 bg-bg-secondary rounded-xl border border-border overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-3 border-b border-border">
+            <h3 className="text-sm font-medium text-text-primary">Balance snapshots</h3>
+            <button
+              onClick={() => setShowSnapshotHistory(false)}
+              className="text-xs text-text-secondary hover:text-text-primary"
+            >
+              Close
+            </button>
+          </div>
+          {!snapshots || snapshots.length === 0 ? (
+            <div className="px-5 py-6 text-center text-sm text-text-secondary">No snapshots yet.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-text-secondary border-b border-border">
+                  <th className="text-left px-5 py-2 font-medium">Date</th>
+                  <th className="text-right px-5 py-2 font-medium">Total (USDT)</th>
+                  <th className="text-right px-5 py-2 font-medium">vs current</th>
+                  <th className="w-16 px-5 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {snapshots.map((s) => {
+                  const delta = totalIsPartial ? null : totalUsdt - s.totalUsdt;
+                  return (
+                    <tr key={s.id} className="border-b border-border/50 hover:bg-bg-tertiary/30">
+                      <td className="px-5 py-2 text-text-primary">{new Date(s.takenAt).toLocaleString()}</td>
+                      <td className="px-5 py-2 text-right font-mono text-text-primary">{formatAmount(s.totalUsdt)}</td>
+                      <td className={`px-5 py-2 text-right font-mono ${delta === null ? 'text-text-secondary' : delta >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                        {delta === null ? '—' : `${delta >= 0 ? '+' : ''}${formatAmount(delta)}`}
+                      </td>
+                      <td className="px-5 py-2 text-right">
+                        <button
+                          onClick={() => { if (confirm('Delete this snapshot?')) deleteSnapshotMutation.mutate(s.id); }}
+                          className="text-xs text-text-secondary hover:text-accent-red"
+                          title="Delete snapshot"
+                        >
+                          ✕
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       <div className="bg-bg-secondary rounded-xl border border-border overflow-hidden">
         <div className="overflow-x-auto">

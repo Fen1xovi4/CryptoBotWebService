@@ -117,6 +117,37 @@ public class FundingTickerRotationService : IFundingTickerRotationService
             holders.Add(strategy.Id);
         }
 
+        // 4b. Build workspace-wide SL cooldown map by unioning all FundingClaim bot states.
+        //     Any symbol cooled-down in any bot in a workspace is off-limits to all bots there.
+        var nowUtcRotation = DateTime.UtcNow;
+        var wsSlCooldowns = new Dictionary<(Guid wsId, string symbol), DateTime>();
+        foreach (var strategy in allStrategies)
+        {
+            if (strategy.Type != StrategyTypes.FundingClaim) continue;
+            if (strategy.WorkspaceId is not Guid wsId) continue;
+            if (string.IsNullOrEmpty(strategy.StateJson)) continue;
+            FundingClaimState? state;
+            try
+            {
+                state = JsonSerializer.Deserialize<FundingClaimState>(strategy.StateJson, JsonOptions);
+            }
+            catch { continue; }
+            if (state?.SlCooldowns == null || state.SlCooldowns.Count == 0) continue;
+            foreach (var kv in state.SlCooldowns)
+            {
+                if (kv.Value <= nowUtcRotation) continue;
+                var key = (wsId, kv.Key.ToUpperInvariant());
+                if (!wsSlCooldowns.TryGetValue(key, out var existing) || existing < kv.Value)
+                    wsSlCooldowns[key] = kv.Value;
+            }
+        }
+
+        bool IsInSlCooldown(Guid? workspaceId, string symbol)
+        {
+            if (workspaceId is not Guid wsId) return false;
+            return wsSlCooldowns.ContainsKey((wsId, symbol.ToUpperInvariant()));
+        }
+
         bool IsTakenByOtherInWorkspace(Guid? workspaceId, string symbol, Guid currentStrategyId)
         {
             if (workspaceId is not Guid wsId) return false;
@@ -205,6 +236,9 @@ public class FundingTickerRotationService : IFundingTickerRotationService
                         continue;
 
                     if (IsTakenByOtherInWorkspace(strategy.WorkspaceId, rate.Symbol, strategy.Id))
+                        continue;
+
+                    if (IsInSlCooldown(strategy.WorkspaceId, rate.Symbol))
                         continue;
 
                     var absPct = Math.Abs(rate.Rate * 100m);
