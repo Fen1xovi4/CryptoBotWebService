@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "10"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -16,6 +22,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    logging: *default-logging
 
   api:
     build:
@@ -37,6 +44,7 @@ services:
       Bybit__BrokerId: ${BYBIT_BROKER_ID:-Ty001081}
     ports:
       - "8100:5000"
+    logging: *default-logging
 
   worker:
     build:
@@ -52,6 +60,7 @@ services:
       TronGrid__ApiKey: ${TRONGRID_API_KEY:-}
       BscScan__ApiKey: ${BSCSCAN_API_KEY:-}
       Bybit__BrokerId: ${BYBIT_BROKER_ID:-Ty001081}
+    logging: *default-logging
 
   frontend:
     build:
@@ -72,6 +81,7 @@ services:
     networks:
       - default
       - web
+    logging: *default-logging
 
 volumes:
   pgdata:
