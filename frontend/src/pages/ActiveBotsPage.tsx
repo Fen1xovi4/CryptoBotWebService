@@ -3831,6 +3831,22 @@ function SmartGridHedgeCard({
   const cycleNet = (state?.cycleGridRealized ?? 0) + (state?.cycleHedgeRealized ?? 0) - (state?.cycleFees ?? 0);
   const totalNet = (state?.gridRealizedPnl ?? 0) + (state?.hedgeRealizedPnl ?? 0) - (state?.totalFees ?? 0);
 
+  // Mark-to-market unrealized on open legs — mirrors the handler's take-profit formula,
+  // so "TP PnL" below is exactly the number compared against the per-cycle target.
+  let cycleUnreal: number | null = null;
+  if (state != null && lastMark != null && lastMark > 0) {
+    let longUnreal = (state.qInitCoins ?? 0) * (lastMark - (state.pAvgInit ?? 0));
+    for (const c of state.dcaCells ?? []) {
+      if (c.paired && c.qtyCoins > 0) longUnreal += c.qtyCoins * (lastMark - c.buyPrice);
+    }
+    let shortUnreal = (state.qHedgeCoins ?? 0) * ((state.hedgeEntryPrice ?? 0) - lastMark);
+    for (const c of state.skimCells ?? []) {
+      if (c.paired && c.shortQtyCoins > 0) shortUnreal += c.shortQtyCoins * (c.sellPrice - lastMark);
+    }
+    cycleUnreal = longUnreal + shortUnreal;
+  }
+  const cycleTpPnl = cycleUnreal != null ? cycleNet + cycleUnreal : null;
+
   // Skim cells: hide if OneShot and none have fired
   const skimMode = cfg?.skimMode ?? 0;
   const anySkimFired = skimCells.some((c) => c.firedOnceShot || c.paired);
@@ -4071,6 +4087,19 @@ function SmartGridHedgeCard({
                 <span className={`font-semibold ${cycleNet >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
                   Net {cycleNet >= 0 ? '+' : ''}${cycleNet.toFixed(2)}
                 </span>
+                {cycleUnreal != null && (
+                  <span className={`font-medium ${cycleUnreal >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                    Unreal {cycleUnreal >= 0 ? '+' : ''}${cycleUnreal.toFixed(2)}
+                  </span>
+                )}
+                {cycleTpPnl != null && cfgTpEnabled && (
+                  <span
+                    title="PnL цикла (realized + unrealized) — именно это число сравнивается с целью тейка. Total ниже — за всё время и в тейке не участвует."
+                    className={`px-1.5 py-0.5 rounded font-semibold ${cycleTpPnl >= 0 ? 'bg-accent-green/10 text-accent-green' : 'bg-accent-red/10 text-accent-red'}`}
+                  >
+                    TP {cycleTpPnl >= 0 ? '+' : ''}${cycleTpPnl.toFixed(2)} / ${cfgTpTarget}
+                  </span>
+                )}
                 {state.lastCycleEndReason && (
                   <span className="px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary/70 italic">
                     last: {state.lastCycleEndReason}
@@ -4132,7 +4161,12 @@ function SmartGridHedgeCard({
           onChange={(e) => setTpDraftTarget(e.target.value)}
           className="w-20 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
         />
-        <span className="text-[10px] text-text-secondary">USDT</span>
+        <span
+          className="text-[10px] text-text-secondary"
+          title="Цель сравнивается с PnL текущего цикла (realized + unrealized). При новом цикле счётчик обнуляется — Total PnL карточки в тейке не участвует."
+        >
+          USDT за цикл
+        </span>
         {tpDraftDirty && (
           <button
             type="button"
