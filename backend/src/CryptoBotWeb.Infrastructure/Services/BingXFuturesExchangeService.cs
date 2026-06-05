@@ -297,42 +297,48 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId)
     {
-        try
-        {
-            // BingX uses long order IDs — refuse non-numeric inputs early instead of letting the SDK 400.
-            if (!long.TryParse(orderId, out var parsedId))
-                return null;
-
-            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
-            var result = await _client.PerpetualFuturesApi.Trading.GetOrderAsync(
-                bingxSymbol, parsedId, null, default);
-
-            if (!result.Success || result.Data == null)
-                return null;
-
-            var order = result.Data;
-            var lifecycleStatus = order.Status switch
-            {
-                OrderStatus.New or OrderStatus.Pending => OrderLifecycleStatus.Open,
-                OrderStatus.PartiallyFilled => OrderLifecycleStatus.PartiallyFilled,
-                OrderStatus.Filled => OrderLifecycleStatus.Filled,
-                OrderStatus.Canceled => OrderLifecycleStatus.Cancelled,
-                OrderStatus.Failed => OrderLifecycleStatus.Rejected,
-                _ => OrderLifecycleStatus.Unknown
-            };
-
-            return new OrderStatusDto
-            {
-                OrderId = order.OrderId.ToString(),
-                Status = lifecycleStatus,
-                FilledQuantity = order.QuantityFilled ?? 0m,
-                AverageFilledPrice = order.AveragePrice ?? 0m
-            };
-        }
-        catch (Exception)
-        {
+        // BingX uses long order IDs — refuse non-numeric inputs early instead of letting the SDK 400.
+        if (!long.TryParse(orderId, out var parsedId))
             return null;
+
+        var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+        var result = await _client.PerpetualFuturesApi.Trading.GetOrderAsync(
+            bingxSymbol, parsedId, null, default);
+
+        if (!result.Success)
+        {
+            // BingX reports an unknown/purged order as an API error (80016 "order not exist"),
+            // which maps to the null contract. Anything else (proxy, timeout, auth, rate limit)
+            // must throw so callers don't mistake a transport failure for a vanished order and
+            // orphan a live TP.
+            var msg = result.Error?.ToString() ?? "unknown error";
+            if (msg.Contains("not exist", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("not found", StringComparison.OrdinalIgnoreCase))
+                return null;
+            throw new InvalidOperationException($"BingX GetOrder query failed for {orderId}: {msg}");
         }
+
+        if (result.Data == null)
+            return null;
+
+        var order = result.Data;
+        var lifecycleStatus = order.Status switch
+        {
+            OrderStatus.New or OrderStatus.Pending => OrderLifecycleStatus.Open,
+            OrderStatus.PartiallyFilled => OrderLifecycleStatus.PartiallyFilled,
+            OrderStatus.Filled => OrderLifecycleStatus.Filled,
+            OrderStatus.Canceled => OrderLifecycleStatus.Cancelled,
+            OrderStatus.Failed => OrderLifecycleStatus.Rejected,
+            _ => OrderLifecycleStatus.Unknown
+        };
+
+        return new OrderStatusDto
+        {
+            OrderId = order.OrderId.ToString(),
+            Status = lifecycleStatus,
+            FilledQuantity = order.QuantityFilled ?? 0m,
+            AverageFilledPrice = order.AveragePrice ?? 0m
+        };
     }
 
     public async Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol)

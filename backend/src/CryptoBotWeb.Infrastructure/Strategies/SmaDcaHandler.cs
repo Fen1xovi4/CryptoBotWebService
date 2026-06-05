@@ -1224,14 +1224,21 @@ public class SmaDcaHandler : IStrategyHandler
             if (err.Contains("No position", StringComparison.OrdinalIgnoreCase)
                 || err.Contains("number of closed positions", StringComparison.OrdinalIgnoreCase)
                 || err.Contains("Reduce Only order", StringComparison.OrdinalIgnoreCase)
-                || err.Contains("decrease the position", StringComparison.OrdinalIgnoreCase))
+                || err.Contains("decrease the position", StringComparison.OrdinalIgnoreCase)
+                || err.Contains("truncated to zero", StringComparison.OrdinalIgnoreCase))
             {
                 // The error string is reactive evidence, but Bitget has been seen to emit it
                 // transiently. Confirm with a second GetPositionAsync probe before resetting.
+                // "orderQty will be truncated to zero" (Bybit) is doubly ambiguous: position
+                // gone OR an older reduce-only TP still resting and eating the reduce-only
+                // capacity — the probe disambiguates, and the LastReconcileAt reset below makes
+                // orphan-reconcile cancel the stale duplicate on the next tick instead of
+                // spamming this error for minutes until the 60s-throttled reconcile wakes up.
                 if (!await ConfirmPositionClosed(strategy, config, exchange))
                 {
+                    state.LastReconcileAt = null;
                     Log(strategy, "Warning",
-                        $"TP не выставлен ({err}), но повторный опрос показал что позиция жива — оставляю state, повторю на следующем тике");
+                        $"TP не выставлен ({err}), но повторный опрос показал что позиция жива — оставляю state, реконсиляция орфанов на следующем тике");
                     return;
                 }
                 Log(strategy, "Warning",

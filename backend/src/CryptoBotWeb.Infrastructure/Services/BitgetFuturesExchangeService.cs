@@ -389,29 +389,35 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId)
     {
-        try
-        {
-            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
-            var result = await _client.FuturesApiV2.Trading.GetOrderAsync(
-                BitgetProductTypeV2.UsdtFutures, bitgetSymbol,
-                orderId, clientOrderId: null);
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+        var result = await _client.FuturesApiV2.Trading.GetOrderAsync(
+            BitgetProductTypeV2.UsdtFutures, bitgetSymbol,
+            orderId, clientOrderId: null);
 
-            if (!result.Success || result.Data == null)
+        if (!result.Success)
+        {
+            // Bitget reports a purged/unknown order as an API error, not an empty payload —
+            // that's a legitimate not-found and maps to the null contract. Anything else
+            // (proxy, timeout, auth, rate limit) must throw so callers don't mistake a
+            // transport failure for a vanished order and orphan a live TP.
+            var msg = result.Error?.ToString() ?? "unknown error";
+            if (msg.Contains("not exist", StringComparison.OrdinalIgnoreCase)
+                || msg.Contains("not found", StringComparison.OrdinalIgnoreCase))
                 return null;
+            throw new InvalidOperationException($"Bitget GetOrder query failed for {orderId}: {msg}");
+        }
 
-            var o = result.Data;
-            return new OrderStatusDto
-            {
-                OrderId = o.OrderId ?? orderId,
-                Status = MapOrderStatus(o.Status),
-                FilledQuantity = o.QuantityFilled,
-                AverageFilledPrice = o.AveragePrice ?? 0m
-            };
-        }
-        catch (Exception)
-        {
+        if (result.Data == null)
             return null;
-        }
+
+        var o = result.Data;
+        return new OrderStatusDto
+        {
+            OrderId = o.OrderId ?? orderId,
+            Status = MapOrderStatus(o.Status),
+            FilledQuantity = o.QuantityFilled,
+            AverageFilledPrice = o.AveragePrice ?? 0m
+        };
     }
 
     private static OrderLifecycleStatus MapOrderStatus(Bitget.Net.Enums.V2.OrderStatus s) => s switch

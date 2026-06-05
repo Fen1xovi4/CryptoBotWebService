@@ -333,37 +333,47 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
 
     public async Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId)
     {
-        try
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+
+        // Real-time endpoint covers open / recently-finalized orders.
+        var open = await _client.V5Api.Trading.GetOrdersAsync(
+            Category.Linear, bybitSymbol, orderId: orderId);
+        var order = open.Success ? open.Data?.List?.FirstOrDefault() : null;
+
+        if (order == null)
         {
-            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
-
-            // Real-time endpoint covers open / recently-finalized orders.
-            var open = await _client.V5Api.Trading.GetOrdersAsync(
-                Category.Linear, bybitSymbol, orderId: orderId);
-            var order = open.Success ? open.Data?.List?.FirstOrDefault() : null;
-
             // Fall back to history for fully-finalized orders past the real-time window.
+            var hist = await _client.V5Api.Trading.GetOrderHistoryAsync(
+                Category.Linear, bybitSymbol, orderId: orderId);
+            order = hist.Success ? hist.Data?.List?.FirstOrDefault() : null;
+
             if (order == null)
             {
-                var hist = await _client.V5Api.Trading.GetOrderHistoryAsync(
-                    Category.Linear, bybitSymbol, orderId: orderId);
-                order = hist.Success ? hist.Data?.List?.FirstOrDefault() : null;
+                // Null is a contract: "queried OK, order genuinely doesn't exist". Returning it
+                // on a transport/API failure (flaky proxy, timeout, recv_window) made callers
+                // believe a live TP vanished → they cleared the tracked id and placed a duplicate
+                // reduce-only order, which Bybit rejects with "orderQty will be truncated to
+                // zero" until reconcile cancels the original as an orphan. Only a successful
+                // realtime+history pair may report not-found; anything else must throw so the
+                // caller retries next tick with state intact.
+                if (!open.Success || !hist.Success)
+                {
+                    var openErr = open.Success ? "ok" : open.Error?.ToString() ?? "unknown error";
+                    var histErr = hist.Success ? "ok" : hist.Error?.ToString() ?? "unknown error";
+                    throw new InvalidOperationException(
+                        $"Bybit GetOrder query failed for {orderId} (realtime: {openErr}; history: {histErr})");
+                }
+                return null;
             }
-
-            if (order == null) return null;
-
-            return new OrderStatusDto
-            {
-                OrderId = order.OrderId ?? orderId,
-                Status = MapOrderStatus(order.Status),
-                FilledQuantity = order.QuantityFilled ?? 0m,
-                AverageFilledPrice = order.AveragePrice ?? 0m
-            };
         }
-        catch (Exception)
+
+        return new OrderStatusDto
         {
-            return null;
-        }
+            OrderId = order.OrderId ?? orderId,
+            Status = MapOrderStatus(order.Status),
+            FilledQuantity = order.QuantityFilled ?? 0m,
+            AverageFilledPrice = order.AveragePrice ?? 0m
+        };
     }
 
     private static OrderLifecycleStatus MapOrderStatus(OrderStatus s) => s switch
