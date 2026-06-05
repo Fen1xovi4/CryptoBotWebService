@@ -40,7 +40,7 @@ public class ProxiesController : ControllerBase
                 HasAuth = p.Username != null,
                 IsActive = p.IsActive,
                 CreatedAt = p.CreatedAt,
-                UsedByAccounts = p.ExchangeAccounts.Count
+                UsedByAccounts = p.AccountProxies.Select(ap => ap.AccountId).Distinct().Count()
             })
             .ToListAsync();
 

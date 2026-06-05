@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Entities;
 using CryptoBotWeb.Core.Enums;
@@ -55,7 +55,7 @@ public class BalanceSnapshotsController : ControllerBase
         var userId = GetUserId();
 
         var accounts = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .Where(a => a.UserId == userId && a.IsActive)
             .ToListAsync();
 

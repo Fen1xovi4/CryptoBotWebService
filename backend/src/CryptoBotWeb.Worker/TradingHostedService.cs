@@ -1,4 +1,4 @@
-using CryptoBotWeb.Core.Enums;
+﻿using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using CryptoBotWeb.Infrastructure.Services;
@@ -52,7 +52,7 @@ public class TradingHostedService : BackgroundService
                 var handlers = scope.ServiceProvider.GetServices<IStrategyHandler>();
 
                 var runningStrategies = await db.Strategies
-                    .Include(s => s.Account).ThenInclude(a => a.Proxy)
+                    .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
                     .Where(s => s.Status == StrategyStatus.Running)
                     .ToListAsync(stoppingToken);
 

@@ -38,6 +38,9 @@ builder.Services.AddAuthorization();
 var encryptionKey = builder.Configuration["Encryption:Key"] ?? "default-encryption-key-change-me!";
 builder.Services.AddSingleton<IEncryptionService>(new EncryptionService(encryptionKey));
 
+// Proxy failover health tracker (in-memory cooldown + TCP precheck cache)
+builder.Services.AddSingleton<IProxyHealthTracker, ProxyHealthTracker>();
+
 // Exchange factory
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
 

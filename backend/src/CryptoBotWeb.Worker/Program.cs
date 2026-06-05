@@ -12,6 +12,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 var encryptionKey = builder.Configuration["Encryption:Key"] ?? "default-encryption-key-change-me!";
 builder.Services.AddSingleton<IEncryptionService>(new EncryptionService(encryptionKey));
+builder.Services.AddSingleton<IProxyHealthTracker, ProxyHealthTracker>();
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
 
 builder.Services.AddScoped<IStrategyHandler, EmaBounceHandler>();

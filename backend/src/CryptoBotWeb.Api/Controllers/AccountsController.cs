@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using CryptoBotWeb.Core.Constants;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Entities;
@@ -20,12 +20,15 @@ public class AccountsController : ControllerBase
     private readonly AppDbContext _db;
     private readonly IEncryptionService _encryption;
     private readonly IExchangeServiceFactory _exchangeFactory;
+    private readonly IProxyHealthTracker _proxyHealth;
 
-    public AccountsController(AppDbContext db, IEncryptionService encryption, IExchangeServiceFactory exchangeFactory)
+    public AccountsController(AppDbContext db, IEncryptionService encryption,
+        IExchangeServiceFactory exchangeFactory, IProxyHealthTracker proxyHealth)
     {
         _db = db;
         _encryption = encryption;
         _exchangeFactory = exchangeFactory;
+        _proxyHealth = proxyHealth;
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -39,15 +42,21 @@ public class AccountsController : ControllerBase
 
         var accounts = await _db.ExchangeAccounts
             .Where(a => a.UserId == targetUserId)
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .OrderByDescending(a => a.CreatedAt)
             .Select(a => new ExchangeAccountDto
             {
                 Id = a.Id,
                 Name = a.Name,
                 ExchangeType = a.ExchangeType,
-                ProxyId = a.ProxyId,
-                ProxyName = a.Proxy != null ? a.Proxy.Name : null,
+                Proxies = a.AccountProxies
+                    .OrderBy(ap => ap.Priority)
+                    .Select(ap => new AccountProxyDto
+                    {
+                        ProxyId = ap.ProxyId,
+                        Name = ap.Proxy.Name,
+                        Priority = ap.Priority
+                    }).ToList(),
                 IsActive = a.IsActive,
                 CreatedAt = a.CreatedAt
             })
@@ -71,19 +80,20 @@ public class AccountsController : ControllerBase
                 return StatusCode(403, new { message = $"Account limit reached ({currentCount}/{limits.MaxAccounts}). Upgrade your plan to add more." });
         }
 
-        // Non-admin users must provide a proxy
-        if (!IsAdmin() && request.ProxyId == null)
+        // Ordered, de-duplicated proxy list (index = failover priority, first = primary)
+        var proxyIds = (request.ProxyIds ?? new List<Guid>()).Distinct().ToList();
+
+        // Non-admin users must provide at least one proxy
+        if (!IsAdmin() && proxyIds.Count == 0)
             return BadRequest(new { message = "Proxy is required. Please add a proxy first." });
 
-        // Validate proxy belongs to user
-        if (request.ProxyId.HasValue)
-        {
-            var proxyExists = await _db.ProxyServers
-                .AnyAsync(p => p.Id == request.ProxyId.Value && p.UserId == userId);
+        // Validate every proxy belongs to the user; capture names for the response
+        var ownedProxies = await _db.ProxyServers
+            .Where(p => proxyIds.Contains(p.Id) && p.UserId == userId)
+            .ToDictionaryAsync(p => p.Id, p => p.Name);
 
-            if (!proxyExists)
-                return BadRequest(new { message = "Invalid proxy selected." });
-        }
+        if (proxyIds.Any(pid => !ownedProxies.ContainsKey(pid)))
+            return BadRequest(new { message = "Invalid proxy selected." });
 
         var account = new ExchangeAccount
         {
@@ -94,9 +104,14 @@ public class AccountsController : ControllerBase
             ApiKeyEncrypted = _encryption.Encrypt(request.ApiKey),
             ApiSecretEncrypted = _encryption.Encrypt(request.ApiSecret),
             PassphraseEncrypted = request.Passphrase != null ? _encryption.Encrypt(request.Passphrase) : null,
-            ProxyId = request.ProxyId,
             IsActive = true,
-            CreatedAt = DateTime.UtcNow
+            CreatedAt = DateTime.UtcNow,
+            AccountProxies = proxyIds.Select((pid, idx) => new ExchangeAccountProxy
+            {
+                Id = Guid.NewGuid(),
+                ProxyId = pid,
+                Priority = idx
+            }).ToList()
         };
 
         _db.ExchangeAccounts.Add(account);
@@ -108,23 +123,17 @@ public class AccountsController : ControllerBase
             await TryFetchDzengiAccountIdAsync(account);
         }
 
-        // Load proxy name for response
-        string? proxyName = null;
-        if (request.ProxyId.HasValue)
-        {
-            proxyName = await _db.ProxyServers
-                .Where(p => p.Id == request.ProxyId.Value)
-                .Select(p => p.Name)
-                .FirstOrDefaultAsync();
-        }
-
         return CreatedAtAction(nameof(GetAll), new ExchangeAccountDto
         {
             Id = account.Id,
             Name = account.Name,
             ExchangeType = account.ExchangeType,
-            ProxyId = account.ProxyId,
-            ProxyName = proxyName,
+            Proxies = proxyIds.Select((pid, idx) => new AccountProxyDto
+            {
+                ProxyId = pid,
+                Name = ownedProxies[pid],
+                Priority = idx
+            }).ToList(),
             IsActive = account.IsActive,
             CreatedAt = account.CreatedAt
         });
@@ -135,6 +144,7 @@ public class AccountsController : ControllerBase
     {
         var userId = GetUserId();
         var account = await _db.ExchangeAccounts
+            .Include(a => a.AccountProxies)
             .FirstOrDefaultAsync(a => a.Id == id && a.UserId == userId);
 
         if (account == null)
@@ -146,24 +156,31 @@ public class AccountsController : ControllerBase
         if (request.Passphrase != null) account.PassphraseEncrypted = _encryption.Encrypt(request.Passphrase);
         if (request.IsActive.HasValue) account.IsActive = request.IsActive.Value;
 
-        // Update proxy: Guid.Empty = clear proxy (admin only), valid Guid = set proxy
-        if (request.ProxyId.HasValue)
+        // Replace the proxy list when ProxyIds is provided (null = leave unchanged).
+        // Empty list clears all proxies (admin only); non-admin must keep at least one.
+        if (request.ProxyIds != null)
         {
-            if (request.ProxyId.Value == Guid.Empty)
-            {
-                if (IsAdmin())
-                    account.ProxyId = null;
-            }
-            else
-            {
-                var proxyExists = await _db.ProxyServers
-                    .AnyAsync(p => p.Id == request.ProxyId.Value && p.UserId == userId);
+            var proxyIds = request.ProxyIds.Distinct().ToList();
 
-                if (!proxyExists)
+            if (!IsAdmin() && proxyIds.Count == 0)
+                return BadRequest(new { message = "Proxy is required." });
+
+            if (proxyIds.Count > 0)
+            {
+                var ownedCount = await _db.ProxyServers
+                    .CountAsync(p => proxyIds.Contains(p.Id) && p.UserId == userId);
+                if (ownedCount != proxyIds.Count)
                     return BadRequest(new { message = "Invalid proxy selected." });
-
-                account.ProxyId = request.ProxyId.Value;
             }
+
+            _db.ExchangeAccountProxies.RemoveRange(account.AccountProxies);
+            _db.ExchangeAccountProxies.AddRange(proxyIds.Select((pid, idx) => new ExchangeAccountProxy
+            {
+                Id = Guid.NewGuid(),
+                AccountId = account.Id,
+                ProxyId = pid,
+                Priority = idx
+            }));
         }
 
         await _db.SaveChangesAsync();
@@ -188,36 +205,75 @@ public class AccountsController : ControllerBase
     public async Task<IActionResult> TestConnection(Guid id)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == id && a.UserId == GetUserId());
 
         if (account == null)
             return NotFound();
 
-        try
+        // For Dzengi accounts without a cached accountId, fetch and persist it before testing.
+        if (account.ExchangeType == ExchangeType.Dzengi && string.IsNullOrEmpty(account.DzengiAccountId))
         {
-            // For Dzengi accounts without a cached accountId, fetch and persist it before testing.
-            if (account.ExchangeType == ExchangeType.Dzengi && string.IsNullOrEmpty(account.DzengiAccountId))
-            {
-                await TryFetchDzengiAccountIdAsync(account);
-            }
+            try { await TryFetchDzengiAccountIdAsync(account); } catch { /* best-effort */ }
+        }
 
-            using var service = (IDisposable)_exchangeFactory.Create(account);
-            var exchangeService = (IExchangeService)service;
-            var (success, error) = await exchangeService.TestConnectionAsync();
-            return Ok(new { success, message = success ? "Connection successful" : $"Connection failed: {error}" });
-        }
-        catch (Exception ex)
+        // Try each proxy in failover order; the first that connects wins. A network failure
+        // (timeout / proxy down) rotates to the next proxy and is recorded in the health tracker.
+        var proxies = account.OrderedProxies.ToList();
+        var candidates = proxies.Count > 0 ? proxies.Select(p => (ProxyServer?)p).ToList() : new List<ProxyServer?> { null };
+        string? lastError = null;
+
+        foreach (var proxy in candidates)
         {
-            return Ok(new { success = false, message = ex.Message });
+            try
+            {
+                // Fast TCP precheck first so a dead proxy is skipped in ~1.5 s instead of
+                // hanging on the full exchange timeout (same mechanism the worker uses).
+                if (proxy != null && !await _proxyHealth.PrecheckAsync(proxy))
+                {
+                    lastError = $"proxy {proxy.Name} unreachable (timed out)";
+                    continue;
+                }
+
+                using var service = (IDisposable)_exchangeFactory.CreateWithProxy(account, proxy);
+                var exchangeService = (IExchangeService)service;
+                var (success, error) = await exchangeService.TestConnectionAsync();
+                if (success)
+                {
+                    if (proxy != null) _proxyHealth.ReportSuccess(proxy.Id);
+                    var via = proxy != null ? $" (via {proxy.Name})" : "";
+                    return Ok(new { success = true, message = $"Connection successful{via}" });
+                }
+                lastError = error;
+                if (proxy != null && IsNetworkError(error)) _proxyHealth.ReportFailure(proxy.Id);
+            }
+            catch (Exception ex)
+            {
+                lastError = ex.Message;
+                if (proxy != null) _proxyHealth.ReportFailure(proxy.Id);
+            }
         }
+
+        var prefix = proxies.Count > 1 ? $"All {proxies.Count} proxies failed" : "Connection failed";
+        return Ok(new { success = false, message = $"{prefix}: {lastError}" });
+    }
+
+    // Network-class failures (timeout / unreachable proxy) — these justify failover.
+    // Auth/signature/permission errors do NOT, so they must not rotate proxies.
+    private static bool IsNetworkError(string? error)
+    {
+        if (string.IsNullOrEmpty(error)) return false;
+        var e = error.ToLowerInvariant();
+        return e.Contains("timeout") || e.Contains("timed out") || e.Contains("webexception")
+            || e.Contains("connection") || e.Contains("unreachable") || e.Contains("refused")
+            || e.Contains("no such host") || e.Contains("proxy");
     }
 
     [HttpGet("{id:guid}/balance")]
     public async Task<IActionResult> GetBalance(Guid id)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == id && a.UserId == GetUserId());
 
         if (account == null)
@@ -251,7 +307,7 @@ public class AccountsController : ControllerBase
     public async Task<IActionResult> GetPositions(Guid id)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == id && a.UserId == GetUserId());
 
         if (account == null)
@@ -278,7 +334,7 @@ public class AccountsController : ControllerBase
     public async Task<IActionResult> ClosePosition(Guid id, [FromBody] ClosePositionRequest request)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == id && a.UserId == GetUserId());
 
         if (account == null)

@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
@@ -33,7 +33,7 @@ public class TesterController : ControllerBase
         [FromQuery] int limit = 200)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
 
         if (account == null)
@@ -60,7 +60,7 @@ public class TesterController : ControllerBase
     public async Task<IActionResult> Simulate([FromBody] SimulationRequest request)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == request.AccountId && a.UserId == GetUserId());
 
         if (account == null)

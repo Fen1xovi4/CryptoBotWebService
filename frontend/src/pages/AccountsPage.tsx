@@ -6,12 +6,17 @@ import Header from '../components/Layout/Header';
 import { useAuthStore } from '../stores/authStore';
 import { useSubscriptionStore } from '../stores/subscriptionStore';
 
+interface AccountProxy {
+  proxyId: string;
+  name: string;
+  priority: number;
+}
+
 interface ExchangeAccount {
   id: string;
   name: string;
   exchangeType: number;
-  proxyId: string | null;
-  proxyName: string | null;
+  proxies: AccountProxy[];
   isActive: boolean;
   createdAt: string;
 }
@@ -404,12 +409,25 @@ export default function AccountsPage() {
                     </td>
                     <td className="px-5 py-3 text-sm text-text-secondary">{exchangeNames[acc.exchangeType]}</td>
                     <td className="px-5 py-3 text-sm text-text-secondary">
-                      {acc.proxyName ? (
-                        <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-accent-blue/10 text-accent-blue">
-                          <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
-                          </svg>
-                          {acc.proxyName}
+                      {acc.proxies && acc.proxies.length > 0 ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span
+                            className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-accent-blue/10 text-accent-blue"
+                            title={[...acc.proxies].sort((a, b) => a.priority - b.priority).map((p, i) => `${i + 1}. ${p.name}`).join('\n')}
+                          >
+                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+                            </svg>
+                            {[...acc.proxies].sort((a, b) => a.priority - b.priority)[0].name}
+                          </span>
+                          {acc.proxies.length > 1 && (
+                            <span
+                              className="text-xs font-medium px-1.5 py-0.5 rounded-full bg-bg-tertiary text-text-secondary"
+                              title={`${acc.proxies.length - 1} fallback proxy(ies)`}
+                            >
+                              +{acc.proxies.length - 1}
+                            </span>
+                          )}
                         </span>
                       ) : (
                         <span className="text-text-secondary/50">—</span>
@@ -582,6 +600,80 @@ export default function AccountsPage() {
   );
 }
 
+// Ordered proxy list editor: add proxies from a dropdown, reorder with up/down, remove.
+// Order = failover priority (first = primary). No drag lib in the stack, so we use buttons.
+function ProxyListEditor({
+  value,
+  onChange,
+  options,
+}: {
+  value: string[];
+  onChange: (next: string[]) => void;
+  options: ProxyOption[];
+}) {
+  const byId = (id: string) => options.find((p) => p.id === id);
+  const available = options.filter((p) => !value.includes(p.id));
+
+  const add = (id: string) => {
+    if (id && !value.includes(id)) onChange([...value, id]);
+  };
+  const remove = (id: string) => onChange(value.filter((v) => v !== id));
+  const move = (idx: number, dir: -1 | 1) => {
+    const next = [...value];
+    const j = idx + dir;
+    if (j < 0 || j >= next.length) return;
+    [next[idx], next[j]] = [next[j], next[idx]];
+    onChange(next);
+  };
+
+  const selectClass = 'w-full bg-bg-primary border border-border rounded-lg px-4 py-2.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue/40 focus:border-accent-blue transition-all';
+
+  return (
+    <div className="space-y-2">
+      {value.length > 0 && (
+        <ul className="space-y-1.5">
+          {value.map((id, idx) => {
+            const p = byId(id);
+            return (
+              <li key={id} className="flex items-center gap-2 bg-bg-primary border border-border rounded-lg px-3 py-2">
+                <span className="text-xs font-semibold w-14 shrink-0 text-text-secondary">
+                  {idx === 0 ? 'Primary' : `#${idx + 1}`}
+                </span>
+                <span className="flex-1 text-sm truncate" title={p ? `${p.name} (${p.host}:${p.port})` : id}>
+                  {p ? `${p.name} (${p.host}:${p.port})` : 'Unknown proxy'}
+                </span>
+                <button type="button" onClick={() => move(idx, -1)} disabled={idx === 0}
+                  className="p-1 rounded hover:bg-bg-tertiary disabled:opacity-30" title="Move up">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" /></svg>
+                </button>
+                <button type="button" onClick={() => move(idx, 1)} disabled={idx === value.length - 1}
+                  className="p-1 rounded hover:bg-bg-tertiary disabled:opacity-30" title="Move down">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+                </button>
+                <button type="button" onClick={() => remove(id)}
+                  className="p-1 rounded hover:bg-accent-red/10 text-accent-red" title="Remove">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {available.length > 0 && (
+        <select value="" onChange={(e) => add(e.target.value)} className={selectClass}>
+          <option value="">{value.length === 0 ? 'Select primary proxy...' : 'Add fallback proxy...'}</option>
+          {available.map((p) => (
+            <option key={p.id} value={p.id}>{p.name} ({p.host}:{p.port})</option>
+          ))}
+        </select>
+      )}
+      {value.length > 1 && (
+        <p className="text-xs text-text-secondary">Failover order: if the primary can't connect, the next is used automatically.</p>
+      )}
+    </div>
+  );
+}
+
 function AddAccountModal({ onClose }: { onClose: () => void }) {
   const [form, setForm] = useState({
     name: '',
@@ -589,8 +681,8 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
     apiKey: '',
     apiSecret: '',
     passphrase: '',
-    proxyId: '',
   });
+  const [proxyIds, setProxyIds] = useState<string[]>([]);
   const [error, setError] = useState('');
   const queryClient = useQueryClient();
   const isAdmin = useAuthStore((s) => s.role === 'Admin');
@@ -605,7 +697,7 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
       api.post('/accounts', {
         ...form,
         passphrase: form.exchangeType === 2 ? form.passphrase : undefined,
-        proxyId: form.proxyId || undefined,
+        proxyIds,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts'] });
@@ -625,7 +717,7 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
 
   const activeProxies = proxies?.filter((p) => p.isActive) ?? [];
   const hasProxies = activeProxies.length > 0;
-  const proxyRequired = !isAdmin && !form.proxyId;
+  const proxyRequired = !isAdmin && proxyIds.length === 0;
 
   const inputClass = 'w-full bg-bg-primary border border-border rounded-lg px-4 py-2.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue/40 focus:border-accent-blue transition-all';
 
@@ -643,23 +735,15 @@ function AddAccountModal({ onClose }: { onClose: () => void }) {
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-text-primary mb-1.5">Proxy</label>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">
+              Proxies <span className="text-text-secondary font-normal">(in failover order)</span>
+            </label>
             {!hasProxies && !isAdmin ? (
               <div className="bg-accent-yellow/10 border border-accent-yellow/20 text-accent-yellow text-sm px-4 py-2.5 rounded-lg">
                 No proxies available. <Link to="/proxies" className="underline font-medium" onClick={onClose}>Add a proxy first</Link>
               </div>
             ) : (
-              <select
-                value={form.proxyId}
-                onChange={(e) => setForm({ ...form, proxyId: e.target.value })}
-                className={inputClass}
-              >
-                {isAdmin && <option value="">No proxy (admin)</option>}
-                {!isAdmin && <option value="">Select proxy...</option>}
-                {activeProxies.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name} ({p.host}:{p.port})</option>
-                ))}
-              </select>
+              <ProxyListEditor value={proxyIds} onChange={setProxyIds} options={activeProxies} />
             )}
           </div>
 
@@ -743,8 +827,10 @@ function EditAccountModal({ account, onClose }: { account: ExchangeAccount; onCl
     apiKey: '',
     apiSecret: '',
     passphrase: '',
-    proxyId: account.proxyId || '',
   });
+  const [proxyIds, setProxyIds] = useState<string[]>(
+    [...(account.proxies ?? [])].sort((a, b) => a.priority - b.priority).map((p) => p.proxyId)
+  );
   const [error, setError] = useState('');
   const queryClient = useQueryClient();
   const isAdmin = useAuthStore((s) => s.role === 'Admin');
@@ -756,25 +842,29 @@ function EditAccountModal({ account, onClose }: { account: ExchangeAccount; onCl
 
   const mutation = useMutation({
     mutationFn: () => {
-      const payload: Record<string, string | null | undefined> = { name: form.name };
+      const payload: Record<string, unknown> = { name: form.name };
       if (form.apiKey) payload.apiKey = form.apiKey;
       if (form.apiSecret) payload.apiSecret = form.apiSecret;
       if (account.exchangeType === 2 && form.passphrase) payload.passphrase = form.passphrase;
-      if (form.proxyId) {
-        payload.proxyId = form.proxyId;
-      } else if (isAdmin) {
-        payload.proxyId = '00000000-0000-0000-0000-000000000000';
-      }
+      payload.proxyIds = proxyIds; // always send the (re)ordered list
       return api.put(`/accounts/${account.id}`, payload);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts'] });
       onClose();
     },
-    onError: () => setError('Failed to update account'),
+    onError: (err: any) => setError(err?.response?.data?.message || 'Failed to update account'),
   });
 
   const activeProxies = proxies?.filter((p) => p.isActive) ?? [];
+  // Keep any proxy already assigned to the account visible even if it's now inactive.
+  const editorOptions = [
+    ...activeProxies,
+    ...(account.proxies ?? [])
+      .filter((ap) => !activeProxies.some((p) => p.id === ap.proxyId))
+      .map((ap) => ({ id: ap.proxyId, name: ap.name, host: '', port: 0, isActive: false } as ProxyOption)),
+  ];
+  const proxyRequired = !isAdmin && proxyIds.length === 0;
 
   const inputClass = 'w-full bg-bg-primary border border-border rounded-lg px-4 py-2.5 text-sm text-text-primary focus:outline-none focus:ring-2 focus:ring-accent-blue/40 focus:border-accent-blue transition-all';
 
@@ -792,18 +882,10 @@ function EditAccountModal({ account, onClose }: { account: ExchangeAccount; onCl
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-text-primary mb-1.5">Proxy</label>
-            <select
-              value={form.proxyId}
-              onChange={(e) => setForm({ ...form, proxyId: e.target.value })}
-              className={inputClass}
-            >
-              {isAdmin && <option value="">No proxy (admin)</option>}
-              {!isAdmin && !form.proxyId && <option value="">Select proxy...</option>}
-              {activeProxies.map((p) => (
-                <option key={p.id} value={p.id}>{p.name} ({p.host}:{p.port})</option>
-              ))}
-            </select>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">
+              Proxies <span className="text-text-secondary font-normal">(in failover order)</span>
+            </label>
+            <ProxyListEditor value={proxyIds} onChange={setProxyIds} options={editorOptions} />
           </div>
 
           <div>
@@ -835,7 +917,7 @@ function EditAccountModal({ account, onClose }: { account: ExchangeAccount; onCl
           </button>
           <button
             onClick={() => mutation.mutate()}
-            disabled={mutation.isPending || !form.name}
+            disabled={mutation.isPending || !form.name || proxyRequired}
             className="px-4 py-2 text-sm font-medium bg-accent-blue hover:bg-accent-blue/90 text-white rounded-lg transition-colors shadow-md shadow-accent-blue/20 disabled:opacity-50 disabled:shadow-none"
           >
             {mutation.isPending ? 'Saving...' : 'Save'}

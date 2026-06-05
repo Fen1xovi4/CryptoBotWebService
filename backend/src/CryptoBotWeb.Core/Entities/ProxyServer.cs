@@ -13,5 +13,5 @@ public class ProxyServer
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public User User { get; set; } = null!;
-    public ICollection<ExchangeAccount> ExchangeAccounts { get; set; } = new List<ExchangeAccount>();
+    public ICollection<ExchangeAccountProxy> AccountProxies { get; set; } = new List<ExchangeAccountProxy>();
 }
