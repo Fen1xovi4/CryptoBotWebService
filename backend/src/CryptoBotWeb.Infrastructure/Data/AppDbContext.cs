@@ -11,6 +11,7 @@ public class AppDbContext : DbContext
     public DbSet<User> Users => Set<User>();
     public DbSet<ExchangeAccount> ExchangeAccounts => Set<ExchangeAccount>();
     public DbSet<ProxyServer> ProxyServers => Set<ProxyServer>();
+    public DbSet<ExchangeAccountProxy> ExchangeAccountProxies => Set<ExchangeAccountProxy>();
     public DbSet<Strategy> Strategies => Set<Strategy>();
     public DbSet<Trade> Trades => Set<Trade>();
     public DbSet<Workspace> Workspaces => Set<Workspace>();
@@ -70,14 +71,28 @@ public class AppDbContext : DbContext
             e.Property(x => x.Name).HasMaxLength(100);
             e.Property(x => x.ExchangeType).HasConversion<short>();
             e.Property(x => x.DzengiAccountId).HasMaxLength(64);
+            e.Ignore(x => x.OrderedProxies); // computed convenience accessor, not a navigation
             e.HasOne(x => x.User)
                 .WithMany(u => u.ExchangeAccounts)
                 .HasForeignKey(x => x.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<ExchangeAccountProxy>(e =>
+        {
+            e.ToTable("exchange_account_proxies");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.HasOne(x => x.Account)
+                .WithMany(a => a.AccountProxies)
+                .HasForeignKey(x => x.AccountId)
+                .OnDelete(DeleteBehavior.Cascade);
             e.HasOne(x => x.Proxy)
-                .WithMany(p => p.ExchangeAccounts)
+                .WithMany(p => p.AccountProxies)
                 .HasForeignKey(x => x.ProxyId)
-                .OnDelete(DeleteBehavior.SetNull);
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.AccountId, x.ProxyId }).IsUnique();
+            e.HasIndex(x => x.AccountId);
         });
 
         modelBuilder.Entity<Strategy>(e =>

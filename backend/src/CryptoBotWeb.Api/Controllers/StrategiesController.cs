@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using System.Text.Json;
 using CryptoBotWeb.Core.Constants;
 using CryptoBotWeb.Core.DTOs;
@@ -289,7 +289,7 @@ public class StrategiesController : ControllerBase
         return Ok(strategy);
     }
 
-    // Analytic min-max optimizer for SmartGridHedge — used by the create-bot form to compute
+    // Analytic min-max optimizer for SmartGridHedge â€” used by the create-bot form to compute
     // a Q_hedge suggestion before submitting Create. The endpoint is anonymous to any specific
     // strategy (we don't need an id); it just runs the closed-form formula and returns coins.
     [HttpPost("smart-grid-hedge/optimize-hedge")]
@@ -364,7 +364,7 @@ public class StrategiesController : ControllerBase
         var userId = GetUserId();
 
         var strategy = await _db.Strategies
-            .Include(s => s.Account).ThenInclude(a => a.Proxy)
+            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .Include(s => s.Workspace)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == userId);
 
@@ -383,7 +383,7 @@ public class StrategiesController : ControllerBase
         }
 
         // Merge workspace config into strategy config at start time
-        // HuntingFunding has no workspace-level config — all config is per-bot, skip merge
+        // HuntingFunding has no workspace-level config â€” all config is per-bot, skip merge
         if (strategy.Workspace != null && strategy.Type != StrategyTypes.HuntingFunding)
         {
             var merged = MergeWorkspaceConfig(strategy.ConfigJson, strategy.Workspace.ConfigJson);
@@ -410,7 +410,7 @@ public class StrategiesController : ControllerBase
         else if (strategy.Type == StrategyTypes.GridFloat)
         {
             // GridFloat Start: preserve positional state (Batches, DcaOrders, anchor,
-            // static bound) when something is still live — Stop is a freeze, not a wipe.
+            // static bound) when something is still live â€” Stop is a freeze, not a wipe.
             // Then force SyncFromExchangeOnStartup on the next worker tick by clearing
             // StateInitialized. Sync will either drop state (if the position has been
             // closed manually in the meantime) or re-place missing TPs/DCAs against the
@@ -458,9 +458,9 @@ public class StrategiesController : ControllerBase
         else if (strategy.Type == StrategyTypes.SmartGridHedge)
         {
             // SmartGridHedge Start semantics:
-            //   - Empty state OR Phase == Closed → fresh cycle (preserve cumulative PnL +
+            //   - Empty state OR Phase == Closed â†’ fresh cycle (preserve cumulative PnL +
             //     CompletedCycles so the user sees a continuous history).
-            //   - Mid-cycle (Opening/Active/HardClosing with anything still open) → resume.
+            //   - Mid-cycle (Opening/Active/HardClosing with anything still open) â†’ resume.
             var prevSghState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
                 ? new SmartGridHedgeState()
                 : JsonSerializer.Deserialize<SmartGridHedgeState>(strategy.StateJson, jsonOpts) ?? new SmartGridHedgeState();
@@ -490,8 +490,8 @@ public class StrategiesController : ControllerBase
         else if (strategy.Type == StrategyTypes.GridHedge)
         {
             // GridHedge Start semantics:
-            //   - Empty state OR Phase == Done → fresh cycle (preserve cumulative cycle stats).
-            //   - Phase is mid-cycle (NotStarted/HedgeOpening/GridArming/Active/Exiting*) →
+            //   - Empty state OR Phase == Done â†’ fresh cycle (preserve cumulative cycle stats).
+            //   - Phase is mid-cycle (NotStarted/HedgeOpening/GridArming/Active/Exiting*) â†’
             //     keep state as-is so the handler resumes where it left off; just clear the
             //     transient placement-cooldown so retries fire on the next tick.
             var prevGhState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
@@ -581,7 +581,7 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> Stop(Guid id)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account).ThenInclude(a => a.Proxy)
+            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)
@@ -593,9 +593,9 @@ public class StrategiesController : ControllerBase
         return Ok(new { message = "Strategy stopped", status = strategy.Status.ToString() });
     }
 
-    // Pause: Running → Paused. Worker dispatch filters Status == Running so the handler tick
+    // Pause: Running â†’ Paused. Worker dispatch filters Status == Running so the handler tick
     // stops naturally; nothing is cancelled on the exchange (TP and DCA limits keep living).
-    // State (Batches, DcaOrders, AnchorPrice…) is left intact — critical difference vs Stop+Start
+    // State (Batches, DcaOrders, AnchorPriceâ€¦) is left intact â€” critical difference vs Stop+Start
     // which would have Start clear Batches/DcaOrders and then trip SyncFromExchangeOnStartup.
     [HttpPost("{id:guid}/pause")]
     public async Task<IActionResult> Pause(Guid id)
@@ -609,7 +609,7 @@ public class StrategiesController : ControllerBase
             return Ok(new { message = "Strategy already paused", status = strategy.Status.ToString() });
 
         if (strategy.Status != StrategyStatus.Running)
-            return BadRequest(new { message = "Можно ставить на паузу только запущенного бота." });
+            return BadRequest(new { message = "ĐśĐľĐ¶Đ˝Đľ ŃŃ‚Đ°Đ˛Đ¸Ń‚ŃŚ Đ˝Đ° ĐżĐ°ŃĐ·Ń Ń‚ĐľĐ»ŃŚĐşĐľ Đ·Đ°ĐżŃŃ‰ĐµĐ˝Đ˝ĐľĐłĐľ Đ±ĐľŃ‚Đ°." });
 
         strategy.Status = StrategyStatus.Paused;
         await _db.SaveChangesAsync();
@@ -617,7 +617,7 @@ public class StrategiesController : ControllerBase
         return Ok(new { message = "Strategy paused", status = strategy.Status.ToString() });
     }
 
-    // Resume: Paused → Running. Unlike Start, does NOT reset StateJson — the same grid
+    // Resume: Paused â†’ Running. Unlike Start, does NOT reset StateJson â€” the same grid
     // (batches + anchor + per-batch TPs) continues from where Pause stopped. On the next
     // handler tick, HealMissingDcas re-reads ConfigJson and places DCAs for any free slot
     // inside the (possibly widened) range; HealMissingTps does the same for TPs.
@@ -633,7 +633,7 @@ public class StrategiesController : ControllerBase
             return Ok(new { message = "Strategy already running", status = strategy.Status.ToString() });
 
         if (strategy.Status != StrategyStatus.Paused)
-            return BadRequest(new { message = "Возобновить можно только бота на паузе." });
+            return BadRequest(new { message = "Đ’ĐľĐ·ĐľĐ±Đ˝ĐľĐ˛Đ¸Ń‚ŃŚ ĐĽĐľĐ¶Đ˝Đľ Ń‚ĐľĐ»ŃŚĐşĐľ Đ±ĐľŃ‚Đ° Đ˝Đ° ĐżĐ°ŃĐ·Đµ." });
 
         strategy.Status = StrategyStatus.Running;
         await _db.SaveChangesAsync();
@@ -641,16 +641,16 @@ public class StrategiesController : ControllerBase
         return Ok(new { message = "Strategy resumed", status = strategy.Status.ToString() });
     }
 
-    // Live-tune GridFloat Tiers while paused. Only the tier list is mutable here —
+    // Live-tune GridFloat Tiers while paused. Only the tier list is mutable here â€”
     // changing Symbol/Direction/DcaStepPercent/Timeframe mid-grid would break the
-    // LevelIdx↔fillPrice correspondence of existing batches and is therefore disallowed
-    // (use Stop → Edit → Start for a fresh start with new params).
+    // LevelIdxâ†”fillPrice correspondence of existing batches and is therefore disallowed
+    // (use Stop â†’ Edit â†’ Start for a fresh start with new params).
     //
     // Widening the outermost tier (or appending new tiers) adds slots beyond the existing
-    // ones — HealMissingDcas places them on the next tick after Resume. Narrowing is allowed
+    // ones â€” HealMissingDcas places them on the next tick after Resume. Narrowing is allowed
     // too: existing batches outside the new range stay alive with their TPs, but no fresh
     // DCAs get placed past the new bound. Changing a tier's SizeUsdt only affects new fills
-    // — already-placed limits keep their original qty until they get cancelled/refilled.
+    // â€” already-placed limits keep their original qty until they get cancelled/refilled.
     //
     // Static-range bound is re-anchored on widening: when the new outermost tier's
     // UpToPercent exceeds the old one and the bot is in static mode with an initialized
@@ -667,38 +667,38 @@ public class StrategiesController : ControllerBase
         if (strategy == null) return NotFound();
 
         if (strategy.Type != StrategyTypes.GridFloat)
-            return BadRequest(new { message = "Эта операция доступна только для стратегий GridFloat." });
+            return BadRequest(new { message = "Đ­Ń‚Đ° ĐľĐżĐµŃ€Đ°Ń†Đ¸ŃŹ Đ´ĐľŃŃ‚ŃĐżĐ˝Đ° Ń‚ĐľĐ»ŃŚĐşĐľ Đ´Đ»ŃŹ ŃŃ‚Ń€Đ°Ń‚ĐµĐłĐ¸Đą GridFloat." });
 
         if (strategy.Status != StrategyStatus.Paused)
-            return BadRequest(new { message = "Бот должен быть на паузе для изменения параметров." });
+            return BadRequest(new { message = "Đ‘ĐľŃ‚ Đ´ĐľĐ»Đ¶ĐµĐ˝ Đ±Ń‹Ń‚ŃŚ Đ˝Đ° ĐżĐ°ŃĐ·Đµ Đ´Đ»ŃŹ Đ¸Đ·ĐĽĐµĐ˝ĐµĐ˝Đ¸ŃŹ ĐżĐ°Ń€Đ°ĐĽĐµŃ‚Ń€ĐľĐ˛." });
 
         if (request.Tiers == null || request.Tiers.Count == 0)
-            return BadRequest(new { message = "Должен быть хотя бы один ярус." });
+            return BadRequest(new { message = "Đ”ĐľĐ»Đ¶ĐµĐ˝ Đ±Ń‹Ń‚ŃŚ Ń…ĐľŃ‚ŃŹ Đ±Ń‹ ĐľĐ´Đ¸Đ˝ ŃŹŃ€ŃŃ." });
 
         if (request.Tiers.Any(t => t.UpToPercent <= 0 || t.SizeUsdt <= 0))
-            return BadRequest(new { message = "Каждый ярус: upToPercent > 0 и sizeUsdt > 0." });
+            return BadRequest(new { message = "ĐšĐ°Đ¶Đ´Ń‹Đą ŃŹŃ€ŃŃ: upToPercent > 0 Đ¸ sizeUsdt > 0." });
 
         if (request.Tiers.Any(t => t.DcaStepPercent is <= 0 || t.TpStepPercent is <= 0))
-            return BadRequest(new { message = "Если указан per-tier шаг DCA / TP, он должен быть > 0." });
+            return BadRequest(new { message = "Đ•ŃĐ»Đ¸ ŃĐşĐ°Đ·Đ°Đ˝ per-tier ŃĐ°Đł DCA / TP, ĐľĐ˝ Đ´ĐľĐ»Đ¶ĐµĐ˝ Đ±Ń‹Ń‚ŃŚ > 0." });
 
         var sorted = request.Tiers.OrderBy(t => t.UpToPercent).ToList();
         for (int i = 1; i < sorted.Count; i++)
         {
             if (sorted[i].UpToPercent <= sorted[i - 1].UpToPercent)
-                return BadRequest(new { message = "Ярусы должны иметь строго возрастающие upToPercent." });
+                return BadRequest(new { message = "ĐŻŃ€ŃŃŃ‹ Đ´ĐľĐ»Đ¶Đ˝Ń‹ Đ¸ĐĽĐµŃ‚ŃŚ ŃŃ‚Ń€ĐľĐłĐľ Đ˛ĐľĐ·Ń€Đ°ŃŃ‚Đ°ŃŽŃ‰Đ¸Đµ upToPercent." });
         }
 
         var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var config = JsonSerializer.Deserialize<GridFloatConfig>(strategy.ConfigJson, jsonOpts);
         if (config == null)
-            return BadRequest(new { message = "Не удалось прочитать ConfigJson стратегии." });
+            return BadRequest(new { message = "ĐťĐµ ŃĐ´Đ°Đ»ĐľŃŃŚ ĐżŃ€ĐľŃ‡Đ¸Ń‚Đ°Ń‚ŃŚ ConfigJson ŃŃ‚Ń€Đ°Ń‚ĐµĐłĐ¸Đ¸." });
 
         // Outermost tier must accommodate at least one DCA level at its own effective step
         // (per-tier override or global default).
         var outerStep = sorted[^1].DcaStepPercent is > 0 ? sorted[^1].DcaStepPercent!.Value : config.DcaStepPercent;
         var outerSpan = sorted[^1].UpToPercent - (sorted.Count > 1 ? sorted[^2].UpToPercent : 0m);
         if (outerSpan < outerStep)
-            return BadRequest(new { message = $"Внешний ярус ({outerSpan}% от предыдущей границы) должен быть ≥ его шага DCA ({outerStep}%)." });
+            return BadRequest(new { message = $"Đ’Đ˝ĐµŃĐ˝Đ¸Đą ŃŹŃ€ŃŃ ({outerSpan}% ĐľŃ‚ ĐżŃ€ĐµĐ´Ń‹Đ´ŃŃ‰ĐµĐą ĐłŃ€Đ°Đ˝Đ¸Ń†Ń‹) Đ´ĐľĐ»Đ¶ĐµĐ˝ Đ±Ń‹Ń‚ŃŚ â‰Ą ĐµĐłĐľ ŃĐ°ĐłĐ° DCA ({outerStep}%)." });
 
         // Compute old outer-tier extent before mutation so we can detect widening below.
         // Mirrors NormalizeTiers fallback: if Tiers is empty/null, use legacy RangePercent.
@@ -707,7 +707,7 @@ public class StrategiesController : ControllerBase
             : (config.RangePercent ?? 0m);
         var newMaxTierPct = sorted[^1].UpToPercent;
 
-        // Mutate only Tiers — everything else stays exactly as user configured it. Clear any
+        // Mutate only Tiers â€” everything else stays exactly as user configured it. Clear any
         // legacy single-tier fields so they can't shadow the new list on the next read.
         var configDict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(strategy.ConfigJson, jsonOpts)
                          ?? new Dictionary<string, JsonElement>();
@@ -719,7 +719,7 @@ public class StrategiesController : ControllerBase
         configDict.Remove("rangePercent");
         strategy.ConfigJson = JsonSerializer.Serialize(configDict);
 
-        // Re-anchor the static bound on widening. Skip narrowing — existing batches outside
+        // Re-anchor the static bound on widening. Skip narrowing â€” existing batches outside
         // the new outer tier stay alive (per the comment above) and a tighter bound would
         // never benefit them.
         bool boundRecomputed = false;
@@ -775,14 +775,14 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> Update(Guid id, [FromBody] UpdateStrategyRequest request)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account).ThenInclude(a => a.Proxy)
+            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)
             return NotFound();
 
         if (strategy.Status == StrategyStatus.Running || strategy.Status == StrategyStatus.Paused)
-            return BadRequest(new { message = "Нельзя редактировать запущенного бота или бота на паузе. Сначала остановите его." });
+            return BadRequest(new { message = "ĐťĐµĐ»ŃŚĐ·ŃŹ Ń€ĐµĐ´Đ°ĐşŃ‚Đ¸Ń€ĐľĐ˛Đ°Ń‚ŃŚ Đ·Đ°ĐżŃŃ‰ĐµĐ˝Đ˝ĐľĐłĐľ Đ±ĐľŃ‚Đ° Đ¸Đ»Đ¸ Đ±ĐľŃ‚Đ° Đ˝Đ° ĐżĐ°ŃĐ·Đµ. ĐˇĐ˝Đ°Ń‡Đ°Đ»Đ° ĐľŃŃ‚Đ°Đ˝ĐľĐ˛Đ¸Ń‚Đµ ĐµĐłĐľ." });
 
         strategy.Name = request.Name;
         strategy.ConfigJson = request.ConfigJson ?? strategy.ConfigJson;
@@ -811,10 +811,10 @@ public class StrategiesController : ControllerBase
         return Ok(new { message = "Telegram bot updated", telegramBotId = strategy.TelegramBotId });
     }
 
-    // Inline take-profit patch — safe to run while the bot is Active because TP fields only
+    // Inline take-profit patch â€” safe to run while the bot is Active because TP fields only
     // change the threshold checked by the worker each tick, never any open orders/positions.
     // JsonNode-based patching so any strategy whose Config DTO has takeProfitEnabled /
-    // takeProfitTargetUsd fields can use this endpoint (SmartGridHedge, GridFloat, …).
+    // takeProfitTargetUsd fields can use this endpoint (SmartGridHedge, GridFloat, â€¦).
     [HttpPatch("{id:guid}/take-profit")]
     public async Task<IActionResult> SetTakeProfit(Guid id, [FromBody] SetTakeProfitRequest request)
     {
@@ -848,14 +848,14 @@ public class StrategiesController : ControllerBase
     public async Task<IActionResult> ClosePosition(Guid id)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account).ThenInclude(a => a.Proxy)
+            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)
             return NotFound();
 
         if (string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}")
-            return BadRequest(new { message = "Нет открытой позиции" });
+            return BadRequest(new { message = "ĐťĐµŃ‚ ĐľŃ‚ĐşŃ€Ń‹Ń‚ĐľĐą ĐżĐľĐ·Đ¸Ń†Đ¸Đ¸" });
 
         var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var saveOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -866,7 +866,7 @@ public class StrategiesController : ControllerBase
 
             if (hfState == null ||
                 (hfState.Phase != HuntingFundingPhase.InPosition && hfState.Phase != HuntingFundingPhase.OrdersPlaced))
-                return BadRequest(new { message = "Нет открытой позиции" });
+                return BadRequest(new { message = "ĐťĐµŃ‚ ĐľŃ‚ĐşŃ€Ń‹Ń‚ĐľĐą ĐżĐľĐ·Đ¸Ń†Đ¸Đ¸" });
 
             var hfConfig = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, jsonOpts);
             var symbol = hfConfig?.Symbol ?? JsonSerializer.Deserialize<JsonElement>(strategy.ConfigJson).GetProperty("symbol").GetString()!;
@@ -899,13 +899,13 @@ public class StrategiesController : ControllerBase
             }
             else
             {
-                // No position found anywhere — just reset state
+                // No position found anywhere â€” just reset state
                 hfState.Phase = HuntingFundingPhase.Cooldown;
                 hfState.PlacedOrders = new List<PlacedOrderInfo>();
                 hfState.RemainingOrdersCancelled = true;
                 strategy.StateJson = JsonSerializer.Serialize(hfState, saveOpts);
                 await _db.SaveChangesAsync();
-                return Ok(new { message = "Позиция не найдена на бирже, ордера отменены, состояние сброшено" });
+                return Ok(new { message = "ĐźĐľĐ·Đ¸Ń†Đ¸ŃŹ Đ˝Đµ Đ˝Đ°ĐąĐ´ĐµĐ˝Đ° Đ˝Đ° Đ±Đ¸Ń€Đ¶Đµ, ĐľŃ€Đ´ĐµŃ€Đ° ĐľŃ‚ĐĽĐµĐ˝ĐµĐ˝Ń‹, ŃĐľŃŃ‚ĐľŃŹĐ˝Đ¸Đµ ŃĐ±Ń€ĐľŃĐµĐ˝Đľ" });
             }
 
             var currentPrice = await exchange.GetTickerPriceAsync(symbol);
@@ -956,7 +956,7 @@ public class StrategiesController : ControllerBase
                 Id = Guid.NewGuid(),
                 StrategyId = strategy.Id,
                 Level = "Info",
-                Message = $"{hfState.Direction?.ToUpper()} закрыт вручную (HuntingFunding): цена={Math.Round(closePrice, 6)}, вход={Math.Round(avgEntry, 6)}, qty={Math.Round(quantity, 6)}, PnL={Math.Round(pnlPercent, 4)}% (${Math.Round(netPnl, 2)})",
+                Message = $"{hfState.Direction?.ToUpper()} Đ·Đ°ĐşŃ€Ń‹Ń‚ Đ˛Ń€ŃŃ‡Đ˝ŃŃŽ (HuntingFunding): Ń†ĐµĐ˝Đ°={Math.Round(closePrice, 6)}, Đ˛Ń…ĐľĐ´={Math.Round(avgEntry, 6)}, qty={Math.Round(quantity, 6)}, PnL={Math.Round(pnlPercent, 4)}% (${Math.Round(netPnl, 2)})",
                 CreatedAt = DateTime.UtcNow
             });
 
@@ -977,7 +977,7 @@ public class StrategiesController : ControllerBase
             strategy.StateJson = JsonSerializer.Serialize(hfState, saveOpts);
             await _db.SaveChangesAsync();
 
-            return Ok(new { message = "Позиция закрыта по рынку", details = new[] { $"{closedDirection} closed: qty={Math.Round(quantity, 6)}, price={Math.Round(closePrice, 6)}, PnL=${Math.Round(netPnl, 2)}" } });
+            return Ok(new { message = "ĐźĐľĐ·Đ¸Ń†Đ¸ŃŹ Đ·Đ°ĐşŃ€Ń‹Ń‚Đ° ĐżĐľ Ń€Ń‹Đ˝ĐşŃ", details = new[] { $"{closedDirection} closed: qty={Math.Round(quantity, 6)}, price={Math.Round(closePrice, 6)}, PnL=${Math.Round(netPnl, 2)}" } });
         }
 
         // --- SmaDca path ---
@@ -985,11 +985,11 @@ public class StrategiesController : ControllerBase
         {
             var smaState = JsonSerializer.Deserialize<SmaDcaState>(strategy.StateJson, jsonOpts);
             if (smaState == null || !smaState.InPosition || smaState.TotalQuantity <= 0)
-                return BadRequest(new { message = "Нет открытой позиции" });
+                return BadRequest(new { message = "ĐťĐµŃ‚ ĐľŃ‚ĐşŃ€Ń‹Ń‚ĐľĐą ĐżĐľĐ·Đ¸Ń†Đ¸Đ¸" });
 
             var smaConfig = JsonSerializer.Deserialize<SmaDcaConfig>(strategy.ConfigJson, jsonOpts);
             if (smaConfig == null || string.IsNullOrEmpty(smaConfig.Symbol))
-                return BadRequest(new { message = "Некорректная конфигурация (symbol пуст)" });
+                return BadRequest(new { message = "ĐťĐµĐşĐľŃ€Ń€ĐµĐşŃ‚Đ˝Đ°ŃŹ ĐşĐľĐ˝Ń„Đ¸ĐłŃŃ€Đ°Ń†Đ¸ŃŹ (symbol ĐżŃŃŃ‚)" });
 
             using var smaExchange = _exchangeFactory.CreateFutures(strategy.Account);
 
@@ -1043,13 +1043,13 @@ public class StrategiesController : ControllerBase
                 Id = Guid.NewGuid(),
                 StrategyId = strategy.Id,
                 Level = "Info",
-                Message = $"{smaDirection.ToUpper()} закрыт вручную (SmaDca): цена={Math.Round(smaClosePrice, 6)}, " +
-                          $"вход={Math.Round(smaState.AverageEntryPrice, 6)}, qty={Math.Round(smaState.TotalQuantity, 6)}, " +
-                          $"PnL={Math.Round(smaPnlPct, 4)}% (${Math.Round(smaNetPnl, 2)}, комиссия≈${Math.Round(smaCommission, 4)})",
+                Message = $"{smaDirection.ToUpper()} Đ·Đ°ĐşŃ€Ń‹Ń‚ Đ˛Ń€ŃŃ‡Đ˝ŃŃŽ (SmaDca): Ń†ĐµĐ˝Đ°={Math.Round(smaClosePrice, 6)}, " +
+                          $"Đ˛Ń…ĐľĐ´={Math.Round(smaState.AverageEntryPrice, 6)}, qty={Math.Round(smaState.TotalQuantity, 6)}, " +
+                          $"PnL={Math.Round(smaPnlPct, 4)}% (${Math.Round(smaNetPnl, 2)}, ĐşĐľĐĽĐ¸ŃŃĐ¸ŃŹâ‰${Math.Round(smaCommission, 4)})",
                 CreatedAt = DateTime.UtcNow
             });
 
-            // Reset position state — mirrors SmaDcaHandler.ResetPositionState. SkipNextCandle prevents
+            // Reset position state â€” mirrors SmaDcaHandler.ResetPositionState. SkipNextCandle prevents
             // an instant re-entry on the same bar; StateInitialized is preserved so restart-sync
             // doesn't re-fire.
             var smaClosedQty = smaState.TotalQuantity;
@@ -1079,7 +1079,7 @@ public class StrategiesController : ControllerBase
 
             return Ok(new
             {
-                message = "Позиция закрыта по рынку",
+                message = "ĐźĐľĐ·Đ¸Ń†Đ¸ŃŹ Đ·Đ°ĐşŃ€Ń‹Ń‚Đ° ĐżĐľ Ń€Ń‹Đ˝ĐşŃ",
                 details = new[]
                 {
                     $"{smaDirection} closed: qty={Math.Round(smaClosedQty, 6)}, price={Math.Round(smaClosePrice, 6)}, PnL=${Math.Round(smaNetPnl, 2)}"
@@ -1095,9 +1095,9 @@ public class StrategiesController : ControllerBase
 
             var gfConfig = JsonSerializer.Deserialize<GridFloatConfig>(strategy.ConfigJson, jsonOpts);
             if (gfConfig == null || string.IsNullOrEmpty(gfConfig.Symbol))
-                return BadRequest(new { message = "Некорректная конфигурация (symbol пуст)" });
+                return BadRequest(new { message = "ĐťĐµĐşĐľŃ€Ń€ĐµĐşŃ‚Đ˝Đ°ŃŹ ĐşĐľĐ˝Ń„Đ¸ĐłŃŃ€Đ°Ń†Đ¸ŃŹ (symbol ĐżŃŃŃ‚)" });
 
-            // Direction comes from config (user intent) — state.IsLong defaults to false on a
+            // Direction comes from config (user intent) â€” state.IsLong defaults to false on a
             // wiped/never-opened state, which would otherwise misroute the close as Short.
             var gfDirection = gfConfig.Direction;
             var gfIsLong = gfDirection.Equals("Long", StringComparison.OrdinalIgnoreCase);
@@ -1109,7 +1109,7 @@ public class StrategiesController : ControllerBase
 
             // Use LIVE exchange position quantity, not state-tracked sum. State can drift from
             // reality (orphan DCA fills after a partial reconcile, Fix #6 dust on partial TPs,
-            // wiped state after the timestamp phantom-close bug) — closing state-qty would then
+            // wiped state after the timestamp phantom-close bug) â€” closing state-qty would then
             // leave the difference as untracked dust on the exchange. Falling back to state-qty
             // only if the live lookup fails entirely.
             PositionDto? gfLivePos = null;
@@ -1121,7 +1121,7 @@ public class StrategiesController : ControllerBase
                     Id = Guid.NewGuid(),
                     StrategyId = strategy.Id,
                     Level = "Warning",
-                    Message = $"Manual close: GetPositionAsync failed ({ex.Message}) — fallback на state-qty",
+                    Message = $"Manual close: GetPositionAsync failed ({ex.Message}) â€” fallback Đ˝Đ° state-qty",
                     CreatedAt = DateTime.UtcNow
                 });
             }
@@ -1132,9 +1132,9 @@ public class StrategiesController : ControllerBase
             var totalQty = gfLivePos != null && gfLivePos.Quantity > 0 ? gfLivePos.Quantity : gfStateQty;
 
             if (totalQty <= 0)
-                return BadRequest(new { message = "Нет открытой позиции ни в state, ни на бирже" });
+                return BadRequest(new { message = "ĐťĐµŃ‚ ĐľŃ‚ĐşŃ€Ń‹Ń‚ĐľĐą ĐżĐľĐ·Đ¸Ń†Đ¸Đ¸ Đ˝Đ¸ Đ˛ state, Đ˝Đ¸ Đ˝Đ° Đ±Đ¸Ń€Đ¶Đµ" });
 
-            // avgEntry — prefer state batches (multiple fill prices give a proper VWAP); fall
+            // avgEntry â€” prefer state batches (multiple fill prices give a proper VWAP); fall
             // back to exchange's reported entry price when state is wiped.
             var avgEntry = gfStateQty > 0 ? gfStateCost / gfStateQty
                          : gfLivePos != null ? gfLivePos.EntryPrice
@@ -1155,7 +1155,7 @@ public class StrategiesController : ControllerBase
                 gfCloseSide = "Buy";
             }
 
-            // Second cancel-all AFTER the market close — catches the race where a DCA limit
+            // Second cancel-all AFTER the market close â€” catches the race where a DCA limit
             // we just-cancelled actually filled in the few hundred ms between cancel and
             // close (Bybit doesn't strictly serialise cancel-then-market on the same symbol).
             // Without this, that fill would sit as a fresh tiny position with no state.
@@ -1193,14 +1193,14 @@ public class StrategiesController : ControllerBase
                 Id = Guid.NewGuid(),
                 StrategyId = strategy.Id,
                 Level = "Info",
-                Message = $"{gfDirection.ToUpper()} закрыт вручную (GridFloat): " +
-                          $"qty={Math.Round(totalQty, 6)} (источник={qtySource}) @ {Math.Round(gfClosePrice, 6)}, " +
-                          $"avg={Math.Round(avgEntry, 6)}, батчей={gfStateBatches.Count}, " +
-                          $"PnL={Math.Round(gfPnlPct, 4)}% (${Math.Round(gfNetPnl, 2)}, комиссия≈${Math.Round(gfCommission, 4)})",
+                Message = $"{gfDirection.ToUpper()} Đ·Đ°ĐşŃ€Ń‹Ń‚ Đ˛Ń€ŃŃ‡Đ˝ŃŃŽ (GridFloat): " +
+                          $"qty={Math.Round(totalQty, 6)} (Đ¸ŃŃ‚ĐľŃ‡Đ˝Đ¸Đş={qtySource}) @ {Math.Round(gfClosePrice, 6)}, " +
+                          $"avg={Math.Round(avgEntry, 6)}, Đ±Đ°Ń‚Ń‡ĐµĐą={gfStateBatches.Count}, " +
+                          $"PnL={Math.Round(gfPnlPct, 4)}% (${Math.Round(gfNetPnl, 2)}, ĐşĐľĐĽĐ¸ŃŃĐ¸ŃŹâ‰${Math.Round(gfCommission, 4)})",
                 CreatedAt = DateTime.UtcNow
             });
 
-            // Reset position state — mirrors GridFloatHandler.OnFullClose.
+            // Reset position state â€” mirrors GridFloatHandler.OnFullClose.
             gfState.RealizedPnlDollar += gfNetPnl;
             gfState.Batches ??= new List<GridFloatBatch>();
             gfState.DcaOrders ??= new List<GridFloatDcaOrder>();
@@ -1209,7 +1209,7 @@ public class StrategiesController : ControllerBase
             gfState.AnchorPrice = 0;
             gfState.OpenAfterTime = DateTime.UtcNow;
             gfState.PlacementCooldownUntil = null;
-            // Arm orphan-cancel retry — ProcessAsync will keep verifying the order book is
+            // Arm orphan-cancel retry â€” ProcessAsync will keep verifying the order book is
             // clean across the next ticks (defends against the race where a DCA fills between
             // our two CancelAllOrdersAsync calls).
             gfState.OrphanCancelPendingUntil = DateTime.UtcNow.AddMinutes(30);
@@ -1219,7 +1219,7 @@ public class StrategiesController : ControllerBase
 
             return Ok(new
             {
-                message = "Позиция закрыта по рынку",
+                message = "ĐźĐľĐ·Đ¸Ń†Đ¸ŃŹ Đ·Đ°ĐşŃ€Ń‹Ń‚Đ° ĐżĐľ Ń€Ń‹Đ˝ĐşŃ",
                 details = new[]
                 {
                     $"{gfDirection} closed: qty={Math.Round(totalQty, 6)} ({qtySource}), price={Math.Round(gfClosePrice, 6)}, PnL=${Math.Round(gfNetPnl, 2)}"
@@ -1241,7 +1241,7 @@ public class StrategiesController : ControllerBase
                 message = ghResult.Message,
                 details = new[]
                 {
-                    $"GridHedge closed: батчей={ghResult.ClosedBatches}, " +
+                    $"GridHedge closed: Đ±Đ°Ń‚Ń‡ĐµĐą={ghResult.ClosedBatches}, " +
                     $"pendingBuys={ghResult.CancelledPendings}, hedgeQty={ghResult.HedgeClosedQty}"
                 }
             });
@@ -1271,7 +1271,7 @@ public class StrategiesController : ControllerBase
         var state = JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, jsonOpts);
 
         if (state == null || (state.OpenLong == null && state.OpenShort == null))
-            return BadRequest(new { message = "Нет открытой позиции" });
+            return BadRequest(new { message = "ĐťĐµŃ‚ ĐľŃ‚ĐşŃ€Ń‹Ń‚ĐľĐą ĐżĐľĐ·Đ¸Ń†Đ¸Đ¸" });
 
         var emaConfig = JsonSerializer.Deserialize<EmaBounceConfig>(strategy.ConfigJson, jsonOpts);
         var configEl = JsonSerializer.Deserialize<JsonElement>(strategy.ConfigJson);
@@ -1327,7 +1327,7 @@ public class StrategiesController : ControllerBase
                 Id = Guid.NewGuid(),
                 StrategyId = strategy.Id,
                 Level = "Info",
-                Message = $"LONG закрыт вручную: цена={closePrice}, вход={position.EntryPrice}, PnL={Math.Round(pnlPercent, 4)}% (${Math.Round(netPnl, 2)})",
+                Message = $"LONG Đ·Đ°ĐşŃ€Ń‹Ń‚ Đ˛Ń€ŃŃ‡Đ˝ŃŃŽ: Ń†ĐµĐ˝Đ°={closePrice}, Đ˛Ń…ĐľĐ´={position.EntryPrice}, PnL={Math.Round(pnlPercent, 4)}% (${Math.Round(netPnl, 2)})",
                 CreatedAt = DateTime.UtcNow
             });
 
@@ -1381,7 +1381,7 @@ public class StrategiesController : ControllerBase
                 Id = Guid.NewGuid(),
                 StrategyId = strategy.Id,
                 Level = "Info",
-                Message = $"SHORT закрыт вручную: цена={closePrice}, вход={position.EntryPrice}, PnL={Math.Round(pnlPercent, 4)}% (${Math.Round(netPnl, 2)})",
+                Message = $"SHORT Đ·Đ°ĐşŃ€Ń‹Ń‚ Đ˛Ń€ŃŃ‡Đ˝ŃŃŽ: Ń†ĐµĐ˝Đ°={closePrice}, Đ˛Ń…ĐľĐ´={position.EntryPrice}, PnL={Math.Round(pnlPercent, 4)}% (${Math.Round(netPnl, 2)})",
                 CreatedAt = DateTime.UtcNow
             });
 
@@ -1399,40 +1399,40 @@ public class StrategiesController : ControllerBase
         strategy.StateJson = JsonSerializer.Serialize(state, saveOpts);
         await _db.SaveChangesAsync();
 
-        return Ok(new { message = "Позиция закрыта по рынку", details = results });
+        return Ok(new { message = "ĐźĐľĐ·Đ¸Ń†Đ¸ŃŹ Đ·Đ°ĐşŃ€Ń‹Ń‚Đ° ĐżĐľ Ń€Ń‹Đ˝ĐşŃ", details = results });
     }
 
     [HttpPost("{id:guid}/reset-losses")]
     public async Task<IActionResult> ResetLosses(Guid id)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account).ThenInclude(a => a.Proxy)
+            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)
             return NotFound();
 
         if (string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}")
-            return Ok(new { message = "Нечего сбрасывать", consecutiveLosses = 0 });
+            return Ok(new { message = "ĐťĐµŃ‡ĐµĐłĐľ ŃĐ±Ń€Đ°ŃŃ‹Đ˛Đ°Ń‚ŃŚ", consecutiveLosses = 0 });
 
         var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var state = JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, jsonOpts);
 
         if (state == null)
-            return Ok(new { message = "Нечего сбрасывать", consecutiveLosses = 0 });
+            return Ok(new { message = "ĐťĐµŃ‡ĐµĐłĐľ ŃĐ±Ń€Đ°ŃŃ‹Đ˛Đ°Ń‚ŃŚ", consecutiveLosses = 0 });
 
         state.ConsecutiveLosses = 0;
         strategy.StateJson = JsonSerializer.Serialize(state, jsonOpts);
         await _db.SaveChangesAsync();
 
-        return Ok(new { message = "Убытки сброшены", consecutiveLosses = 0 });
+        return Ok(new { message = "ĐŁĐ±Ń‹Ń‚ĐşĐ¸ ŃĐ±Ń€ĐľŃĐµĐ˝Ń‹", consecutiveLosses = 0 });
     }
 
     [HttpGet("{id:guid}/chart")]
     public async Task<IActionResult> GetChart(Guid id, [FromQuery] int limit = 300)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account).ThenInclude(a => a.Proxy)
+            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null) return NotFound();
@@ -1519,14 +1519,14 @@ public class StrategiesController : ControllerBase
             .Where(l => l.StrategyId == id)
             .ExecuteDeleteAsync();
 
-        return Ok(new { message = $"Удалено {count} записей" });
+        return Ok(new { message = $"ĐŁĐ´Đ°Đ»ĐµĐ˝Đľ {count} Đ·Đ°ĐżĐ¸ŃĐµĐą" });
     }
 
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {
         var strategy = await _db.Strategies
-            .Include(s => s.Account).ThenInclude(a => a.Proxy)
+            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)

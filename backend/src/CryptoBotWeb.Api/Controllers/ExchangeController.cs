@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
@@ -28,7 +28,7 @@ public class ExchangeController : ControllerBase
     public async Task<ActionResult<AccountBalanceResponse>> GetBalances(Guid accountId)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
 
         if (account == null)
@@ -58,7 +58,7 @@ public class ExchangeController : ControllerBase
     public async Task<ActionResult<List<SymbolDto>>> GetSymbols(Guid accountId)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
 
         if (account == null)
@@ -80,13 +80,13 @@ public class ExchangeController : ControllerBase
     /// Probes whether the account is configured in hedge mode for the given symbol.
     /// Used by the Grid Hedge bot card to warn the user if they picked PositionMode=Hedge
     /// but the exchange account is still in one-way mode (orders would otherwise fail).
-    /// Bybit-only in V1 — other exchanges return supported=false.
+    /// Bybit-only in V1 â€” other exchanges return supported=false.
     /// </summary>
     [HttpGet("{accountId:guid}/position-mode")]
     public async Task<IActionResult> GetPositionMode(Guid accountId, [FromQuery] string symbol)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
 
         if (account == null)
@@ -96,7 +96,7 @@ public class ExchangeController : ControllerBase
         {
             using var service = _exchangeFactory.CreateFutures(account);
             if (!service.IsHedgeModeSupported)
-                return Ok(new { supported = false, hedgeMode = (bool?)null, message = "Hedge mode не поддерживается этой биржей." });
+                return Ok(new { supported = false, hedgeMode = (bool?)null, message = "Hedge mode Đ˝Đµ ĐżĐľĐ´Đ´ĐµŃ€Đ¶Đ¸Đ˛Đ°ĐµŃ‚ŃŃŹ ŃŤŃ‚ĐľĐą Đ±Đ¸Ń€Đ¶ĐµĐą." });
 
             var hedge = await service.IsHedgeModeEnabledAsync(symbol);
             return Ok(new
@@ -105,9 +105,9 @@ public class ExchangeController : ControllerBase
                 hedgeMode = hedge,
                 message = hedge switch
                 {
-                    true => $"Аккаунт в Hedge Mode для {symbol}.",
-                    false => $"Аккаунт в One-Way режиме для {symbol}. Переключите на бирже в Hedge Mode.",
-                    null => $"Не удалось определить режим для {symbol} (нет позиций или сбой запроса)."
+                    true => $"ĐĐşĐşĐ°ŃĐ˝Ń‚ Đ˛ Hedge Mode Đ´Đ»ŃŹ {symbol}.",
+                    false => $"ĐĐşĐşĐ°ŃĐ˝Ń‚ Đ˛ One-Way Ń€ĐµĐ¶Đ¸ĐĽĐµ Đ´Đ»ŃŹ {symbol}. ĐźĐµŃ€ĐµĐşĐ»ŃŽŃ‡Đ¸Ń‚Đµ Đ˝Đ° Đ±Đ¸Ń€Đ¶Đµ Đ˛ Hedge Mode.",
+                    null => $"ĐťĐµ ŃĐ´Đ°Đ»ĐľŃŃŚ ĐľĐżŃ€ĐµĐ´ĐµĐ»Đ¸Ń‚ŃŚ Ń€ĐµĐ¶Đ¸ĐĽ Đ´Đ»ŃŹ {symbol} (Đ˝ĐµŃ‚ ĐżĐľĐ·Đ¸Ń†Đ¸Đą Đ¸Đ»Đ¸ ŃĐ±ĐľĐą Đ·Đ°ĐżŃ€ĐľŃĐ°)."
                 }
             });
         }
@@ -121,7 +121,7 @@ public class ExchangeController : ControllerBase
     public async Task<IActionResult> GetTicker(Guid accountId, [FromQuery] string symbol)
     {
         var account = await _db.ExchangeAccounts
-            .Include(a => a.Proxy)
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
 
         if (account == null)

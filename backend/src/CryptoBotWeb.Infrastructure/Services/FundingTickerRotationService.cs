@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using CryptoBotWeb.Core.Constants;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Entities;
@@ -40,7 +40,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
         // 1. Load all funding-based strategies with workspace + account
         var fundingTypes = new[] { StrategyTypes.HuntingFunding, StrategyTypes.FundingClaim };
         var allStrategies = await _db.Strategies
-            .Include(s => s.Account).ThenInclude(a => a.Proxy)
+            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .Include(s => s.Workspace)
             .Where(s => fundingTypes.Contains(s.Type) && s.WorkspaceId != null)
             .ToListAsync(ct);
@@ -261,7 +261,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
                         Id = Guid.NewGuid(),
                         StrategyId = strategy.Id,
                         Level = "Info",
-                        Message = $"Ticker rotated: {oldSymbol} → {picked.Symbol} (funding {picked.Rate:P4}, range {minPct}–{maxPct}%)",
+                        Message = $"Ticker rotated: {oldSymbol} â†’ {picked.Symbol} (funding {picked.Rate:P4}, range {minPct}â€“{maxPct}%)",
                         CreatedAt = DateTime.UtcNow
                     });
                     updatedCount++;
@@ -280,7 +280,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
             }
         }
 
-        // Always flush — pre-arm may touch StateJson / add StrategyLogs even when no
+        // Always flush â€” pre-arm may touch StateJson / add StrategyLogs even when no
         // ticker changed hands.
         await _db.SaveChangesAsync(ct);
         _logger.LogInformation("Ticker rotation completed: {Count} strategies with ticker changes", updatedCount);
@@ -299,7 +299,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
         // Atomic JSON patch with phase-guard in WHERE. The previous version mutated
         // `strategy.StateJson` from a snapshot loaded seconds earlier at the top of
         // RotateTickersAsync, and a parallel worker tick could save Phase=OrdersPlaced
-        // (with PlacedOrders) in between — which the subsequent SaveChangesAsync here
+        // (with PlacedOrders) in between â€” which the subsequent SaveChangesAsync here
         // would silently overwrite, dropping the placed orders. That left orphan
         // positions on the exchange when one of the lost limits later filled.
         // jsonb_set only touches the three fields PreArm owns; the WHERE clause
@@ -338,7 +338,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
             return;
 
         // Log only after a successful arm. Read existing NextFundingTime from the
-        // in-memory snapshot purely for display — slightly stale is fine for a log.
+        // in-memory snapshot purely for display â€” slightly stale is fine for a log.
         DateTime? existingNextFunding = null;
         try
         {
@@ -462,7 +462,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
         try
         {
-            // Both configs have Symbol as the first field — use a shared approach
+            // Both configs have Symbol as the first field â€” use a shared approach
             using var doc = JsonDocument.Parse(strategy.ConfigJson);
             if (doc.RootElement.TryGetProperty("symbol", out var symbolProp))
                 return symbolProp.GetString() ?? string.Empty;
