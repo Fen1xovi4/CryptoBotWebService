@@ -11,6 +11,21 @@ public class GridFloatBatch
     public decimal TpPrice { get; set; }
     public string? TpOrderId { get; set; }
     public DateTime FilledAt { get; set; }
+
+    // Fix #10: per-batch TP placement backoff. On any PlaceBatchTpLimit failure the count is
+    // incremented and TpRetryAfter is pushed to UtcNow + exponential backoff (capped 30 min);
+    // HealMissingTps skips a batch whose TpRetryAfter is still in the future. On a successful
+    // placement both reset (TpFailCount=0, TpRetryAfter=null). Stops the 5-second
+    // "orderQty will be truncated to zero" retry flood from phantom batches.
+    public int TpFailCount { get; set; }
+    public DateTime? TpRetryAfter { get; set; }
+
+    // Fix #10: no-headroom confirmation counter. Incremented each heal pass on which the live
+    // exchange position has NO room left to back this batch's reduce-only TP (headroom < minQty).
+    // The batch is only written off as a phantom after this reaches 2 consecutive confirmations,
+    // so a single transient GetPositionAsync glitch can't delete a real batch. Reset to 0 the
+    // moment the batch gets any headroom (full or trimmed placement).
+    public int NoHeadroomConfirmations { get; set; }
 }
 
 // A live DCA limit waiting on the book at the slot's grid level.
@@ -99,4 +114,14 @@ public class GridFloatState
     // arise outside the Fix #8 path linger forever and chronically fail TP re-placement
     // with "orderQty will be truncated to zero" on Bybit.
     public DateTime? PhantomNegativeDeltaSince { get; set; }
+
+    // Fix #10 (orphan-desync recovery): timestamp of the last one-shot TP resync fired by
+    // HealMissingTps. When the exchange book holds more resting reduce-only (close-side) qty
+    // than state can account for via tracked TpOrderIds (lost-ID orphans — the order keeps
+    // resting while state's TpOrderId went null), HealMissingTps cancels ALL orders and
+    // re-places every batch's TP from a clean book. This field throttles that recovery to at
+    // most once per ~2 minutes so a persistent book/state mismatch can't thrash cancel-all
+    // every heal tick. Null until the first resync. Serialized camelCase (lastTpResyncAt) by
+    // the global PropertyNamingPolicy.
+    public DateTime? LastTpResyncAt { get; set; }
 }
