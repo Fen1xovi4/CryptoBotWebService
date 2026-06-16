@@ -498,29 +498,49 @@ public class GridFloatHandler : IStrategyHandler
             if (result.Success && !string.IsNullOrEmpty(result.OrderId))
             {
                 batch.TpOrderId = result.OrderId;
+                // Fix #10: recovered batch — clear backoff so it's no longer skipped by HealMissingTps.
+                batch.TpFailCount = 0;
+                batch.TpRetryAfter = null;
                 Log(strategy, "Info",
                     $"🎯 TP батча #{batch.LevelIdx}: {closeSide} {batch.Qty} @ {Math.Round(batch.TpPrice, 8)} (id={result.OrderId})");
                 return;
             }
 
             batch.TpOrderId = null;
+            ApplyTpBackoff(batch);
             Log(strategy, "Error",
-                $"TP батча #{batch.LevelIdx} не выставлен: {result.ErrorMessage}");
+                $"TP батча #{batch.LevelIdx} не выставлен: {result.ErrorMessage} " +
+                $"(Fix #10 backoff: попытка #{batch.TpFailCount}, повтор после {batch.TpRetryAfter:HH:mm:ss})");
             _logger.LogError("Strategy {Id}: TP batch #{Lvl} placement failed: {Error}",
                 strategy.Id, batch.LevelIdx, result.ErrorMessage);
         }
         catch (NotSupportedException)
         {
             batch.TpOrderId = null;
+            ApplyTpBackoff(batch);
             Log(strategy, "Warning",
                 "Биржа не поддерживает PlaceLimitOrderAsync — TP не выставится");
         }
         catch (Exception ex)
         {
             batch.TpOrderId = null;
+            ApplyTpBackoff(batch);
             _logger.LogError(ex, "Strategy {Id}: TP batch #{Lvl} placement threw", strategy.Id, batch.LevelIdx);
-            Log(strategy, "Error", $"TP батча #{batch.LevelIdx} исключение: {ex.Message}");
+            Log(strategy, "Error",
+                $"TP батча #{batch.LevelIdx} исключение: {ex.Message} " +
+                $"(Fix #10 backoff: попытка #{batch.TpFailCount}, повтор после {batch.TpRetryAfter:HH:mm:ss})");
         }
+    }
+
+    // Fix #10: exponential per-batch TP backoff, capped at 30 minutes. After the Nth consecutive
+    // failure the next retry is delayed by min(2^(N-1), 30) minutes. HealMissingTps honours
+    // batch.TpRetryAfter so a phantom batch can no longer hammer the exchange every 5 seconds with
+    // "orderQty will be truncated to zero". Reset on the first successful placement.
+    private static void ApplyTpBackoff(GridFloatBatch batch)
+    {
+        batch.TpFailCount++;
+        var minutes = Math.Min(Math.Pow(2, batch.TpFailCount - 1), 30);
+        batch.TpRetryAfter = DateTime.UtcNow.AddMinutes(minutes);
     }
 
     // ────────────────────────── Fill detection ──────────────────────────
@@ -965,6 +985,11 @@ public class GridFloatHandler : IStrategyHandler
 
         if (qtyDelta > stateQty * 0.01m)
         {
+            // NOTE (Fix #10): the position-headroom guard in HealMissingTps is now the PRIMARY
+            // mechanism for dropping phantom batches (deterministic, driven by the live
+            // GetPositionAsync reading, ≥2 confirmations). This time-based Fix #9 path is kept as
+            // a harmless fallback for the reconcile flow; it may fire redundantly.
+            //
             // Fix #9: time-based phantom-batch drop. The "Возможно ручное частичное закрытие
             // извне" path fires whenever state > exchange and no batch TP was on the right side
             // of price (so the foreach above couldn't close anything). On the FIRST observation
@@ -1381,18 +1406,256 @@ public class GridFloatHandler : IStrategyHandler
     private async Task HealMissingTps(Strategy strategy, GridFloatConfig config, GridFloatState state,
         IFuturesExchangeService exchange)
     {
-        // Snapshot — PlaceBatchTpLimit may drop sub-min legacy batches from state.Batches,
-        // which would otherwise corrupt the foreach iterator (Fix #5 cleanup path).
+        // Snapshot — PlaceBatchTpLimit / the Fix #10 phantom write-off may drop batches from
+        // state.Batches, which would otherwise corrupt the foreach iterator (Fix #5 cleanup path).
         var snapshot = state.Batches.ToList();
-        var placed = 0;
-        foreach (var batch in snapshot)
+
+        // Only batches that need a (re)placement AND whose Fix #10 backoff window has elapsed.
+        var now = DateTime.UtcNow;
+        var needTp = snapshot
+            .Where(b => string.IsNullOrEmpty(b.TpOrderId)
+                        && (b.TpRetryAfter == null || b.TpRetryAfter.Value <= now))
+            .ToList();
+        if (needTp.Count == 0) return;
+
+        // ── Fix #10: position-headroom guard ─────────────────────────────────────────────
+        // The LIVE exchange position is authoritative for how much reduce-only TP can rest on
+        // the book. Sum of all batch reduce-only orders must not exceed the live position, or
+        // Bybit auto-reduces / rejects the surplus with "orderQty will be truncated to zero"
+        // every tick forever (phantom batches: state qty > exchange qty after missed/partial
+        // fills, restart adoption, false-flat reconciles). We fetch the position ONCE per pass.
+        //
+        // Fix #10 is now the PRIMARY mechanism for dropping phantom batches; Fix #9 (time-based,
+        // in ReconcileMissedTpFills) remains as a harmless fallback.
+        decimal livePos;
+        decimal qtyStep, minQty;
+        try
         {
-            if (string.IsNullOrEmpty(batch.TpOrderId))
+            var pos = await exchange.GetPositionAsync(config.Symbol, config.Direction);
+            livePos = pos?.Quantity ?? 0m;
+        }
+        catch (NotSupportedException)
+        {
+            // Exchange can't report positions — fall back to the legacy per-batch behaviour
+            // (each batch validated in isolation by PlaceBatchTpLimit). Don't break it.
+            await HealMissingTpsFallback(strategy, config, state, exchange, needTp);
+            return;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat HealMissingTps: GetPositionAsync failed for {Symbol} — fallback", config.Symbol);
+            await HealMissingTpsFallback(strategy, config, state, exchange, needTp);
+            return;
+        }
+
+        try { (qtyStep, minQty) = await exchange.GetSymbolInfoAsync(config.Symbol); }
+        catch (NotSupportedException) { (qtyStep, minQty) = (0m, 0m); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat HealMissingTps: GetSymbolInfoAsync failed for {Symbol}", config.Symbol);
+            (qtyStep, minQty) = (0m, 0m);
+        }
+
+        // ── Fix #10 (orphan-desync recovery): base headroom on the ACTUAL exchange book ──────
+        // STATE MEMORY under-counts committed reduce-only when an order keeps resting on the
+        // book but its TpOrderId went null in state ("lost-ID orphan"). The old
+        //   committed = Σ batch.Qty where TpOrderId != null
+        // then over-estimated headroom and re-placed TPs the exchange rejects forever with
+        // "orderQty will be truncated to zero" (position already fully subscribed by orphans).
+        //
+        // Production evidence (Bybit DRIFTUSDT Long): 13 batches summing 56163, only 6 tracked
+        // (30993), livePos≈56163. State-memory headroom looked like 25170 so the 7 null batches
+        // re-placed every tick and every placement was rejected — but those 7 are REAL position
+        // protected by orphaned (lost-ID) resting TPs, not phantoms. We must NOT write them off.
+        //
+        // So we query the real book once and treat resting close-side qty as authoritative.
+        // closeSide is the reduce-only TP side: Sell for Long, Buy for Short (DCA limits rest on
+        // the OPEN side — Buy for Long / Sell for Short — so this cleanly isolates resting TPs).
+        var closeSide = state.IsLong ? "Sell" : "Buy";
+
+        // Qty the *tracked* (non-null TpOrderId) batches account for. Used only to detect
+        // orphans (book has more resting close-side than state can see).
+        var trackedResting = state.Batches.Where(b => !string.IsNullOrEmpty(b.TpOrderId)).Sum(b => b.Qty);
+
+        decimal committed;
+        try
+        {
+            var open = await exchange.GetOpenOrdersAsync(config.Symbol);
+            // Remaining (unfilled) reduce-only qty actually resting on the book.
+            var restingClose = open
+                .Where(o => string.Equals(o.Side, closeSide, StringComparison.OrdinalIgnoreCase))
+                .Sum(o => Math.Max(0m, o.Quantity - o.FilledQuantity));
+
+            // Orphan-desync trigger: the book holds significantly more resting reduce-only than
+            // state's tracked TpOrderIds can explain → lost-ID orphans exist. minQty margin keeps
+            // it off rounding noise. Only act if there's actually a null-TP batch to (re)place.
+            if (restingClose > trackedResting + minQty)
             {
+                var canResync = state.LastTpResyncAt == null
+                                || (now - state.LastTpResyncAt.Value) >= TimeSpan.FromMinutes(2);
+                if (canResync)
+                {
+                    // One-shot TP resync. The book is already fully subscribed by a mix of tracked
+                    // + orphaned reduce-only orders, so we can't add anything. Cancel EVERYTHING
+                    // and re-place every batch's TP from a clean book on the next heal tick.
+                    //
+                    // CAPITAL SAFETY (SOUL.md): GridFloat has NO stop-loss — these reduce-only
+                    // limits are profit-taking TPs, not risk protection. Cancelling them for ~one
+                    // tick cannot increase downside risk; it only briefly removes profit-taking.
+                    // We realize NO PnL here — the resync re-places real TPs, records no trade.
+                    Log(strategy, "Warning",
+                        $"🔁 Fix #10 resync: обнаружены осиротевшие reduce-only ордера на бирже " +
+                        $"(restingClose={Math.Round(restingClose, 8)} > tracked={Math.Round(trackedResting, 8)}), " +
+                        $"позиция (livePos={Math.Round(livePos, 8)}) полностью покрыта потерянными TP — " +
+                        "отменяю ВСЕ ордера и переставляю TP с чистого листа.");
+
+                    try { await exchange.CancelAllOrdersAsync(config.Symbol); }
+                    catch (Exception cex)
+                    {
+                        _logger.LogWarning(cex,
+                            "GridFloat HealMissingTps Fix #10 resync: CancelAllOrdersAsync failed for {Symbol}", config.Symbol);
+                    }
+
+                    // Clear ALL per-batch TP tracking so the next tick re-places from scratch and
+                    // re-adopts the full live position into freshly-tracked TPs.
+                    foreach (var b in state.Batches)
+                    {
+                        b.TpOrderId = null;
+                        b.TpFailCount = 0;
+                        b.TpRetryAfter = null;
+                        b.NoHeadroomConfirmations = 0;
+                    }
+
+                    // Verify the book actually emptied (SweepOrphanOrders re-cancels if not).
+                    state.OrphanCancelPendingUntil = DateTime.UtcNow.AddMinutes(30);
+                    state.LastTpResyncAt = DateTime.UtcNow;
+
+                    // DCA limits cancelled here are re-placed by the existing HealMissingDcas.
+                    return;
+                }
+                // Within the 2-min thrash guard → we just fired a resync moments ago and the
+                // cancel-all hasn't propagated yet (book still shows orphans). DO NOT fall through
+                // to greedy placement here: with committed=restingClose≈livePos the headroom is
+                // ~0, every null-TP batch would route to HandleNoHeadroomBatch and — across the
+                // 2-min window — get written off as a phantom. That is exactly the real,
+                // orphan-backed position we must NOT lose. Instead wait quietly for the book to
+                // empty so the next post-guard tick can re-place cleanly. SweepOrphanOrders
+                // (armed via OrphanCancelPendingUntil) keeps re-cancelling if the book is stuck.
+                _logger.LogDebug(
+                    "GridFloat HealMissingTps Fix #10: orphan-desync still visible within 2-min resync guard for {Symbol} " +
+                    "(restingClose={Resting} > tracked={Tracked}) — waiting for cancel-all to propagate, skipping placement",
+                    config.Symbol, restingClose, trackedResting);
+                return;
+            }
+
+            committed = restingClose;
+        }
+        catch (NotSupportedException)
+        {
+            // Exchange can't list open orders — fall back to the legacy state-memory committed.
+            committed = trackedResting;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "GridFloat HealMissingTps: GetOpenOrdersAsync failed for {Symbol} — fallback to state-memory committed", config.Symbol);
+            committed = trackedResting;
+        }
+
+        var headroom = livePos - committed;
+        if (headroom < 0m) headroom = 0m; // clamp — book may momentarily exceed live during fills
+
+        // Allocate the remaining headroom greedily to the batches most likely to close soonest:
+        // Long → lowest TpPrice first; Short → highest TpPrice first.
+        var ordered = state.IsLong
+            ? needTp.OrderBy(b => b.TpPrice).ToList()
+            : needTp.OrderByDescending(b => b.TpPrice).ToList();
+
+        var placed = 0;
+        foreach (var batch in ordered)
+        {
+            if (headroom >= batch.Qty)
+            {
+                // Full live position backs this batch — place its TP normally.
+                batch.NoHeadroomConfirmations = 0;
                 if (placed > 0) await Task.Delay(InterOrderDelayMs);
                 await PlaceBatchTpLimit(strategy, config, state, exchange, batch);
                 placed++;
+                headroom -= batch.Qty;
             }
+            else if (minQty > 0 && headroom >= minQty)
+            {
+                // Partial headroom: trim the batch to what the position can actually back, place
+                // a real (smaller) TP, and write off the trimmed remainder loudly. This consumes
+                // the rest of the headroom.
+                var trimmed = qtyStep > 0 ? Math.Floor(headroom / qtyStep) * qtyStep : headroom;
+                if (trimmed < minQty)
+                {
+                    // Flooring pushed it below min — treat as no headroom for this batch.
+                    HandleNoHeadroomBatch(strategy, state, batch, livePos, committed, minQty);
+                    continue;
+                }
+                var writtenOff = batch.Qty - trimmed;
+                Log(strategy, "Warning",
+                    $"⚠️ Fix #10 partial: батч #{batch.LevelIdx} обрезан под живую позицию: " +
+                    $"{batch.Qty} → {trimmed} (списано {writtenOff}, livePos={Math.Round(livePos, 8)}, " +
+                    $"committed={Math.Round(committed, 8)}, headroom={Math.Round(headroom, 8)}). " +
+                    "Остаток не обеспечен позицией — PnL по нему не реализуется.");
+                batch.Qty = trimmed;
+                batch.NoHeadroomConfirmations = 0;
+                if (placed > 0) await Task.Delay(InterOrderDelayMs);
+                await PlaceBatchTpLimit(strategy, config, state, exchange, batch);
+                placed++;
+                headroom = 0m;
+            }
+            else
+            {
+                // No live position backs this batch → phantom candidate. Require ≥2 consecutive
+                // confirmations before deleting so a single transient GetPositionAsync glitch
+                // can't drop a real batch (CAPITAL SAFETY — see SOUL.md). Never realizes PnL.
+                HandleNoHeadroomBatch(strategy, state, batch, livePos, committed, minQty);
+            }
+        }
+    }
+
+    // Fix #10: phantom write-off with 2-confirmation gate. A batch reaches here when the live
+    // exchange position has no room (< minQty) left to back its reduce-only TP. We confirm twice
+    // (across two heal passes) before removing it, never realize fictional PnL, and best-effort
+    // cancel any stale TP id. When in doubt we KEEP the batch (just back it off).
+    private void HandleNoHeadroomBatch(Strategy strategy, GridFloatState state, GridFloatBatch batch,
+        decimal livePos, decimal committed, decimal minQty)
+    {
+        batch.NoHeadroomConfirmations++;
+        if (batch.NoHeadroomConfirmations < 2)
+        {
+            // First sighting — don't delete yet; apply backoff so we don't re-probe instantly.
+            ApplyTpBackoff(batch);
+            Log(strategy, "Warning",
+                $"Fix #10: батч #{batch.LevelIdx} (qty={batch.Qty}) не обеспечен живой позицией " +
+                $"(livePos={Math.Round(livePos, 8)}, committed={Math.Round(committed, 8)}, minQty={minQty}) — " +
+                $"подтверждение {batch.NoHeadroomConfirmations}/2. Жду повторное подтверждение перед списанием.");
+            return;
+        }
+
+        Log(strategy, "Warning",
+            $"🧹 Fix #10 phantom write-off: удаляю батч #{batch.LevelIdx} (qty={batch.Qty}, TP={Math.Round(batch.TpPrice, 8)}) " +
+            $"после 2 подтверждений отсутствия headroom (livePos={Math.Round(livePos, 8)}, committed={Math.Round(committed, 8)}). " +
+            "Этой qty нет на бирже — PnL НЕ реализуется. Скорее всего легаси из false-flat reconcile или ручного закрытия.");
+        state.Batches.Remove(batch);
+    }
+
+    // Fix #10 fallback: exchanges without GetPositionAsync support keep the original per-batch
+    // heal (each TP validated in isolation by PlaceBatchTpLimit). Backoff still applies via the
+    // failure branches there.
+    private async Task HealMissingTpsFallback(Strategy strategy, GridFloatConfig config,
+        GridFloatState state, IFuturesExchangeService exchange, List<GridFloatBatch> needTp)
+    {
+        var placed = 0;
+        foreach (var batch in needTp)
+        {
+            if (placed > 0) await Task.Delay(InterOrderDelayMs);
+            await PlaceBatchTpLimit(strategy, config, state, exchange, batch);
+            placed++;
         }
     }
 

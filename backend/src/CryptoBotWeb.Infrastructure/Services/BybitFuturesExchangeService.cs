@@ -643,6 +643,24 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    public async Task<int?> GetMaxLeverageAsync(string symbol)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(Category.Linear, bybitSymbol);
+            if (!result.Success || result.Data?.List?.Any() != true) return null;
+
+            var maxLev = result.Data.List.First().LeverageFilter?.MaxLeverage;
+            if (!maxLev.HasValue || maxLev.Value <= 0) return null;
+            return Convert.ToInt32(maxLev.Value);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     // ────────────────────────── Hedge mode (V1 — Bybit-only) ──────────────────────────
     // Bybit V5 supports per-symbol hedge mode on linear USDT-perpetuals: a single account
     // can hold a long (positionIdx=1) AND short (positionIdx=2) on the same symbol

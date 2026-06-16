@@ -567,5 +567,27 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    public async Task<int?> GetMaxLeverageAsync(string symbol)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var result = await _client.PerpetualFuturesApi.ExchangeData.GetContractsAsync();
+            var contract = result.Success
+                ? result.Data?.FirstOrDefault(c => c.Symbol == bingxSymbol)
+                : null;
+            if (contract == null) return null;
+
+            // One-way (PositionSide.Both) trades either direction across cycles — clamp to the
+            // lower of the two side caps so the chosen leverage is valid for Long and Short alike.
+            var max = Math.Min(Convert.ToInt32(contract.MaxLongLeverage), Convert.ToInt32(contract.MaxShortLeverage));
+            return max > 0 ? max : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public void Dispose() => _client.Dispose();
 }

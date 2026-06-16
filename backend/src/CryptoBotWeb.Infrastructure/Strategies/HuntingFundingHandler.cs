@@ -178,6 +178,25 @@ public class HuntingFundingHandler : IStrategyHandler
         Log(strategy, "Info",
             $"Funding rate={funding.Rate}, direction={state.Direction}, placing {config.Levels.Count} limit orders at price={price}");
 
+        // Pin leverage to the symbol's max before placing. We never set leverage elsewhere in
+        // this strategy, so the account carries whatever was last set — often a high value (e.g.
+        // 1000x) left over from a previously-rotated ticker. When rotation lands on a symbol with
+        // a lower risk-limit cap (e.g. 500x), the exchange rejects every limit order with
+        // "cannot set leverage [1000] gt maxLeverage [500] by risk limit". We size by fixed
+        // notional (SizeUsdt) on cross margin, so leverage affects neither position size nor
+        // liquidation risk here — clamping to the symbol max just makes orders go through.
+        var maxLev = await exchange.GetMaxLeverageAsync(config.Symbol);
+        if (maxLev.HasValue && maxLev.Value > 0)
+        {
+            var levSet = await exchange.SetLeverageAsync(config.Symbol, maxLev.Value);
+            if (!levSet)
+                Log(strategy, "Warning",
+                    $"Could not set leverage to {maxLev.Value}x for {config.Symbol} — placing with current account leverage (orders may be rejected by risk limit)");
+            else
+                _logger.LogDebug("Strategy {Id}: leverage pinned to {Lev}x for {Symbol}",
+                    strategy.Id, maxLev.Value, config.Symbol);
+        }
+
         int placedCount = 0;
         bool settlementInProgress = false;
         for (int i = 0; i < config.Levels.Count; i++)
