@@ -63,6 +63,17 @@ public interface IFuturesExchangeService : IDisposable
         throw new NotSupportedException("SetLeverageAsync not implemented");
 
     /// <summary>
+    /// Returns the symbol's maximum allowed leverage from the exchange risk-limit table,
+    /// or null if it can't be determined (network error / exchange doesn't expose it).
+    /// Callers use this to clamp the leverage they set before placing orders so a stale
+    /// account-level leverage (e.g. 1000x left over from a previously-traded symbol) isn't
+    /// rejected by the exchange as "cannot set leverage [N] gt maxLeverage [M] by risk limit".
+    /// Default: null — caller should treat as "unknown" and skip the clamp.
+    /// </summary>
+    Task<int?> GetMaxLeverageAsync(string symbol) =>
+        Task.FromResult<int?>(null);
+
+    /// <summary>
     /// Returns the symbol's lot-size step and minimum order quantity for futures.
     /// Default: (0, 0) — caller should treat zero values as "exchange doesn't expose this info"
     /// and skip the minimum-notional pre-check.

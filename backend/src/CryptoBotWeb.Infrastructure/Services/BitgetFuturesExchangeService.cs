@@ -705,5 +705,25 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    public async Task<int?> GetMaxLeverageAsync(string symbol)
+    {
+        try
+        {
+            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+            var result = await _client.FuturesApiV2.ExchangeData.GetContractsAsync(BitgetProductTypeV2.UsdtFutures);
+            var contract = result.Success
+                ? result.Data?.FirstOrDefault(c => c.Symbol == bitgetSymbol)
+                : null;
+            if (contract == null) return null;
+
+            var max = Convert.ToInt32(contract.MaxLeverage);
+            return max > 0 ? max : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public void Dispose() => _client.Dispose();
 }
