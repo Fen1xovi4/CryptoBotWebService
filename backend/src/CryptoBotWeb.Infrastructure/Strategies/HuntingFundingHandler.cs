@@ -546,9 +546,24 @@ public class HuntingFundingHandler : IStrategyHandler
                     $"Position size mismatch: exchange={Math.Round(quantity, 6)}, tracked={Math.Round(state.TotalFilledQuantity.Value, 6)}");
             }
         }
+        else if (exchangePos != null)
+        {
+            // Query SUCCEEDED and reported no position. Our tracked fills are phantom —
+            // orders that vanished from open-orders via rejection/cancel (not real fills),
+            // producing a bogus avgEntry the live price is nowhere near. Closing a
+            // non-existent position with a reduce-only order makes Bybit reject with
+            // "current position is zero, cannot fix reduce-only order qty" every tick,
+            // and the bot would loop forever. Discard the phantom and move on — same
+            // contract as the post-funding "no position on exchange" guard above.
+            Log(strategy, "Warning",
+                "No position on exchange — discarding phantom tracked fills, moving to Cooldown");
+            state.Phase = HuntingFundingPhase.Cooldown;
+            return;
+        }
         else
         {
-            // Fallback to tracked data if exchange query fails
+            // exchangePos == null: the position query itself failed (transport/proxy).
+            // Fall back to tracked data rather than assume the position is gone.
             quantity = state.TotalFilledQuantity ?? 0;
             avgEntry = state.AvgEntryPrice ?? 0;
             totalUsdt = state.TotalFilledUsdt ?? 0;
@@ -580,9 +595,17 @@ public class HuntingFundingHandler : IStrategyHandler
             _logger.LogError("Strategy {Id}: Failed to close {Dir}: {Error}",
                 strategy.Id, state.Direction, result.ErrorMessage);
 
-            // If position doesn't exist on exchange, force transition to Cooldown
-            if (result.ErrorMessage != null &&
-                result.ErrorMessage.Contains("No position", StringComparison.OrdinalIgnoreCase))
+            // If the exchange says there's nothing to close, force transition to Cooldown.
+            // Match the various phrasings exchanges use for a missing/zero position so the
+            // bot can't get stuck re-issuing a doomed reduce-only close every tick:
+            //   Bybit:  "current position is zero, cannot fix reduce-only order qty"
+            //   others: "No position", "position not found", "position is zero"
+            var err = result.ErrorMessage;
+            if (err != null &&
+                (err.Contains("No position", StringComparison.OrdinalIgnoreCase) ||
+                 err.Contains("position is zero", StringComparison.OrdinalIgnoreCase) ||
+                 err.Contains("position not found", StringComparison.OrdinalIgnoreCase) ||
+                 err.Contains("reduce-only", StringComparison.OrdinalIgnoreCase)))
             {
                 Log(strategy, "Warning", "Position already closed externally — moving to Cooldown");
                 state.Phase = HuntingFundingPhase.Cooldown;
