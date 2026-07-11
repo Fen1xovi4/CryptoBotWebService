@@ -937,6 +937,7 @@ export default function ActiveBotsPage() {
                   onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
                   onEdit={() => setEditingStrategy(s)}
                   onLogs={() => setLogStrategy(s)}
+                  onChart={() => setChartStrategy(s)}
                   onClosePosition={() => closePositionMutation.mutate(s.id)}
                   closePositionPending={closePositionMutation.isPending}
                   telegramBots={telegramBots}
@@ -958,6 +959,7 @@ export default function ActiveBotsPage() {
                   onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
                   onEdit={() => setEditingStrategy(s)}
                   onLogs={() => setLogStrategy(s)}
+                  onChart={() => setChartStrategy(s)}
                   onClosePosition={() => closePositionMutation.mutate(s.id)}
                   closePositionPending={closePositionMutation.isPending}
                   telegramBots={telegramBots}
@@ -979,6 +981,7 @@ export default function ActiveBotsPage() {
                   onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
                   onEdit={() => setEditingStrategy(s)}
                   onLogs={() => setLogStrategy(s)}
+                  onChart={() => setChartStrategy(s)}
                   onClosePosition={() => closePositionMutation.mutate(s.id)}
                   closePositionPending={closePositionMutation.isPending}
                   telegramBots={telegramBots}
@@ -1004,6 +1007,7 @@ export default function ActiveBotsPage() {
                   onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
                   onEdit={() => setEditingStrategy(s)}
                   onLogs={() => setLogStrategy(s)}
+                  onChart={() => setChartStrategy(s)}
                   onClosePosition={() => closePositionMutation.mutate(s.id)}
                   closePositionPending={closePositionMutation.isPending}
                   telegramBots={telegramBots}
@@ -1027,6 +1031,7 @@ export default function ActiveBotsPage() {
                   onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
                   onEdit={() => setEditingStrategy(s)}
                   onLogs={() => setLogStrategy(s)}
+                  onChart={() => setChartStrategy(s)}
                   onClosePosition={() => closePositionMutation.mutate(s.id)}
                   closePositionPending={closePositionMutation.isPending}
                   telegramBots={telegramBots}
@@ -1048,6 +1053,7 @@ export default function ActiveBotsPage() {
                   onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
                   onEdit={() => setEditingStrategy(s)}
                   onLogs={() => setLogStrategy(s)}
+                  onChart={() => setChartStrategy(s)}
                   onClosePosition={() => closePositionMutation.mutate(s.id)}
                   closePositionPending={closePositionMutation.isPending}
                   telegramBots={telegramBots}
@@ -1596,6 +1602,7 @@ function HuntingFundingCard({
   onDelete,
   onEdit,
   onLogs,
+  onChart,
   onClosePosition,
   closePositionPending,
   telegramBots,
@@ -1610,6 +1617,7 @@ function HuntingFundingCard({
   onDelete: () => void;
   onEdit: () => void;
   onLogs: () => void;
+  onChart: () => void;
   onClosePosition: () => void;
   closePositionPending: boolean;
   telegramBots: TelegramBotOption[] | undefined;
@@ -1795,6 +1803,15 @@ function HuntingFundingCard({
       {/* Actions */}
       <div className="px-3 py-2 flex items-center gap-1">
         <button
+          onClick={onChart}
+          title="График"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+          </svg>
+        </button>
+        <button
           onClick={onLogs}
           title="Логи"
           className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
@@ -1915,6 +1932,7 @@ function FundingClaimCard({
   onDelete,
   onEdit,
   onLogs,
+  onChart,
   onClosePosition,
   closePositionPending,
   telegramBots,
@@ -1929,6 +1947,7 @@ function FundingClaimCard({
   onDelete: () => void;
   onEdit: () => void;
   onLogs: () => void;
+  onChart: () => void;
   onClosePosition: () => void;
   closePositionPending: boolean;
   telegramBots: TelegramBotOption[] | undefined;
@@ -2090,6 +2109,15 @@ function FundingClaimCard({
       {/* Actions */}
       <div className="px-3 py-2 flex items-center gap-1">
         <button
+          onClick={onChart}
+          title="График"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+          </svg>
+        </button>
+        <button
           onClick={onLogs}
           title="Логи"
           className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
@@ -2248,6 +2276,7 @@ function SmaDcaCard({
   onDelete,
   onEdit,
   onLogs,
+  onChart,
   onClosePosition,
   closePositionPending,
   telegramBots,
@@ -2262,6 +2291,7 @@ function SmaDcaCard({
   onDelete: () => void;
   onEdit: () => void;
   onLogs: () => void;
+  onChart: () => void;
   onClosePosition: () => void;
   closePositionPending: boolean;
   telegramBots: TelegramBotOption[] | undefined;
@@ -2468,6 +2498,15 @@ function SmaDcaCard({
       {/* Actions */}
       <div className="px-3 py-2 flex items-center gap-1">
         <button
+          onClick={onChart}
+          title="График"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+          </svg>
+        </button>
+        <button
           onClick={onLogs}
           title="Логи"
           className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
@@ -2665,6 +2704,7 @@ function GridFloatCard({
   onDelete,
   onEdit,
   onLogs,
+  onChart,
   onClosePosition,
   closePositionPending,
   telegramBots,
@@ -2685,6 +2725,7 @@ function GridFloatCard({
   onDelete: () => void;
   onEdit: () => void;
   onLogs: () => void;
+  onChart: () => void;
   onClosePosition: () => void;
   closePositionPending: boolean;
   telegramBots: TelegramBotOption[] | undefined;
@@ -3096,6 +3137,15 @@ function GridFloatCard({
       {/* Actions */}
       <div className="px-3 py-2 flex items-center gap-1">
         <button
+          onClick={onChart}
+          title="График"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+          </svg>
+        </button>
+        <button
           onClick={onLogs}
           title="Логи"
           className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
@@ -3345,6 +3395,7 @@ function GridHedgeCard({
   onDelete,
   onEdit,
   onLogs,
+  onChart,
   onClosePosition,
   closePositionPending,
   telegramBots,
@@ -3359,6 +3410,7 @@ function GridHedgeCard({
   onDelete: () => void;
   onEdit: () => void;
   onLogs: () => void;
+  onChart: () => void;
   onClosePosition: () => void;
   closePositionPending: boolean;
   telegramBots: TelegramBotOption[] | undefined;
@@ -3561,6 +3613,15 @@ function GridHedgeCard({
 
       {/* Actions */}
       <div className="px-3 py-2 flex items-center gap-1">
+        <button
+          onClick={onChart}
+          title="График"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+          </svg>
+        </button>
         <button
           onClick={onLogs}
           title="Логи"
@@ -3770,6 +3831,7 @@ function SmartGridHedgeCard({
   onDelete,
   onEdit,
   onLogs,
+  onChart,
   onClosePosition,
   closePositionPending,
   telegramBots,
@@ -3786,6 +3848,7 @@ function SmartGridHedgeCard({
   onDelete: () => void;
   onEdit: () => void;
   onLogs: () => void;
+  onChart: () => void;
   onClosePosition: () => void;
   closePositionPending: boolean;
   telegramBots: TelegramBotOption[] | undefined;
@@ -4187,6 +4250,15 @@ function SmartGridHedgeCard({
 
       {/* Actions */}
       <div className="px-3 py-2 flex items-center gap-1">
+        <button
+          onClick={onChart}
+          title="График"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+          </svg>
+        </button>
         <button
           onClick={onLogs}
           title="Логи"
@@ -7966,9 +8038,10 @@ function ChartModal({
         <div className="flex items-center justify-between px-6 py-4 border-b border-border">
           <div>
             <h2 className="text-base font-semibold text-text-primary">
-              {cfg.symbol || strategy.name}
+              {cfg.symbol || cfg.gridSymbol || strategy.name}
               <span className="ml-2 text-xs text-text-secondary font-normal">
-                {cfg.timeframe} · {cfg.indicatorType || 'EMA'}{cfg.indicatorLength || 50}
+                {cfg.timeframe || '1h'}
+                {strategy.type === 'MaratG' && ` · ${cfg.indicatorType || 'EMA'}${cfg.indicatorLength || 50}`}
               </span>
             </h2>
             <p className="text-xs text-text-secondary mt-0.5">
