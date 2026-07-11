@@ -1429,7 +1429,7 @@ public class StrategiesController : ControllerBase
     }
 
     [HttpGet("{id:guid}/chart")]
-    public async Task<IActionResult> GetChart(Guid id, [FromQuery] int limit = 300)
+    public async Task<IActionResult> GetChart(Guid id, [FromQuery] int limit = 300, [FromQuery] string? timeframe = null)
     {
         var strategy = await _db.Strategies
             .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
@@ -1458,7 +1458,13 @@ public class StrategiesController : ControllerBase
             return BadRequest(new { message = "Invalid config" });
 
         // Strategies without a timeframe (HuntingFunding/FundingClaim/grids) fall back to 1h just for viewing.
-        var timeframe = string.IsNullOrEmpty(config?.Timeframe) ? "1h" : config.Timeframe;
+        var resolvedTf = string.IsNullOrEmpty(config?.Timeframe) ? "1h" : config.Timeframe;
+
+        // Optional view-only timeframe override from the chart modal — validated against a
+        // whitelist so we never forward arbitrary strings to the exchange. Does NOT change config.
+        var allowedTfs = new[] { "1m", "5m", "15m", "30m", "1h", "4h", "1d" };
+        if (!string.IsNullOrEmpty(timeframe) && allowedTfs.Contains(timeframe))
+            resolvedTf = timeframe;
 
         if (limit < 1) limit = 1;
         if (limit > 1000) limit = 1000;
@@ -1466,7 +1472,7 @@ public class StrategiesController : ControllerBase
         try
         {
             using var exchange = _exchangeFactory.CreateFutures(strategy.Account);
-            var candles = await exchange.GetKlinesAsync(symbol, timeframe, limit);
+            var candles = await exchange.GetKlinesAsync(symbol, resolvedTf, limit);
 
             // The MA overlay is only meaningful for the EMA/SMA bounce strategy (MaratG).
             // For every other strategy type we return bare candles — no misleading indicator line.

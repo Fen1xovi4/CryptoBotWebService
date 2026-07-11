@@ -8022,14 +8022,20 @@ function ChartModal({
 }) {
   const cfg = parseJson(strategy.configJson) || {};
 
+  // Timeframe is a view-only override — switching it here never touches the bot's config.
+  const botTf: string = cfg.timeframe || '1h';
+  const [tf, setTf] = useState<string>(botTf);
+  const presetTfs = ['15m', '1h', '4h', '1d'];
+  const tfOptions = presetTfs.includes(botTf) ? presetTfs : [botTf, ...presetTfs];
+
   const { data: chartData, isLoading } = useQuery<{
     candles: CandleData[];
     indicatorValues: IndicatorDataPoint[];
   }>({
-    queryKey: ['strategy-chart', strategy.id],
+    queryKey: ['strategy-chart', strategy.id, tf],
     queryFn: () =>
-      api.get(`/strategies/${strategy.id}/chart?limit=300`).then((r) => r.data),
-    refetchInterval: cfg.timeframe === '1m' ? 5000 : cfg.timeframe === '5m' ? 10000 : 60000,
+      api.get(`/strategies/${strategy.id}/chart?limit=300&timeframe=${encodeURIComponent(tf)}`).then((r) => r.data),
+    refetchInterval: tf === '1m' ? 5000 : tf === '5m' ? 10000 : tf === '15m' ? 20000 : 60000,
   });
 
   return (
@@ -8040,7 +8046,7 @@ function ChartModal({
             <h2 className="text-base font-semibold text-text-primary">
               {cfg.symbol || cfg.gridSymbol || strategy.name}
               <span className="ml-2 text-xs text-text-secondary font-normal">
-                {cfg.timeframe || '1h'}
+                {tf}
                 {strategy.type === 'MaratG' && ` · ${cfg.indicatorType || 'EMA'}${cfg.indicatorLength || 50}`}
               </span>
             </h2>
@@ -8048,6 +8054,22 @@ function ChartModal({
               {strategy.accountName} ({strategy.exchange})
             </p>
           </div>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-0.5 rounded-lg bg-bg-tertiary p-0.5">
+              {tfOptions.map((opt) => (
+                <button
+                  key={opt}
+                  onClick={() => setTf(opt)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    tf === opt
+                      ? 'bg-accent-blue text-white shadow-sm'
+                      : 'text-text-secondary hover:text-text-primary'
+                  }`}
+                >
+                  {opt}
+                </button>
+              ))}
+            </div>
           <button
             onClick={onClose}
             className="text-text-secondary hover:text-text-primary transition-colors"
@@ -8056,6 +8078,7 @@ function ChartModal({
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
+          </div>
         </div>
 
         <div className="p-4">
