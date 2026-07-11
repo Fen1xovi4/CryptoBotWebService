@@ -1439,8 +1439,26 @@ public class StrategiesController : ControllerBase
 
         var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var config = JsonSerializer.Deserialize<EmaBounceConfig>(strategy.ConfigJson, jsonOpts);
-        if (config == null || string.IsNullOrEmpty(config.Symbol))
+
+        // Resolve the traded symbol per strategy type. Most configs expose "symbol",
+        // but GridHedge uses "gridSymbol" instead — fall back to it so its chart works too.
+        var symbol = config?.Symbol;
+        if (string.IsNullOrEmpty(symbol))
+        {
+            try
+            {
+                var configEl = JsonSerializer.Deserialize<JsonElement>(strategy.ConfigJson);
+                if (configEl.TryGetProperty("gridSymbol", out var gs) && gs.ValueKind == JsonValueKind.String)
+                    symbol = gs.GetString();
+            }
+            catch { }
+        }
+
+        if (string.IsNullOrEmpty(symbol))
             return BadRequest(new { message = "Invalid config" });
+
+        // Strategies without a timeframe (HuntingFunding/FundingClaim/grids) fall back to 1h just for viewing.
+        var timeframe = string.IsNullOrEmpty(config?.Timeframe) ? "1h" : config.Timeframe;
 
         if (limit < 1) limit = 1;
         if (limit > 1000) limit = 1000;
@@ -1448,23 +1466,28 @@ public class StrategiesController : ControllerBase
         try
         {
             using var exchange = _exchangeFactory.CreateFutures(strategy.Account);
-            var candles = await exchange.GetKlinesAsync(config.Symbol, config.Timeframe, limit);
+            var candles = await exchange.GetKlinesAsync(symbol, timeframe, limit);
 
-            var closePrices = candles.Select(c => c.Close).ToArray();
-            var maValues = config.IndicatorType.Equals("SMA", StringComparison.OrdinalIgnoreCase)
-                ? IndicatorCalculator.CalculateSma(closePrices, config.IndicatorLength)
-                : IndicatorCalculator.CalculateEma(closePrices, config.IndicatorLength);
-
+            // The MA overlay is only meaningful for the EMA/SMA bounce strategy (MaratG).
+            // For every other strategy type we return bare candles — no misleading indicator line.
             var indicatorPoints = new List<object>();
-            for (int i = config.IndicatorLength - 1; i < candles.Count; i++)
+            if (strategy.Type == StrategyTypes.MaratG && config != null)
             {
-                if (maValues[i] != 0)
+                var closePrices = candles.Select(c => c.Close).ToArray();
+                var maValues = config.IndicatorType.Equals("SMA", StringComparison.OrdinalIgnoreCase)
+                    ? IndicatorCalculator.CalculateSma(closePrices, config.IndicatorLength)
+                    : IndicatorCalculator.CalculateEma(closePrices, config.IndicatorLength);
+
+                for (int i = config.IndicatorLength - 1; i < candles.Count; i++)
                 {
-                    indicatorPoints.Add(new
+                    if (maValues[i] != 0)
                     {
-                        time = new DateTimeOffset(candles[i].OpenTime).ToUnixTimeSeconds(),
-                        value = maValues[i]
-                    });
+                        indicatorPoints.Add(new
+                        {
+                            time = new DateTimeOffset(candles[i].OpenTime).ToUnixTimeSeconds(),
+                            value = maValues[i]
+                        });
+                    }
                 }
             }
 
