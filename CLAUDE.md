@@ -1,5 +1,9 @@
 # CryptoBotWeb
 
+## Soul
+
+Мы работаем исходя из нашей «души» — см. [`SOUL.md`](./SOUL.md). Это базовые принципы сотрудничества: искать лучшее решение, проверять идеи фактами, ставить точность выше согласия и сохранение капитала выше прибыли. Эти принципы действуют в каждой задаче и имеют приоритет над стремлением просто согласиться.
+
 ## Position mode
 
 **Default: all exchange integrations use one-way (unilateral) position mode, never hedge mode.**
@@ -58,14 +62,26 @@ All NuGet versions are pinned exactly (see NuGet pinning note below).
 
 ## Trading strategies
 
-Four state-machine-driven strategies live in `backend/src/CryptoBotWeb.Infrastructure/Strategies/`. Each has its own `*Config` (user-editable) and `*State` (runtime) DTO, both serialized to `ConfigJson` / `StateJson` JSONB columns on the `strategies` table.
+Seven state-machine-driven strategies live in `backend/src/CryptoBotWeb.Infrastructure/Strategies/`. Each has its own `*Config` (user-editable) and `*State` (runtime) DTO, both serialized to `ConfigJson` / `StateJson` JSONB columns on the `strategies` table.
 
-- **MaratG / EMA Bounce** — `EmaBounceHandler.cs` + `EmaBounceSimulator.cs` — EMA/SMA indicator entries with martingale on reversal.
+- **MaratG / EMA Bounce** — `EmaBounceHandler.cs` — EMA/SMA indicator entries with martingale on reversal.
 - **HuntingFunding** — `HuntingFundingHandler.cs` — funding-rate extreme hunter; hourly auto-rotation of the tradable ticker via `FundingTickerRotationService`.
 - **FundingClaim** — `FundingClaimHandler.cs` — opens and holds through funding payout with a min-rate threshold; leverage-aware.
 - **SmaDca** — `SmaDcaHandler.cs` — SMA-based tiered DCA grid with configurable market/limit DCA fills and TP exits; one direction per bot.
+- **GridFloat** — `GridFloatHandler.cs` — single-direction floating grid; independent batches with per-batch reduce-only TPs, re-anchor after full close.
+- **GridHedge** — `GridHedgeHandler.cs` — uniform-step long grid plus one static futures short hedge; SameTicker or CrossTicker; one cycle per start.
+- **SmartGridHedge** — `SmartGridHedgeHandler.cs` — geometric symmetric grid around P0 with a static short hedge (Bybit hedge mode only); skim cells per SkimMode; HBreak/LBreak hard-close with AutoRestart.
 
 Execution: `TradingHostedService` in the Worker runs a 5-second loop with up to 20 strategies in parallel, dispatching each active strategy to its matching handler. `FundingTickerRotationService` fires at :50 past each hour to (re)assign tickers to `HuntingFunding` bots based on upcoming funding rates, workspace-level uniqueness, and the symbol blacklist.
+
+### Simulation module (Tester, admin-only)
+
+Backtesting lives behind the `/tester` page and `TesterController` — **all three layers are Admin-gated (sidebar, `AdminRoute`, `[Authorize(Roles = "Admin")]`) and must stay that way**. Simulations are run locally (dev machine), not on the VPS.
+
+- One `IStrategySimulator` per strategy type in `Infrastructure/Strategies/Simulation/` (registry pattern mirrors live handlers; all seven types covered). Simulators are pure — no I/O.
+- `SimulationEngine` (`Infrastructure/Simulation/`) downloads the 1m price path via `IFuturesExchangeService.GetKlinesRangeAsync` (paginated; Bybit/Bitget/BingX, Dzengi unsupported) plus `GetFundingHistoryAsync` for funding strategies, then dispatches by `StrategyType`.
+- Price path convention: 4 ticks per 1m candle (`CandlePathHelper`), indicator candles aggregated via `CandleAggregator`. Fees: maker on resting limit fills, taker on market fills (SmartGridHedge uses its own config bps, as live).
+- `POST /api/tester/simulate` takes `SimulationRunRequest` with `configJson` in the same shape as `strategies.ConfigJson` (workspace-level fields flattened in for HuntingFunding/FundingClaim), so a live bot's config replays as-is. Known sim limits: ticker auto-rotation not modeled (fixed symbol), funding snapshot approximated to the settlement minute, no order-book/slippage.
 
 ## Environment variables
 
@@ -95,6 +111,17 @@ docker compose logs -f          # view logs
 - **Reverse proxy:** Traefik v3 (separate compose at `/srv/proxy/`) on external Docker network `web`
 - **SSL:** Let's Encrypt via Traefik certresolver `le`
 - **Server path:** `/srv/apps/CryptoBotWeb`
+- **SSH access:** `ssh deploy@157.173.97.19` (key-based auth, no password). The `deploy` user owns `/srv/apps/CryptoBotWeb` and can run `git`/`docker compose` there.
+
+### SSH deploy (remote, from dev machine)
+
+Deploys are driven over SSH from the dev machine — no need to log into the VPS manually:
+
+```bash
+ssh deploy@157.173.97.19 'cd /srv/apps/CryptoBotWeb && git pull && docker compose build --no-cache && docker compose up -d'
+```
+
+The VPS tracks `main`, so push to `main` first, then run the above. A `--no-cache` full build takes several minutes — run it in the background and poll, rather than blocking on a single SSH call.
 
 ### Traefik integration
 

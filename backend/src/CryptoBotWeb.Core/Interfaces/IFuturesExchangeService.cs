@@ -22,6 +22,21 @@ public interface IFuturesExchangeService : IDisposable
 
     Task<List<SymbolDto>> GetSymbolsAsync();
     Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit);
+
+    /// <summary>
+    /// Historical klines over an arbitrary UTC window, paginating past the exchange's
+    /// per-request limit. Ascending by OpenTime. Used by the simulator (backtesting) only.
+    /// </summary>
+    Task<List<CandleDto>> GetKlinesRangeAsync(string symbol, string timeframe, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default) =>
+        throw new NotSupportedException("GetKlinesRangeAsync not implemented");
+
+    /// <summary>
+    /// Historical funding settlements (rate + settle time) over a UTC window, paginated,
+    /// ascending. Rate is the raw fraction (0.0001 = 0.01%), same as FundingRateDto.Rate.
+    /// Used by the simulator (backtesting) only.
+    /// </summary>
+    Task<List<FundingEventDto>> GetFundingHistoryAsync(string symbol, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default) =>
+        throw new NotSupportedException("GetFundingHistoryAsync not implemented");
     Task<decimal?> GetTickerPriceAsync(string symbol);
     Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount);
     Task<OrderResultDto> OpenShortAsync(string symbol, decimal quoteAmount);

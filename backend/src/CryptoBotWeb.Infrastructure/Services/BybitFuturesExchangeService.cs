@@ -115,6 +115,127 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             .ToList();
     }
 
+    // ─────────────────── Historical range fetch (backtesting simulator) ───────────────────
+    // Bybit V5 linear klines/funding-history return newest-first within [start,end], capped at
+    // the per-request limit. So we page BACKWARD: fix startTime=fromUtc, walk endTime down from
+    // toUtc to the oldest bar of each page (minus one tick) until the window is covered, the page
+    // comes back empty, or the cursor stops advancing. Results are deduped by OpenTime/Timestamp
+    // and returned ascending. A hard cap guards against a runaway loop on a mis-sized window.
+    private const int _rangeHardCap = 200_000;
+    private const int _rangePageDelayMs = 120;
+
+    public async Task<List<CandleDto>> GetKlinesRangeAsync(
+        string symbol, string timeframe, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
+    {
+        const int pageSize = 1000; // Bybit linear klines max per request
+
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        var interval = MapInterval(timeframe);
+        var span = GetTimeframeSpan(timeframe);
+
+        var byOpen = new Dictionary<DateTime, CandleDto>();
+        var cursorEnd = toUtc;
+
+        while (cursorEnd > fromUtc)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var result = await _client.V5Api.ExchangeData.GetKlinesAsync(
+                Category.Linear, bybitSymbol, interval,
+                startTime: fromUtc, endTime: cursorEnd, limit: pageSize, ct: ct);
+
+            if (!result.Success)
+                throw new Exception($"Bybit GetKlinesRange failed for {symbol}: {result.Error?.Message ?? "unknown error"}");
+
+            var rows = result.Data?.List?.ToList();
+            if (rows == null || rows.Count == 0) break;
+
+            var oldest = DateTime.MaxValue;
+            foreach (var k in rows)
+            {
+                if (k.StartTime < oldest) oldest = k.StartTime;
+                if (k.StartTime < fromUtc || k.StartTime >= toUtc) continue;
+                if (byOpen.ContainsKey(k.StartTime)) continue;
+
+                byOpen[k.StartTime] = new CandleDto
+                {
+                    OpenTime = k.StartTime,
+                    CloseTime = k.StartTime + span,
+                    Open = k.OpenPrice,
+                    High = k.HighPrice,
+                    Low = k.LowPrice,
+                    Close = k.ClosePrice,
+                    Volume = k.Volume
+                };
+            }
+
+            if (byOpen.Count > _rangeHardCap)
+                throw new InvalidOperationException(
+                    $"Bybit GetKlinesRange exceeded {_rangeHardCap} candles for {symbol} {timeframe} [{fromUtc:o}..{toUtc:o}] — narrow the window.");
+
+            if (oldest <= fromUtc) break;
+            var nextEnd = oldest.AddTicks(-1);
+            if (nextEnd >= cursorEnd) break; // no forward progress — bail rather than spin
+            cursorEnd = nextEnd;
+
+            await Task.Delay(_rangePageDelayMs, ct);
+        }
+
+        return byOpen.Values.OrderBy(c => c.OpenTime).ToList();
+    }
+
+    public async Task<List<FundingEventDto>> GetFundingHistoryAsync(
+        string symbol, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
+    {
+        const int pageSize = 200; // Bybit V5 funding history max per request
+
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        var byTime = new Dictionary<DateTime, FundingEventDto>();
+        var cursorEnd = toUtc;
+
+        while (cursorEnd > fromUtc)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var result = await _client.V5Api.ExchangeData.GetFundingRateHistoryAsync(
+                Category.Linear, bybitSymbol,
+                startTime: fromUtc, endTime: cursorEnd, limit: pageSize, ct: ct);
+
+            if (!result.Success)
+                throw new Exception($"Bybit GetFundingHistory failed for {symbol}: {result.Error?.Message ?? "unknown error"}");
+
+            var rows = result.Data?.List?.ToList();
+            if (rows == null || rows.Count == 0) break;
+
+            var oldest = DateTime.MaxValue;
+            foreach (var f in rows)
+            {
+                if (f.Timestamp < oldest) oldest = f.Timestamp;
+                if (f.Timestamp < fromUtc || f.Timestamp >= toUtc) continue;
+                if (byTime.ContainsKey(f.Timestamp)) continue;
+
+                byTime[f.Timestamp] = new FundingEventDto
+                {
+                    Timestamp = f.Timestamp,
+                    Rate = f.FundingRate
+                };
+            }
+
+            if (byTime.Count > _rangeHardCap)
+                throw new InvalidOperationException(
+                    $"Bybit GetFundingHistory exceeded {_rangeHardCap} events for {symbol} [{fromUtc:o}..{toUtc:o}] — narrow the window.");
+
+            if (oldest <= fromUtc) break;
+            var nextEnd = oldest.AddTicks(-1);
+            if (nextEnd >= cursorEnd) break;
+            cursorEnd = nextEnd;
+
+            await Task.Delay(_rangePageDelayMs, ct);
+        }
+
+        return byTime.Values.OrderBy(e => e.Timestamp).ToList();
+    }
+
     public async Task<decimal?> GetTickerPriceAsync(string symbol)
     {
         var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);

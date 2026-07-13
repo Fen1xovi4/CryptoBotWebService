@@ -71,6 +71,124 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
             .ToList();
     }
 
+    // ─────────────────── Historical range fetch (backtesting simulator) ───────────────────
+    // BingX perpetual klines/funding-history accept startTime/endTime + limit and return the most
+    // recent bars within the window when it holds more than `limit`. Same backward-paging shape as
+    // Bybit: fix startTime=fromUtc, walk endTime down from toUtc to each page's oldest bar (minus a
+    // tick) until covered / empty / no progress. Deduped by OpenTime/Timestamp, returned ascending.
+    private const int _rangeHardCap = 200_000;
+    private const int _rangePageDelayMs = 120;
+
+    public async Task<List<CandleDto>> GetKlinesRangeAsync(
+        string symbol, string timeframe, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
+    {
+        const int pageSize = 1000; // BingX perpetual klines (max 1440/request; 1000 is a safe page)
+
+        var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+        var interval = MapInterval(timeframe);
+        var span = GetTimeframeSpan(timeframe);
+
+        var byOpen = new Dictionary<DateTime, CandleDto>();
+        var cursorEnd = toUtc;
+
+        while (cursorEnd > fromUtc)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var result = await _client.PerpetualFuturesApi.ExchangeData.GetKlinesAsync(
+                bingxSymbol, interval, startTime: fromUtc, endTime: cursorEnd, limit: pageSize, ct: ct);
+
+            if (!result.Success)
+                throw new Exception($"BingX GetKlinesRange failed for {symbol}: {result.Error?.Message ?? "unknown error"}");
+
+            var rows = result.Data?.ToList();
+            if (rows == null || rows.Count == 0) break;
+
+            var oldest = DateTime.MaxValue;
+            foreach (var k in rows)
+            {
+                if (k.Timestamp < oldest) oldest = k.Timestamp;
+                if (k.Timestamp < fromUtc || k.Timestamp >= toUtc) continue;
+                if (byOpen.ContainsKey(k.Timestamp)) continue;
+
+                byOpen[k.Timestamp] = new CandleDto
+                {
+                    OpenTime = k.Timestamp,
+                    CloseTime = k.Timestamp + span,
+                    Open = k.OpenPrice,
+                    High = k.HighPrice,
+                    Low = k.LowPrice,
+                    Close = k.ClosePrice,
+                    Volume = k.Volume
+                };
+            }
+
+            if (byOpen.Count > _rangeHardCap)
+                throw new InvalidOperationException(
+                    $"BingX GetKlinesRange exceeded {_rangeHardCap} candles for {symbol} {timeframe} [{fromUtc:o}..{toUtc:o}] — narrow the window.");
+
+            if (oldest <= fromUtc) break;
+            var nextEnd = oldest.AddTicks(-1);
+            if (nextEnd >= cursorEnd) break;
+            cursorEnd = nextEnd;
+
+            await Task.Delay(_rangePageDelayMs, ct);
+        }
+
+        return byOpen.Values.OrderBy(c => c.OpenTime).ToList();
+    }
+
+    public async Task<List<FundingEventDto>> GetFundingHistoryAsync(
+        string symbol, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
+    {
+        const int pageSize = 1000; // BingX funding-rate history max per request
+
+        var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+        var byTime = new Dictionary<DateTime, FundingEventDto>();
+        var cursorEnd = toUtc;
+
+        while (cursorEnd > fromUtc)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var result = await _client.PerpetualFuturesApi.ExchangeData.GetFundingRateHistoryAsync(
+                bingxSymbol, startTime: fromUtc, endTime: cursorEnd, limit: pageSize, ct: ct);
+
+            if (!result.Success)
+                throw new Exception($"BingX GetFundingHistory failed for {symbol}: {result.Error?.Message ?? "unknown error"}");
+
+            var rows = result.Data?.ToList();
+            if (rows == null || rows.Count == 0) break;
+
+            var oldest = DateTime.MaxValue;
+            foreach (var f in rows)
+            {
+                if (f.FundingTime < oldest) oldest = f.FundingTime;
+                if (f.FundingTime < fromUtc || f.FundingTime >= toUtc) continue;
+                if (byTime.ContainsKey(f.FundingTime)) continue;
+
+                byTime[f.FundingTime] = new FundingEventDto
+                {
+                    Timestamp = f.FundingTime,
+                    Rate = f.FundingRate
+                };
+            }
+
+            if (byTime.Count > _rangeHardCap)
+                throw new InvalidOperationException(
+                    $"BingX GetFundingHistory exceeded {_rangeHardCap} events for {symbol} [{fromUtc:o}..{toUtc:o}] — narrow the window.");
+
+            if (oldest <= fromUtc) break;
+            var nextEnd = oldest.AddTicks(-1);
+            if (nextEnd >= cursorEnd) break;
+            cursorEnd = nextEnd;
+
+            await Task.Delay(_rangePageDelayMs, ct);
+        }
+
+        return byTime.Values.OrderBy(e => e.Timestamp).ToList();
+    }
+
     public async Task<decimal?> GetTickerPriceAsync(string symbol)
     {
         var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
