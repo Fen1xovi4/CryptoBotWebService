@@ -3,7 +3,9 @@ using System.Text;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using CryptoBotWeb.Infrastructure.Services;
+using CryptoBotWeb.Infrastructure.Simulation;
 using CryptoBotWeb.Infrastructure.Strategies;
+using CryptoBotWeb.Infrastructure.Strategies.Simulation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -48,6 +50,17 @@ builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>()
 // worker runs on a natural exit trigger. Scoped because it relies on the scoped AppDbContext.
 builder.Services.AddScoped<GridHedgeHandler>();
 builder.Services.AddScoped<SmartGridHedgeHandler>();
+
+// Simulator (backtesting) — admin-only Tester module. One IStrategySimulator per strategy
+// type, resolved by SimulationEngine the same way the Worker resolves live handlers.
+builder.Services.AddScoped<IStrategySimulator, MaratGSimulator>();
+builder.Services.AddScoped<IStrategySimulator, SmaDcaSimulator>();
+builder.Services.AddScoped<IStrategySimulator, GridFloatSimulator>();
+builder.Services.AddScoped<IStrategySimulator, GridHedgeSimulator>();
+builder.Services.AddScoped<IStrategySimulator, SmartGridHedgeSimulator>();
+builder.Services.AddScoped<IStrategySimulator, HuntingFundingSimulator>();
+builder.Services.AddScoped<IStrategySimulator, FundingClaimSimulator>();
+builder.Services.AddScoped<SimulationEngine>();
 
 // CORS
 builder.Services.AddCors(options =>

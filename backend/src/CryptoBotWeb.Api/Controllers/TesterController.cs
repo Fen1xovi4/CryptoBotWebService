@@ -1,8 +1,8 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
-using CryptoBotWeb.Infrastructure.Strategies;
+using CryptoBotWeb.Infrastructure.Simulation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -16,14 +16,19 @@ public class TesterController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IExchangeServiceFactory _exchangeFactory;
+    private readonly SimulationEngine _engine;
 
-    public TesterController(AppDbContext db, IExchangeServiceFactory exchangeFactory)
+    public TesterController(AppDbContext db, IExchangeServiceFactory exchangeFactory, SimulationEngine engine)
     {
         _db = db;
         _exchangeFactory = exchangeFactory;
+        _engine = engine;
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+    [HttpGet("strategies")]
+    public IActionResult GetSupportedStrategies() => Ok(_engine.SupportedStrategyTypes);
 
     [HttpGet("klines")]
     public async Task<IActionResult> GetKlines(
@@ -44,10 +49,8 @@ public class TesterController : ControllerBase
 
         try
         {
-            var service = _exchangeFactory.CreateFutures(account);
+            using var service = _exchangeFactory.CreateFutures(account);
             var candles = await service.GetKlinesAsync(symbol, timeframe, limit);
-            if (service is IDisposable disposable) disposable.Dispose();
-
             return Ok(candles);
         }
         catch (Exception ex)
@@ -57,7 +60,7 @@ public class TesterController : ControllerBase
     }
 
     [HttpPost("simulate")]
-    public async Task<IActionResult> Simulate([FromBody] SimulationRequest request)
+    public async Task<IActionResult> Simulate([FromBody] SimulationRunRequest request, CancellationToken ct)
     {
         var account = await _db.ExchangeAccounts
             .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
@@ -66,40 +69,13 @@ public class TesterController : ControllerBase
         if (account == null)
             return NotFound();
 
-        if (request.CandleLimit < 1) request.CandleLimit = 1;
-        if (request.CandleLimit > 1000) request.CandleLimit = 1000;
-
         try
         {
-            var service = _exchangeFactory.CreateFutures(account);
-            var candles = await service.GetKlinesAsync(request.Symbol, request.Timeframe, request.CandleLimit);
-            if (service is IDisposable disposable) disposable.Dispose();
-
-            var config = new EmaBounceConfig
-            {
-                IndicatorType = request.IndicatorType,
-                IndicatorLength = request.IndicatorLength,
-                CandleCount = request.CandleCount,
-                OffsetPercent = request.OffsetPercent,
-                TakeProfitPercent = request.TakeProfitPercent,
-                StopLossPercent = request.StopLossPercent,
-                Symbol = request.Symbol,
-                Timeframe = request.Timeframe,
-                OrderSize = request.OrderSize,
-                UseMartingale = request.UseMartingale,
-                MartingaleCoeff = request.MartingaleCoeff,
-                UseSteppedMartingale = request.UseSteppedMartingale,
-                MartingaleStep = request.MartingaleStep,
-                UseDrawdownScale = request.UseDrawdownScale,
-                DrawdownBalance = request.DrawdownBalance,
-                DrawdownPercent = request.DrawdownPercent,
-                DrawdownTarget = request.DrawdownTarget
-            };
-
-            var result = EmaBounceSimulator.Run(candles, config);
+            using var service = _exchangeFactory.CreateFutures(account);
+            var result = await _engine.RunAsync(request, service, ct);
             return Ok(result);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
             return BadRequest(new { message = ex.Message });
         }

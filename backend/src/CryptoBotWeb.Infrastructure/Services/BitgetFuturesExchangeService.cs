@@ -78,6 +78,130 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
             .ToList();
     }
 
+    // ─────────────────── Historical range fetch (backtesting simulator) ───────────────────
+    // Klines: use GetHistoricalKlinesAsync (the /history-candles endpoint) rather than the plain
+    // GetKlinesAsync — history-candles reaches back far past the shallow window the regular
+    // candles endpoint keeps. It anchors on endTime (returns the newest `limit` bars up to
+    // endTime), so we page BACKWARD like Bybit/BingX. Deduped by OpenTime, returned ascending.
+    //
+    // Funding: Bitget's history-funding-rate endpoint is PAGE-numbered (pageSize + page), NOT
+    // time-ranged — it returns settlements newest-first. We walk pages forward, clip each to
+    // [fromUtc,toUtc), and stop once a page runs entirely older than fromUtc (or is short/empty).
+    private const int _rangeHardCap = 200_000;
+    private const int _rangePageDelayMs = 120;
+
+    public async Task<List<CandleDto>> GetKlinesRangeAsync(
+        string symbol, string timeframe, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
+    {
+        const int pageSize = 200; // Bitget history-candles max per request
+
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+        var interval = MapInterval(timeframe);
+        var span = GetTimeframeSpan(timeframe);
+
+        var byOpen = new Dictionary<DateTime, CandleDto>();
+        var cursorEnd = toUtc;
+
+        while (cursorEnd > fromUtc)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var result = await _client.FuturesApiV2.ExchangeData.GetHistoricalKlinesAsync(
+                BitgetProductTypeV2.UsdtFutures, bitgetSymbol, interval,
+                fromUtc, cursorEnd, pageSize, ct);
+
+            if (!result.Success)
+                throw new Exception($"Bitget GetKlinesRange failed for {symbol}: {result.Error?.Message ?? "unknown error"}");
+
+            var rows = result.Data?.ToList();
+            if (rows == null || rows.Count == 0) break;
+
+            var oldest = DateTime.MaxValue;
+            foreach (var k in rows)
+            {
+                if (k.OpenTime < oldest) oldest = k.OpenTime;
+                if (k.OpenTime < fromUtc || k.OpenTime >= toUtc) continue;
+                if (byOpen.ContainsKey(k.OpenTime)) continue;
+
+                byOpen[k.OpenTime] = new CandleDto
+                {
+                    OpenTime = k.OpenTime,
+                    CloseTime = k.OpenTime + span,
+                    Open = k.OpenPrice,
+                    High = k.HighPrice,
+                    Low = k.LowPrice,
+                    Close = k.ClosePrice,
+                    Volume = k.Volume
+                };
+            }
+
+            if (byOpen.Count > _rangeHardCap)
+                throw new InvalidOperationException(
+                    $"Bitget GetKlinesRange exceeded {_rangeHardCap} candles for {symbol} {timeframe} [{fromUtc:o}..{toUtc:o}] — narrow the window.");
+
+            if (oldest <= fromUtc) break;
+            var nextEnd = oldest.AddTicks(-1);
+            if (nextEnd >= cursorEnd) break; // no forward progress — bail rather than spin
+            cursorEnd = nextEnd;
+
+            await Task.Delay(_rangePageDelayMs, ct);
+        }
+
+        return byOpen.Values.OrderBy(c => c.OpenTime).ToList();
+    }
+
+    public async Task<List<FundingEventDto>> GetFundingHistoryAsync(
+        string symbol, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
+    {
+        const int pageSize = 100;  // Bitget history-funding-rate max page size
+        const int maxPages = 1000; // safety ceiling on the page walk
+
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+        var byTime = new Dictionary<DateTime, FundingEventDto>();
+
+        for (var page = 1; page <= maxPages; page++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var result = await _client.FuturesApiV2.ExchangeData.GetHistoricalFundingRateAsync(
+                BitgetProductTypeV2.UsdtFutures, bitgetSymbol, pageSize, page, ct);
+
+            if (!result.Success)
+                throw new Exception($"Bitget GetFundingHistory failed for {symbol}: {result.Error?.Message ?? "unknown error"}");
+
+            var rows = result.Data?.ToList();
+            if (rows == null || rows.Count == 0) break;
+
+            var reachedOlderThanWindow = false;
+            foreach (var f in rows)
+            {
+                // BitgetFundingRate.FundingTime is nullable — skip settlements without a timestamp.
+                if (f.FundingTime is not DateTime ts) continue;
+                if (ts < fromUtc) { reachedOlderThanWindow = true; continue; }
+                if (ts >= toUtc) continue;
+                if (byTime.ContainsKey(ts)) continue;
+
+                byTime[ts] = new FundingEventDto
+                {
+                    Timestamp = ts,
+                    Rate = f.FundingRate
+                };
+            }
+
+            if (byTime.Count > _rangeHardCap)
+                throw new InvalidOperationException(
+                    $"Bitget GetFundingHistory exceeded {_rangeHardCap} events for {symbol} [{fromUtc:o}..{toUtc:o}] — narrow the window.");
+
+            // Newest-first paging: once a page dips below fromUtc, or a short/last page arrives,
+            // there's nothing older left to collect.
+            if (reachedOlderThanWindow || rows.Count < pageSize) break;
+
+            await Task.Delay(_rangePageDelayMs, ct);
+        }
+
+        return byTime.Values.OrderBy(e => e.Timestamp).ToList();
+    }
+
     public async Task<decimal?> GetTickerPriceAsync(string symbol)
     {
         var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
