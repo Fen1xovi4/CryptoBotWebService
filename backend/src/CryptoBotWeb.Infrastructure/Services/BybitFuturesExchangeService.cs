@@ -123,6 +123,15 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
     // and returned ascending. A hard cap guards against a runaway loop on a mis-sized window.
     private const int _rangeHardCap = 200_000;
     private const int _rangePageDelayMs = 120;
+    private const int _rangeMaxRetries = 6;
+    private const int _rangeRetryBaseDelayMs = 500;
+
+    // Bybit surfaces rate-limit rejection as "Too many visits. Exceeded the API Rate Limit."
+    // Treat those as transient (retryable); everything else is a hard failure.
+    private static bool IsTransient(string? errorMessage) =>
+        errorMessage != null &&
+        (errorMessage.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+         || errorMessage.Contains("too many", StringComparison.OrdinalIgnoreCase));
 
     public async Task<List<CandleDto>> GetKlinesRangeAsync(
         string symbol, string timeframe, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
@@ -143,6 +152,16 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             var result = await _client.V5Api.ExchangeData.GetKlinesAsync(
                 Category.Linear, bybitSymbol, interval,
                 startTime: fromUtc, endTime: cursorEnd, limit: pageSize, ct: ct);
+
+            // Rate-limit / transient failures are retried with exponential backoff — over a long
+            // window we make hundreds of paged requests, and a single 429 shouldn't kill the run.
+            for (var attempt = 0; !result.Success && IsTransient(result.Error?.Message) && attempt < _rangeMaxRetries; attempt++)
+            {
+                await Task.Delay(_rangeRetryBaseDelayMs * (int)Math.Pow(2, attempt), ct);
+                result = await _client.V5Api.ExchangeData.GetKlinesAsync(
+                    Category.Linear, bybitSymbol, interval,
+                    startTime: fromUtc, endTime: cursorEnd, limit: pageSize, ct: ct);
+            }
 
             if (!result.Success)
                 throw new Exception($"Bybit GetKlinesRange failed for {symbol}: {result.Error?.Message ?? "unknown error"}");
@@ -200,6 +219,14 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             var result = await _client.V5Api.ExchangeData.GetFundingRateHistoryAsync(
                 Category.Linear, bybitSymbol,
                 startTime: fromUtc, endTime: cursorEnd, limit: pageSize, ct: ct);
+
+            for (var attempt = 0; !result.Success && IsTransient(result.Error?.Message) && attempt < _rangeMaxRetries; attempt++)
+            {
+                await Task.Delay(_rangeRetryBaseDelayMs * (int)Math.Pow(2, attempt), ct);
+                result = await _client.V5Api.ExchangeData.GetFundingRateHistoryAsync(
+                    Category.Linear, bybitSymbol,
+                    startTime: fromUtc, endTime: cursorEnd, limit: pageSize, ct: ct);
+            }
 
             if (!result.Success)
                 throw new Exception($"Bybit GetFundingHistory failed for {symbol}: {result.Error?.Message ?? "unknown error"}");

@@ -75,6 +75,10 @@ public class TesterController : ControllerBase
             var result = await _engine.RunAsync(request, service, ct);
             return Ok(result);
         }
+        catch (NotSupportedException)
+        {
+            return BadRequest(new { message = $"Биржа {account.ExchangeType} не поддерживается симулятором. Используйте аккаунт Bybit, Bitget или BingX." });
+        }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
             return BadRequest(new { message = ex.Message });
