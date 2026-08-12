@@ -730,9 +730,11 @@ public class SmaDcaHandler : IStrategyHandler
         // and the safety-net spins forever.
         decimal closeQty = state.TotalQuantity;
         PositionDto? livePos = null;
+        var probeOk = false;
         try
         {
             livePos = await exchange.GetPositionAsync(config.Symbol, state.IsLong ? "Long" : "Short");
+            probeOk = true;
         }
         catch (NotSupportedException) { /* fall back to state qty */ }
         catch (Exception ex)
@@ -740,19 +742,25 @@ public class SmaDcaHandler : IStrategyHandler
             _logger.LogWarning(ex, "SmaDca safety-net: GetPositionAsync failed for {Symbol}", config.Symbol);
         }
 
+        // A probe that SUCCEEDED and returned null means "no position on this side": all three
+        // exchange clients throw on API failure and return null only for a genuinely empty
+        // position (see GetPositionAsync in the Bybit/Bitget/BingX services). Treating that null
+        // as "unknown → use state qty" is what made Bybit reject the close with
+        // "current position is zero, cannot fix reduce-only order qty" on every tick, forever.
+        if (probeOk && (livePos == null || livePos.Quantity <= 0))
+        {
+            // Position vanished from the exchange between TP-cross and now — treat as already
+            // closed externally. Don't spam closes; reset state and let the next cycle start.
+            Log(strategy, "Warning",
+                $"⚠️ Safety-net: позиция уже закрыта на бирже (state.qty={state.TotalQuantity}, " +
+                $"exchange.qty=0) — очищаем state без market-close");
+            ResetPositionState(state);
+            state.SkipNextCandle = true;
+            return true;
+        }
+
         if (livePos != null)
         {
-            if (livePos.Quantity <= 0)
-            {
-                // Position vanished from the exchange between TP-cross and now — treat as already
-                // closed externally. Don't spam closes; reset state and let the next cycle start.
-                Log(strategy, "Warning",
-                    $"⚠️ Safety-net: позиция уже закрыта на бирже (state.qty={state.TotalQuantity}, " +
-                    $"exchange.qty=0) — очищаем state без market-close");
-                ResetPositionState(state);
-                state.SkipNextCandle = true;
-                return true;
-            }
             if (livePos.Quantity < state.TotalQuantity)
             {
                 Log(strategy, "Warning",
@@ -768,6 +776,20 @@ public class SmaDcaHandler : IStrategyHandler
 
         if (!closeResult.Success)
         {
+            // Reduce-only close of a position that doesn't exist can never succeed — retrying it
+            // every grace period just spams the log. Confirm with a fresh probe (guards against a
+            // transient rejection while the position is actually alive), then drop the phantom.
+            if (ExchangeErrorHelper.IsPositionGoneError(closeResult.ErrorMessage)
+                && await ConfirmPositionClosed(strategy, config, exchange, ct))
+            {
+                Log(strategy, "Warning",
+                    $"⚠️ Safety-net: биржа сообщает, что позиции нет ({closeResult.ErrorMessage}) — " +
+                    "очищаем фантомный state без market-close");
+                ResetPositionState(state);
+                state.SkipNextCandle = true;
+                return true;
+            }
+
             Log(strategy, "Error",
                 $"Не удалось маркет-закрыть позицию (safety net): {closeResult.ErrorMessage}. Повтор на следующем тике.");
             // Reset the timer so we retry from scratch rather than spamming closes.
@@ -1216,16 +1238,11 @@ public class SmaDcaHandler : IStrategyHandler
             state.TakeProfitOrderId = null;
             var err = result.ErrorMessage ?? "";
 
-            // Bitget returns "No position to close" / "number of closed positions cannot exceed..."
-            // BingX returns "The Reduce Only order can only decrease the position..." when the
-            // position is already gone. Without this check the heal path retries forever
-            // (we saw 3500+ retries in 10h on TEST2). Treat as an external close: record TP fill
-            // and reset state so a fresh entry can fire on the next signal.
-            if (err.Contains("No position", StringComparison.OrdinalIgnoreCase)
-                || err.Contains("number of closed positions", StringComparison.OrdinalIgnoreCase)
-                || err.Contains("Reduce Only order", StringComparison.OrdinalIgnoreCase)
-                || err.Contains("decrease the position", StringComparison.OrdinalIgnoreCase)
-                || err.Contains("truncated to zero", StringComparison.OrdinalIgnoreCase))
+            // The exchange says the position this reduce-only TP targets doesn't exist. Without
+            // this check the heal path retries forever (we saw 3500+ retries in 10h on TEST2).
+            // Treat as an external close: record TP fill and reset state so a fresh entry can
+            // fire on the next signal.
+            if (ExchangeErrorHelper.IsPositionGoneError(err))
             {
                 // The error string is reactive evidence, but Bitget has been seen to emit it
                 // transiently. Confirm with a second GetPositionAsync probe before resetting.

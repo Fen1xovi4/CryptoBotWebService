@@ -461,8 +461,10 @@ public class EmaBounceHandler : IStrategyHandler
             Log(strategy, "Error", $"Ошибка закрытия LONG: {result.ErrorMessage}");
             _logger.LogError("Strategy {Id}: Failed to close LONG: {Error}", strategy.Id, result.ErrorMessage);
 
-            // Position already closed on exchange side — check DB for correct state
-            if (result.ErrorMessage != null && result.ErrorMessage.Contains("No position", StringComparison.OrdinalIgnoreCase))
+            // Position already closed on exchange side — check DB for correct state.
+            // Matching only "No position" missed Bybit's "current position is zero, cannot fix
+            // reduce-only order qty", leaving the bot retrying a doomed close every tick.
+            if (ExchangeErrorHelper.IsPositionGoneError(result.ErrorMessage))
             {
                 // Check if API already handled the close (manual close) with correct PnL
                 var dbValues = await _db.Entry(strategy).GetDatabaseValuesAsync(ct);
@@ -534,8 +536,9 @@ public class EmaBounceHandler : IStrategyHandler
             Log(strategy, "Error", $"Ошибка закрытия SHORT: {result.ErrorMessage}");
             _logger.LogError("Strategy {Id}: Failed to close SHORT: {Error}", strategy.Id, result.ErrorMessage);
 
-            // Position already closed on exchange side — check DB for correct state
-            if (result.ErrorMessage != null && result.ErrorMessage.Contains("No position", StringComparison.OrdinalIgnoreCase))
+            // Position already closed on exchange side — check DB for correct state.
+            // See the parallel note in CloseLongPosition on why this uses the shared matcher.
+            if (ExchangeErrorHelper.IsPositionGoneError(result.ErrorMessage))
             {
                 // Check if API already handled the close (manual close) with correct PnL
                 var dbValues = await _db.Entry(strategy).GetDatabaseValuesAsync(ct);

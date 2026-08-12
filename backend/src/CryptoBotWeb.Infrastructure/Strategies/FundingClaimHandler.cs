@@ -450,8 +450,9 @@ public class FundingClaimHandler : IStrategyHandler
             _logger.LogError("Strategy {Id}: Failed to close {Dir}: {Error}",
                 strategy.Id, state.Direction, result.ErrorMessage);
 
-            if (result.ErrorMessage != null &&
-                result.ErrorMessage.Contains("No position", StringComparison.OrdinalIgnoreCase))
+            // Shared matcher: "No position" alone missed Bybit's "current position is zero,
+            // cannot fix reduce-only order qty", so a phantom position retried the close forever.
+            if (ExchangeErrorHelper.IsPositionGoneError(result.ErrorMessage))
             {
                 Log(strategy, "Warning", "Position already closed externally — moving to Idle");
                 await ResetToIdle(strategy, config, state, exchange, ct);
