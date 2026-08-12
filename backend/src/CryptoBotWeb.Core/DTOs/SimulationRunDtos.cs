@@ -16,6 +16,13 @@ public class SimulationRunRequest
     /// <summary>Second price series for GridHedge CrossTicker mode; null otherwise.</summary>
     public string? SecondSymbol { get; set; }
 
+    /// <summary>
+    /// Second exchange account — the other venue of a FuturesArbitrage pair. REQUIRED for
+    /// FuturesArbitrage (its second price series must come from a DIFFERENT exchange, not from a
+    /// second symbol on the same one) and ignored by every other strategy type.
+    /// </summary>
+    public Guid? SecondAccountId { get; set; }
+
     /// <summary>Explicit UTC window. When FromUtc is null, the window is the last <see cref="Days"/> days.</summary>
     public DateTime? FromUtc { get; set; }
     public DateTime? ToUtc { get; set; }

@@ -274,6 +274,45 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         return ticker?.LastPrice;
     }
 
+    public async Task<BookTickerDto?> GetBookTickerAsync(string symbol)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            // Bybit V5 has no separate book-ticker endpoint: the /v5/market/tickers payload already
+            // carries top-of-book (bid1Price/bid1Size/ask1Price/ask1Size), surfaced by Bybit.Net as
+            // BestBid*/BestAsk*. Same call as GetTickerPriceAsync, so no extra rate-limit class.
+            var result = await _client.V5Api.ExchangeData.GetLinearInverseTickersAsync(Category.Linear, bybitSymbol);
+            if (!result.Success || result.Data?.List == null)
+                return null;
+
+            var ticker = result.Data.List.FirstOrDefault();
+            if (ticker == null)
+                return null;
+
+            // Nullable on the SDK model — a symbol with an empty side (halted/pre-listing) yields
+            // no executable spread, so treat it as a failed fetch rather than price 0.
+            var bid = ticker.BestBidPrice;
+            var ask = ticker.BestAskPrice;
+            if (bid == null || ask == null || bid.Value <= 0 || ask.Value <= 0)
+                return null;
+
+            return new BookTickerDto
+            {
+                Symbol = symbol,
+                BidPrice = bid.Value,
+                BidQuantity = ticker.BestBidQuantity ?? 0m,
+                AskPrice = ask.Value,
+                AskQuantity = ticker.BestAskQuantity ?? 0m,
+                Timestamp = DateTime.UtcNow
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     public async Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount)
     {
         var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);

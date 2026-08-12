@@ -112,6 +112,47 @@ internal sealed class SimLedger
         });
     }
 
+    /// <summary>
+    /// Records the close of a MULTI-LEG position — one logical round trip that is closed by several
+    /// fills, possibly on different venues (cross-exchange arbitrage pair). The caller supplies the
+    /// aggregated numbers directly: <paramref name="notionalUsd"/> and <paramref name="closeFeeUsd"/>
+    /// for the closing fills, and <paramref name="entryFeesUsd"/> for the fees THIS position accrued
+    /// while opening. That is necessary because the single-position fee pool used by
+    /// <see cref="RecordClose"/> cannot attribute entry fees when several positions are open at once.
+    /// Counts as ONE closed trade for the win-rate statistics.
+    /// </summary>
+    public void RecordCloseMultiLeg(DateTime time, string side, string action, decimal price, decimal qty,
+        decimal notionalUsd, decimal closeFeeUsd, decimal entryFeesUsd, decimal grossRealizedUsd,
+        decimal pnlPercent, string reason)
+    {
+        FeesUsd += closeFeeUsd;
+        GrossRealizedUsd += grossRealizedUsd;
+
+        // The opening legs already booked their fees (into FeesUsd and the pool) via RecordOpen —
+        // drain this position's share so a book with several open positions stays consistent.
+        _openPositionFees = Math.Max(0m, _openPositionFees - entryFeesUsd);
+
+        var netUsd = grossRealizedUsd - entryFeesUsd - closeFeeUsd;
+
+        ClosedTrades++;
+        if (netUsd > 0) WinningTrades++;
+        else LosingTrades++;
+
+        Trades.Add(new SimTrade
+        {
+            Time = time,
+            Side = side,
+            Action = action,
+            Price = price,
+            Quantity = qty,
+            NotionalUsd = Math.Round(notionalUsd, 8),
+            FeeUsd = Math.Round(closeFeeUsd, 8),
+            PnlUsd = Math.Round(netUsd, 8),
+            PnlPercent = Math.Round(pnlPercent, 6),
+            Reason = reason
+        });
+    }
+
     /// <summary>Update peak simultaneous open notional (cost basis of the live position).</summary>
     public void TrackOpenNotional(decimal openNotionalUsd)
     {

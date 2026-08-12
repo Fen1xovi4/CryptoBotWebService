@@ -6,6 +6,10 @@ public class Strategy
 {
     public Guid Id { get; set; }
     public Guid AccountId { get; set; }
+
+    // FuturesArbitrage only: the second exchange account (the other leg). Null for all
+    // single-exchange strategies. Delete of that account is Restrict — remove the bot first.
+    public Guid? SecondAccountId { get; set; }
     public Guid? WorkspaceId { get; set; }
     public Guid? TelegramBotId { get; set; }
     public string Name { get; set; } = string.Empty;
@@ -17,6 +21,7 @@ public class Strategy
     public DateTime? StartedAt { get; set; }
 
     public ExchangeAccount Account { get; set; } = null!;
+    public ExchangeAccount? SecondAccount { get; set; }
     public Workspace? Workspace { get; set; }
     public TelegramBot? TelegramBot { get; set; }
     public ICollection<Trade> Trades { get; set; } = new List<Trade>();

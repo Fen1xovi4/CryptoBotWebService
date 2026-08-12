@@ -188,7 +188,7 @@ public class AccountsController : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
-    public async Task<IActionResult> Delete(Guid id)
+    public async Task<IActionResult> Delete(Guid id, [FromQuery] bool force = false)
     {
         var account = await _db.ExchangeAccounts
             .FirstOrDefaultAsync(a => a.Id == id && a.UserId == GetUserId());
@@ -196,6 +196,21 @@ public class AccountsController : ControllerBase
         if (account == null)
             return NotFound();
 
+        // Deleting an account cascade-deletes its strategies, trades and logs (hard delete,
+        // no soft-delete). Without ?force=true, refuse while any strategies exist so a misclick
+        // can't wipe bots — the client must re-confirm and retry with force=true. We return the
+        // bot count so the UI can name what would be deleted.
+        var strategyCount = await _db.Strategies.CountAsync(s => s.AccountId == id);
+        if (strategyCount > 0 && !force)
+            return BadRequest(new
+            {
+                message = $"На аккаунте есть боты ({strategyCount} шт.) — удалите их перед удалением аккаунта",
+                strategyCount,
+                requiresForce = true
+            });
+
+        // force=true (or no bots): the DB cascade on Account → Strategies → Trades/Logs
+        // removes the bots along with the account in one transaction.
         _db.ExchangeAccounts.Remove(account);
         await _db.SaveChangesAsync();
         return NoContent();

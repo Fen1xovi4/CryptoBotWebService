@@ -38,6 +38,15 @@ public interface IFuturesExchangeService : IDisposable
     Task<List<FundingEventDto>> GetFundingHistoryAsync(string symbol, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default) =>
         throw new NotSupportedException("GetFundingHistoryAsync not implemented");
     Task<decimal?> GetTickerPriceAsync(string symbol);
+
+    /// <summary>
+    /// Best bid/ask (top of book) for a futures symbol. Used by FuturesArbitrage, where the
+    /// executable spread must be computed from bid/ask, not last price. Returns null on a
+    /// transient fetch failure — caller should skip the tick, not treat it as price 0.
+    /// </summary>
+    Task<BookTickerDto?> GetBookTickerAsync(string symbol) =>
+        throw new NotSupportedException("GetBookTickerAsync not implemented");
+
     Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount);
     Task<OrderResultDto> OpenShortAsync(string symbol, decimal quoteAmount);
     Task<OrderResultDto> CloseLongAsync(string symbol, decimal quantity);

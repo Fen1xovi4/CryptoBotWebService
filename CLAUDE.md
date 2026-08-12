@@ -17,7 +17,7 @@ Accounts on all three exchanges must be configured in one-way mode. Sending hedg
 
 ### Exception: SmartGridHedge
 
-The `SmartGridHedge` strategy requires **Bybit hedge position mode** on its `ExchangeAccount` — it holds simultaneous long (initial qInit + DCA buys, `positionIdx=1`) and short (Q_hedge + paired skim shorts, `positionIdx=2`) legs on the same futures symbol. No other strategy is allowed on that account; one-way-mode strategies (MaratG, HuntingFunding, FundingClaim, SmaDca, GridFloat, GridHedge) must use a different account. The handler calls `/v5/position/switch-mode` at bot start and refuses to run if the switch fails.
+The `SmartGridHedge` strategy requires **Bybit hedge position mode** on its `ExchangeAccount` — it holds simultaneous long (initial qInit + DCA buys, `positionIdx=1`) and short (Q_hedge + paired skim shorts, `positionIdx=2`) legs on the same futures symbol. No other strategy is allowed on that account; one-way-mode strategies (MaratG, HuntingFunding, FundingClaim, SmaDca, GridFloat, GridHedge, FuturesArbitrage) must use a different account. The handler calls `/v5/position/switch-mode` at bot start and refuses to run if the switch fails.
 
 ## Local development ports
 
@@ -62,7 +62,7 @@ All NuGet versions are pinned exactly (see NuGet pinning note below).
 
 ## Trading strategies
 
-Seven state-machine-driven strategies live in `backend/src/CryptoBotWeb.Infrastructure/Strategies/`. Each has its own `*Config` (user-editable) and `*State` (runtime) DTO, both serialized to `ConfigJson` / `StateJson` JSONB columns on the `strategies` table.
+Eight state-machine-driven strategies live in `backend/src/CryptoBotWeb.Infrastructure/Strategies/`. Each has its own `*Config` (user-editable) and `*State` (runtime) DTO, both serialized to `ConfigJson` / `StateJson` JSONB columns on the `strategies` table.
 
 - **MaratG / EMA Bounce** — `EmaBounceHandler.cs` — EMA/SMA indicator entries with martingale on reversal.
 - **HuntingFunding** — `HuntingFundingHandler.cs` — funding-rate extreme hunter; hourly auto-rotation of the tradable ticker via `FundingTickerRotationService`.
@@ -71,6 +71,7 @@ Seven state-machine-driven strategies live in `backend/src/CryptoBotWeb.Infrastr
 - **GridFloat** — `GridFloatHandler.cs` — single-direction floating grid; independent batches with per-batch reduce-only TPs, re-anchor after full close.
 - **GridHedge** — `GridHedgeHandler.cs` — uniform-step long grid plus one static futures short hedge; SameTicker or CrossTicker; one cycle per start.
 - **SmartGridHedge** — `SmartGridHedgeHandler.cs` — geometric symmetric grid around P0 with a static short hedge (Bybit hedge mode only); skim cells per SkimMode; HBreak/LBreak hard-close with AutoRestart.
+- **FuturesArbitrage** — `ArbitrageHandler.cs` — cross-exchange perp-perp arbitrage. The ONLY strategy with TWO exchange accounts (`Strategy.AccountId` + `Strategy.SecondAccountId`, FK Restrict) on two DIFFERENT exchanges (Bybit/Bitget/BingX, no Dzengi); spread computed from best bid/ask (`GetBookTickerAsync`, REST-polled on the 5s tick — no websockets in V1); a "spread grid" of levels, each opening (short expensive / long cheap, both market, one-way mode) at its entry spread and closing at its exit spread; direction locked while any level is open; at most one level opens per tick; leg-risk rollback with naked-leg retry; stops itself after MaxConsecutiveFailures without touching positions. Funding is NOT in recorded PnL (V1).
 
 Execution: `TradingHostedService` in the Worker runs a 5-second loop with up to 20 strategies in parallel, dispatching each active strategy to its matching handler. `FundingTickerRotationService` fires at :50 past each hour to (re)assign tickers to `HuntingFunding` bots based on upcoming funding rates, workspace-level uniqueness, and the symbol blacklist.
 
@@ -78,7 +79,8 @@ Execution: `TradingHostedService` in the Worker runs a 5-second loop with up to 
 
 Backtesting lives behind the `/tester` page and `TesterController` — **all three layers are Admin-gated (sidebar, `AdminRoute`, `[Authorize(Roles = "Admin")]`) and must stay that way**. Simulations are run locally (dev machine), not on the VPS.
 
-- One `IStrategySimulator` per strategy type in `Infrastructure/Strategies/Simulation/` (registry pattern mirrors live handlers; all seven types covered). Simulators are pure — no I/O.
+- One `IStrategySimulator` per strategy type in `Infrastructure/Strategies/Simulation/` (registry pattern mirrors live handlers; all eight types covered). Simulators are pure — no I/O.
+- FuturesArbitrage sim needs a second account (`SimulationRunRequest.SecondAccountId`, different exchange) for the second 1m price path; bid/ask history doesn't exist, so both books are approximated by tick price (book spread = 0) — results are optimistic vs live.
 - `SimulationEngine` (`Infrastructure/Simulation/`) downloads the 1m price path via `IFuturesExchangeService.GetKlinesRangeAsync` (paginated; Bybit/Bitget/BingX, Dzengi unsupported) plus `GetFundingHistoryAsync` for funding strategies, then dispatches by `StrategyType`.
 - Price path convention: 4 ticks per 1m candle (`CandlePathHelper`), indicator candles aggregated via `CandleAggregator`. Fees: maker on resting limit fills, taker on market fills (SmartGridHedge uses its own config bps, as live).
 - `POST /api/tester/simulate` takes `SimulationRunRequest` with `configJson` in the same shape as `strategies.ConfigJson` (workspace-level fields flattened in for HuntingFunding/FundingClaim), so a live bot's config replays as-is. Known sim limits: ticker auto-rotation not modeled (fixed symbol), funding snapshot approximated to the settlement minute, no order-book/slippage.

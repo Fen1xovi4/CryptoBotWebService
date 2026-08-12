@@ -220,6 +220,44 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
       return { ok: true, configJson };
     }
 
+    case 'FuturesArbitrage': {
+      const arb = forms.arb;
+      const levels = forms.arbLevels
+        .map((l) => ({
+          entrySpreadPercent: Number(l.entrySpreadPercent),
+          exitSpreadPercent: Number(l.exitSpreadPercent),
+          notionalUsdt: Number(l.notionalUsdt),
+        }))
+        .sort((a, b) => a.entrySpreadPercent - b.entrySpreadPercent);
+      if (levels.length === 0) {
+        return { ok: false, error: 'Добавьте хотя бы один уровень арбитража' };
+      }
+      for (const l of levels) {
+        if (!(l.exitSpreadPercent >= 0) || !(l.entrySpreadPercent > l.exitSpreadPercent)) {
+          return { ok: false, error: 'Вход % должен быть больше выхода %, а выход % ≥ 0' };
+        }
+        if (!(l.notionalUsdt > 0)) {
+          return { ok: false, error: 'Объём USDT на уровень должен быть > 0' };
+        }
+      }
+      if (!(Number(arb.leverage) >= 1)) {
+        return { ok: false, error: 'Плечо должно быть ≥ 1' };
+      }
+      if (!(Number(arb.maxConsecutiveFailures) >= 1)) {
+        return { ok: false, error: 'Макс. подряд ошибок должно быть ≥ 1' };
+      }
+      const secondSym = arb.secondSymbol.trim() === '' ? '' : clean(arb.secondSymbol);
+      const configJson = JSON.stringify({
+        symbol: sym,
+        secondSymbol: secondSym,
+        leverage: Number(arb.leverage),
+        allowBothDirections: arb.allowBothDirections,
+        levels,
+        maxConsecutiveFailures: Number(arb.maxConsecutiveFailures),
+      });
+      return { ok: true, configJson, secondSymbol: secondSym || undefined };
+    }
+
     case 'MaratG':
     default: {
       const configJson = JSON.stringify({

@@ -1,5 +1,8 @@
 using System.Security.Claims;
+using CryptoBotWeb.Core.Constants;
 using CryptoBotWeb.Core.DTOs;
+using CryptoBotWeb.Core.Entities;
+using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using CryptoBotWeb.Infrastructure.Simulation;
@@ -62,17 +65,40 @@ public class TesterController : ControllerBase
     [HttpPost("simulate")]
     public async Task<IActionResult> Simulate([FromBody] SimulationRunRequest request, CancellationToken ct)
     {
-        var account = await _db.ExchangeAccounts
-            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
-            .FirstOrDefaultAsync(a => a.Id == request.AccountId && a.UserId == GetUserId());
-
+        var account = await LoadOwnedAccountAsync(request.AccountId);
         if (account == null)
             return NotFound();
 
+        // FuturesArbitrage prices a spread between two venues, so it needs a second account whose
+        // exchange differs from the primary one — same rules the live handler validates.
+        ExchangeAccount? secondAccount = null;
+        if (request.StrategyType == StrategyTypes.FuturesArbitrage)
+        {
+            if (!request.SecondAccountId.HasValue)
+                return BadRequest(new { message = "Для FuturesArbitrage нужен второй аккаунт (secondAccountId) — арбитраж торгуется между двумя биржами." });
+
+            if (request.SecondAccountId.Value == request.AccountId)
+                return BadRequest(new { message = "Второй аккаунт совпадает с первым — межбиржевому арбитражу нужны две разные биржи." });
+
+            secondAccount = await LoadOwnedAccountAsync(request.SecondAccountId.Value);
+            if (secondAccount == null)
+                return NotFound();
+
+            if (account.ExchangeType == ExchangeType.Dzengi || secondAccount.ExchangeType == ExchangeType.Dzengi)
+                return BadRequest(new { message = "Dzengi не поддерживается симулятором. Используйте аккаунты Bybit, Bitget или BingX." });
+
+            if (account.ExchangeType == secondAccount.ExchangeType)
+                return BadRequest(new { message = $"Оба аккаунта на {account.ExchangeType} — межбиржевому арбитражу нужны две разные биржи." });
+        }
+
+        IFuturesExchangeService? secondService = null;
         try
         {
             using var service = _exchangeFactory.CreateFutures(account);
-            var result = await _engine.RunAsync(request, service, ct);
+            if (secondAccount != null)
+                secondService = _exchangeFactory.CreateFutures(secondAccount);
+
+            var result = await _engine.RunAsync(request, service, secondService, ct);
             return Ok(result);
         }
         catch (NotSupportedException)
@@ -83,5 +109,15 @@ public class TesterController : ControllerBase
         {
             return BadRequest(new { message = ex.Message });
         }
+        finally
+        {
+            secondService?.Dispose();
+        }
     }
+
+    /// <summary>Account lookup with the proxy graph the exchange factory needs, scoped to the caller.</summary>
+    private Task<ExchangeAccount?> LoadOwnedAccountAsync(Guid accountId) =>
+        _db.ExchangeAccounts
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
+            .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
 }
