@@ -109,6 +109,13 @@ public class AppDbContext : DbContext
                 .WithMany(a => a.Strategies)
                 .HasForeignKey(x => x.AccountId)
                 .OnDelete(DeleteBehavior.Cascade);
+            // FuturesArbitrage second leg. Restrict (not Cascade) — a second Cascade path onto
+            // exchange_accounts would silently wipe arbitrage bots when an unrelated-looking
+            // account is deleted; force the user to remove the bot first.
+            e.HasOne(x => x.SecondAccount)
+                .WithMany()
+                .HasForeignKey(x => x.SecondAccountId)
+                .OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Workspace)
                 .WithMany(w => w.Strategies)
                 .HasForeignKey(x => x.WorkspaceId)

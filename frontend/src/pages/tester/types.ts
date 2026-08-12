@@ -8,6 +8,7 @@ export const STRATEGY_TYPES = [
   'SmartGridHedge',
   'HuntingFunding',
   'FundingClaim',
+  'FuturesArbitrage',
 ] as const;
 
 export type StrategyType = (typeof STRATEGY_TYPES)[number];
@@ -20,6 +21,7 @@ export const STRATEGY_LABELS: Record<StrategyType, string> = {
   SmartGridHedge: 'SmartGridHedge (геометрическая сетка + хедж)',
   HuntingFunding: 'HuntingFunding (охота за фандингом)',
   FundingClaim: 'FundingClaim (сбор фандинга)',
+  FuturesArbitrage: 'Арбитраж (фьюч/фьюч)',
 };
 
 export interface Account {
@@ -52,6 +54,12 @@ export interface GfTier {
   tp: string;
 }
 
+export interface ArbLevel {
+  entrySpreadPercent: string;
+  exitSpreadPercent: string;
+  notionalUsdt: string;
+}
+
 /* ── Simulate request/response (matches backend /tester/simulate contract) ── */
 
 export interface SimulateRequest {
@@ -59,6 +67,8 @@ export interface SimulateRequest {
   strategyType: StrategyType;
   symbol: string;
   secondSymbol?: string | null;
+  /** Required for FuturesArbitrage — the account on the second exchange. */
+  secondAccountId?: string | null;
   fromUtc?: string | null;
   toUtc?: string | null;
   days: number;

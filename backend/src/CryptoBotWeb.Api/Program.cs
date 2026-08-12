@@ -50,6 +50,7 @@ builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>()
 // worker runs on a natural exit trigger. Scoped because it relies on the scoped AppDbContext.
 builder.Services.AddScoped<GridHedgeHandler>();
 builder.Services.AddScoped<SmartGridHedgeHandler>();
+builder.Services.AddScoped<ArbitrageHandler>();
 
 // Simulator (backtesting) — admin-only Tester module. One IStrategySimulator per strategy
 // type, resolved by SimulationEngine the same way the Worker resolves live handlers.
@@ -60,6 +61,7 @@ builder.Services.AddScoped<IStrategySimulator, GridHedgeSimulator>();
 builder.Services.AddScoped<IStrategySimulator, SmartGridHedgeSimulator>();
 builder.Services.AddScoped<IStrategySimulator, HuntingFundingSimulator>();
 builder.Services.AddScoped<IStrategySimulator, FundingClaimSimulator>();
+builder.Services.AddScoped<IStrategySimulator, ArbitrageSimulator>();
 builder.Services.AddScoped<SimulationEngine>();
 
 // CORS

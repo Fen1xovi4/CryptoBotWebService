@@ -22,6 +22,7 @@ builder.Services.AddScoped<IStrategyHandler, SmaDcaHandler>();
 builder.Services.AddScoped<IStrategyHandler, GridFloatHandler>();
 builder.Services.AddScoped<IStrategyHandler, GridHedgeHandler>();
 builder.Services.AddScoped<IStrategyHandler, SmartGridHedgeHandler>();
+builder.Services.AddScoped<IStrategyHandler, ArbitrageHandler>();
 builder.Services.AddScoped<ITelegramSignalService, TelegramSignalService>();
 builder.Services.AddScoped<IFundingTickerRotationService, FundingTickerRotationService>();
 builder.Services.AddScoped<ISymbolBlacklistService, SymbolBlacklistService>();

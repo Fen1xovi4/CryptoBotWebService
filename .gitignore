@@ -27,3 +27,4 @@ backend/publish/
 # OS
 .DS_Store
 Thumbs.db
+.claude-uploads/

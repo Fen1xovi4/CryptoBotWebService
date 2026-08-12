@@ -1,4 +1,4 @@
-import type { GfTier, HFLevel, SdLevel, SdTpShift } from './types';
+import type { ArbLevel, GfTier, HFLevel, SdLevel, SdTpShift } from './types';
 
 /* Field lists, defaults and units mirror the real bot-creation form in
  * ActiveBotsPage.tsx (AddStrategyModal) so a simulated config matches what a
@@ -96,6 +96,14 @@ export interface SghForm {
   takeProfitTargetUsd: string;
 }
 
+export interface ArbForm {
+  // Symbol on the second exchange; empty = same symbol as the primary leg.
+  secondSymbol: string;
+  leverage: string;
+  allowBothDirections: boolean;
+  maxConsecutiveFailures: string;
+}
+
 export interface AllForms {
   mg: MgForm;
   hf: HfForm;
@@ -108,6 +116,8 @@ export interface AllForms {
   gfTiers: GfTier[];
   gh: GhForm;
   sgh: SghForm;
+  arb: ArbForm;
+  arbLevels: ArbLevel[];
 }
 
 export const defaultMgForm: MgForm = {
@@ -206,6 +216,17 @@ export const defaultSghForm: SghForm = {
   takeProfitTargetUsd: '100',
 };
 
+export const defaultArbForm: ArbForm = {
+  secondSymbol: '',
+  leverage: '1',
+  allowBothDirections: true,
+  maxConsecutiveFailures: '3',
+};
+
+export const defaultArbLevels: ArbLevel[] = [
+  { entrySpreadPercent: '1', exitSpreadPercent: '0', notionalUsdt: '100' },
+];
+
 export function makeDefaultForms(): AllForms {
   return {
     mg: { ...defaultMgForm },
@@ -219,5 +240,7 @@ export function makeDefaultForms(): AllForms {
     gfTiers: defaultGfTiers.map((t) => ({ ...t })),
     gh: { ...defaultGhForm },
     sgh: { ...defaultSghForm },
+    arb: { ...defaultArbForm },
+    arbLevels: defaultArbLevels.map((l) => ({ ...l })),
   };
 }

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import api, { optimizeSmartGridHedge } from '../../api/client';
 import type { OptimizeSmartGridHedgeResponse } from '../../api/client';
 import type { AllForms } from './formDefaults';
-import type { HFLevel, StrategyType } from './types';
+import type { ArbLevel, HFLevel, StrategyType } from './types';
 import { gridHedgeRecommendation } from './buildConfig';
 
 const inputCls =
@@ -18,7 +18,7 @@ interface Props {
   setForms: React.Dispatch<React.SetStateAction<AllForms>>;
 }
 
-type ObjKey = 'mg' | 'hf' | 'sd' | 'fc' | 'gf' | 'gh' | 'sgh';
+type ObjKey = 'mg' | 'hf' | 'sd' | 'fc' | 'gf' | 'gh' | 'sgh' | 'arb';
 
 /** Renders the strategy-specific config fields for the tester. Field lists,
  * defaults and labels are copied from the real bot-creation form so the
@@ -72,6 +72,16 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
     setForms((f) => ({ ...f, hfLevels: f.hfLevels.filter((_, idx) => idx !== i) }));
   const updateHfLevel = (i: number, field: keyof HFLevel, value: number) =>
     setForms((f) => ({ ...f, hfLevels: f.hfLevels.map((l, idx) => (idx === i ? { ...l, [field]: value } : l)) }));
+
+  const addArbLevel = () =>
+    setForms((f) => ({
+      ...f,
+      arbLevels: [...f.arbLevels, { entrySpreadPercent: '1', exitSpreadPercent: '0', notionalUsdt: '100' }],
+    }));
+  const removeArbLevel = (i: number) =>
+    setForms((f) => ({ ...f, arbLevels: f.arbLevels.filter((_, idx) => idx !== i) }));
+  const updateArbLevel = (i: number, field: keyof ArbLevel, value: string) =>
+    setForms((f) => ({ ...f, arbLevels: f.arbLevels.map((l, idx) => (idx === i ? { ...l, [field]: value } : l)) }));
 
   if (strategyType === 'SmaDca') {
     const sd = forms.sd;
@@ -754,6 +764,86 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
             <input type="number" step="0.1" min="0" value={hf.fundingRateMax} onChange={(e) => patch('hf', { fundingRateMax: e.target.value })} className={inputCls} />
           </div>
         </div>
+      </>
+    );
+  }
+
+  if (strategyType === 'FuturesArbitrage') {
+    const arb = forms.arb;
+    return (
+      <>
+        <div className="rounded-lg border border-border/60 bg-bg-tertiary/40 px-3 py-2 text-xs text-text-secondary">
+          Символ и аккаунт второй биржи выбираются в блоке над стратегией (Account 2 / Symbol B).
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>Плечо</label>
+            <input type="number" min="1" step="1" value={arb.leverage} onChange={(e) => patch('arb', { leverage: e.target.value })} className={inputCls} />
+          </div>
+          <div>
+            <label className={labelCls}>Макс. подряд ошибок</label>
+            <input type="number" min="1" step="1" value={arb.maxConsecutiveFailures} onChange={(e) => patch('arb', { maxConsecutiveFailures: e.target.value })} className={inputCls} />
+          </div>
+        </div>
+
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input type="checkbox" checked={arb.allowBothDirections} onChange={(e) => patch('arb', { allowBothDirections: e.target.checked })}
+            className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+          <span className="text-sm text-text-primary">Разрешить обе стороны (шорт любой из бирж — не только фиксированное направление)</span>
+        </label>
+
+        <div>
+          <label className={labelCls}>Уровни арбитража</label>
+          <div className="rounded-lg border border-border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-bg-tertiary text-text-secondary text-xs">
+                  <th className="px-3 py-2 text-left font-medium">Вход %</th>
+                  <th className="px-3 py-2 text-left font-medium">Выход %</th>
+                  <th className="px-3 py-2 text-left font-medium">Объём USDT</th>
+                  <th className="px-3 py-2 w-8" />
+                </tr>
+              </thead>
+              <tbody>
+                {forms.arbLevels.map((lvl, i) => (
+                  <tr key={i} className="border-t border-border/50">
+                    <td className="px-3 py-1.5">
+                      <input type="number" step="0.01" min="0.01" value={lvl.entrySpreadPercent}
+                        onChange={(e) => updateArbLevel(i, 'entrySpreadPercent', e.target.value)}
+                        className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue" />
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <input type="number" step="0.01" min="0" value={lvl.exitSpreadPercent}
+                        onChange={(e) => updateArbLevel(i, 'exitSpreadPercent', e.target.value)}
+                        className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue" />
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <input type="number" step="1" min="1" value={lvl.notionalUsdt}
+                        onChange={(e) => updateArbLevel(i, 'notionalUsdt', e.target.value)}
+                        className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue" />
+                    </td>
+                    <td className="px-2 py-1.5 text-center">
+                      <button type="button" disabled={forms.arbLevels.length <= 1} onClick={() => removeArbLevel(i)}
+                        className="text-text-secondary/40 hover:text-accent-red disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        title="Удалить уровень">
+                        <XIcon />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button type="button" onClick={addArbLevel} className="mt-2 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors">
+            + Добавить уровень
+          </button>
+        </div>
+
+        <p className="text-xs text-text-secondary italic">
+          Уровень открывается, когда спред между биржами ≥ «Вход %» — шорт дорогой ноги и лонг дешёвой на «Объём USDT» на каждую ногу;
+          закрывается, когда спред ≤ «Выход %».
+        </p>
       </>
     );
   }

@@ -30,6 +30,7 @@ export default function TesterPage() {
   const [accountId, setAccountId] = useState('');
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [strategyType, setStrategyType] = useState<StrategyType>('MaratG');
+  const [secondAccountId, setSecondAccountId] = useState('');
   const [previewTimeframe, setPreviewTimeframe] = useState('1h');
 
   const [days, setDays] = useState(30);
@@ -101,6 +102,10 @@ export default function TesterPage() {
       setFormError('Выберите аккаунт и укажите символ');
       return;
     }
+    if (strategyType === 'FuturesArbitrage' && !secondAccountId) {
+      setFormError('Выберите второй аккаунт (другая биржа) для арбитража');
+      return;
+    }
     const build = buildSimConfig(strategyType, symbol, forms);
     if (!build.ok || !build.configJson) {
       setFormError(build.error ?? 'Некорректная конфигурация');
@@ -112,6 +117,7 @@ export default function TesterPage() {
       strategyType,
       symbol: symbol.replace(/\s+/g, '').toUpperCase(),
       secondSymbol: build.secondSymbol ?? null,
+      secondAccountId: strategyType === 'FuturesArbitrage' ? secondAccountId : null,
       fromUtc: useExplicitRange ? new Date(`${fromDate}T00:00:00Z`).toISOString() : null,
       toUtc: useExplicitRange ? new Date(`${toDate}T23:59:59Z`).toISOString() : null,
       days,
@@ -200,6 +206,45 @@ export default function TesterPage() {
             })}
           </select>
         </div>
+
+        {strategyType === 'FuturesArbitrage' && (
+          <>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-text-secondary">Account 2 (другая биржа) *</label>
+              <select
+                value={secondAccountId}
+                onChange={(e) => setSecondAccountId(e.target.value)}
+                className={`${inputCls} min-w-[200px]`}
+              >
+                <option value="">Select account...</option>
+                {accounts?.filter((a) => a.id !== accountId).map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} ({EXCHANGE_NAMES[a.exchangeType]})
+                  </option>
+                ))}
+              </select>
+              {secondAccountId && accounts && (() => {
+                const acc1 = accounts.find((a) => a.id === accountId);
+                const acc2 = accounts.find((a) => a.id === secondAccountId);
+                if (acc1 && acc2 && acc1.exchangeType === acc2.exchangeType) {
+                  return <p className="text-xs text-accent-yellow">⚠ Второй аккаунт должен быть на другой бирже</p>;
+                }
+                return null;
+              })()}
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium text-text-secondary">Symbol B (опционально)</label>
+              <input
+                type="text"
+                value={forms.arb.secondSymbol}
+                onChange={(e) => setForms((f) => ({ ...f, arb: { ...f.arb, secondSymbol: e.target.value.toUpperCase() } }))}
+                placeholder="пусто = тот же символ"
+                className={`${inputCls} w-[160px] font-mono`}
+              />
+            </div>
+          </>
+        )}
       </div>
 
       {/* Period + fees */}

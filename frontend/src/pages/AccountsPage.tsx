@@ -199,14 +199,24 @@ export default function AccountsPage() {
   }, [accounts]);
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => api.delete(`/accounts/${id}`),
+    mutationFn: ({ id, force }: { id: string; force?: boolean }) =>
+      api.delete(`/accounts/${id}`, { params: force ? { force: true } : undefined }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['accounts'] });
+      queryClient.invalidateQueries({ queryKey: ['strategies'] });
       useSubscriptionStore.getState().fetchSubscription();
     },
-    onError: (err: any) => {
-      const msg = err?.response?.data?.message || 'Failed to delete account';
-      alert(msg);
+    onError: (err: any, variables) => {
+      const data = err?.response?.data;
+      // Account still has bots: re-confirm and retry with force=true to cascade-delete them.
+      if (data?.requiresForce && !variables.force) {
+        const count = data.strategyCount ?? '';
+        if (confirm(`К аккаунту привязано ботов: ${count}. Удалить аккаунт вместе со всеми этими ботами? Это действие необратимо.`)) {
+          deleteMutation.mutate({ id: variables.id, force: true });
+        }
+        return;
+      }
+      alert(data?.message || 'Failed to delete account');
     },
   });
 
@@ -560,7 +570,7 @@ export default function AccountsPage() {
                         </button>
                         <button
                           onClick={() => {
-                            if (confirm('Delete this account?')) deleteMutation.mutate(acc.id);
+                            if (confirm('Delete this account?')) deleteMutation.mutate({ id: acc.id });
                           }}
                           className="px-3 py-1.5 text-xs font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
                         >

@@ -215,6 +215,45 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         return ticker?.LastPrice;
     }
 
+    public async Task<BookTickerDto?> GetBookTickerAsync(string symbol)
+    {
+        try
+        {
+            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+            // Bitget V2 /market/ticker returns top-of-book (bidPr/askPr/bidSz/askSz) alongside the
+            // last price, so no order-book call is needed. Unlike GetTickerPriceAsync (which pulls
+            // the whole product-type list) the single-symbol overload is used here — top of book is
+            // read per tick, and the all-symbols payload is ~500 rows.
+            var result = await _client.FuturesApiV2.ExchangeData.GetTickerAsync(
+                BitgetProductTypeV2.UsdtFutures, bitgetSymbol);
+
+            if (!result.Success || result.Data == null)
+                return null;
+
+            // bidPr/askPr are nullable on the SDK model — an empty side means no executable
+            // spread, so treat it as a failed fetch rather than price 0.
+            var bid = result.Data.BestBidPrice;
+            var ask = result.Data.BestAskPrice;
+            if (bid == null || ask == null || bid.Value <= 0 || ask.Value <= 0)
+                return null;
+
+            return new BookTickerDto
+            {
+                Symbol = symbol,
+                BidPrice = bid.Value,
+                BidQuantity = result.Data.BestBidQuantity ?? 0m,
+                AskPrice = ask.Value,
+                AskQuantity = result.Data.BestAskQuantity ?? 0m,
+                // Server-side snapshot time ("ts"); falls back to local clock if the field is absent.
+                Timestamp = result.Data.Timestamp == default ? DateTime.UtcNow : result.Data.Timestamp
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     public async Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount)
     {
         var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);

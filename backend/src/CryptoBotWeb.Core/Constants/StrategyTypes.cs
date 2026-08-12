@@ -9,4 +9,5 @@ public static class StrategyTypes
     public const string GridFloat = "GridFloat";
     public const string GridHedge = "GridHedge";
     public const string SmartGridHedge = "SmartGridHedge";
+    public const string FuturesArbitrage = "FuturesArbitrage";
 }

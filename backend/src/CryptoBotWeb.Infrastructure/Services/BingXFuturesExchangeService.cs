@@ -201,6 +201,40 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         return ticker?.LastPrice;
     }
 
+    public async Task<BookTickerDto?> GetBookTickerAsync(string symbol)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            // BingX swap/v2 has a dedicated symbol-order-book-ticker endpoint (bestBidPrice/
+            // bestBidQty/bestAskPrice/bestAskQty) — single symbol, unlike GetTickersAsync which
+            // returns every contract. Response carries no server timestamp.
+            var result = await _client.PerpetualFuturesApi.ExchangeData.GetBookTickerAsync(bingxSymbol);
+
+            if (!result.Success || result.Data == null)
+                return null;
+
+            // Prices are non-nullable on the SDK model, so a missing side deserializes as 0 —
+            // that's not an executable book, treat it as a failed fetch.
+            if (result.Data.BestBidPrice <= 0 || result.Data.BestAskPrice <= 0)
+                return null;
+
+            return new BookTickerDto
+            {
+                Symbol = symbol,
+                BidPrice = result.Data.BestBidPrice,
+                BidQuantity = result.Data.BestBidQuantity,
+                AskPrice = result.Data.BestAskPrice,
+                AskQuantity = result.Data.BestAskQuantity,
+                Timestamp = DateTime.UtcNow
+            };
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     public async Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount)
     {
         var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
