@@ -188,6 +188,26 @@ public sealed class QuoteStreamService : IQuoteStreamService, IDisposable
             _logger.LogWarning("Quote stream {Key}: {Error}", key, ex.Message);
         };
 
+        // The quiet failure modes. Without these a resubscribe that failed, or a server-side
+        // pause, leaves the entry looking healthy while quotes silently stop arriving — the
+        // consumer would then see nothing but "stale quote, no error".
+        subscription.ResubscribingFailed += error =>
+        {
+            entry.Connected = false;
+            entry.LastError = $"resubscribe failed: {error}";
+            _logger.LogWarning("Quote stream {Key}: resubscribe failed — {Error}", key, error);
+        };
+        subscription.ActivityPaused += () =>
+        {
+            entry.Connected = false;
+            _logger.LogWarning("Quote stream {Key}: paused by the server", key);
+        };
+        subscription.ActivityUnpaused += () =>
+        {
+            entry.Connected = true;
+            _logger.LogInformation("Quote stream {Key}: resumed", key);
+        };
+
         entry.Client = client;
         entry.Subscription = subscription;
         entry.Connected = true;

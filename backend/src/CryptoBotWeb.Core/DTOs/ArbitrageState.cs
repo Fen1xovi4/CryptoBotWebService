@@ -59,4 +59,8 @@ public class ArbitrageState
 
     // Throttle for the "stream is down, polling REST" warning.
     public DateTime? QuoteFallbackWarnedAt { get; set; }
+
+    // Ticks that fell back to REST since the last such warning. Turns a throttled warning into a
+    // frequency measurement: "2 ticks in 10 minutes" is a hiccup, "600" is a broken stream.
+    public long QuoteFallbackTicks { get; set; }
 }
