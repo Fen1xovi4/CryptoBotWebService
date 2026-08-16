@@ -919,16 +919,28 @@ public class ArbitrageHandler : IStrategyHandler
     private void WarnQuoteFallback(Strategy strategy, ArbitrageState state,
         Core.Enums.ExchangeType exchange, string symbol, DateTime nowUtc)
     {
+        state.QuoteFallbackTicks++;
+
         if (state.QuoteFallbackWarnedAt.HasValue &&
             nowUtc - state.QuoteFallbackWarnedAt.Value < TimeSpan.FromMinutes(QuoteFallbackWarnMinutes))
             return;
 
-        state.QuoteFallbackWarnedAt = nowUtc;
+        // Everything needed to tell the three causes apart without adding logging on the hot path:
+        // a quiet book (connected, updates rising, quote a few seconds old), a dead socket (age in
+        // minutes) and a stream that never started (no quote at all, or an error text).
+        var quote = _quotes.TryGetQuote(exchange, symbol);
         var status = _quotes.GetStatus(exchange, symbol);
+        var age = quote == null ? "never" : $"{quote.AgeMs(nowUtc) / 1000:F1}s ago";
+        var detail = $"connected={(status?.Connected ?? false ? "yes" : "no")}, " +
+                     $"updates={status?.UpdateCount ?? 0}, last quote {age}" +
+                     (status?.LastError is { } err ? $", error: {Trim(err, 80)}" : "");
 
         Log(strategy, "Warning",
-            $"No fresh websocket quote for {exchange} {symbol} — falling back to REST polling " +
-            $"({(status?.LastError is { } err ? Trim(err) : "stream not connected")})");
+            $"No fresh websocket quote for {exchange} {symbol} — {state.QuoteFallbackTicks} tick(s) on " +
+            $"REST polling in the last {QuoteFallbackWarnMinutes} min ({detail})");
+
+        state.QuoteFallbackWarnedAt = nowUtc;
+        state.QuoteFallbackTicks = 0;
     }
 
     /// <summary>Top-of-book read that swallows transient failures — null means "skip this tick".</summary>
