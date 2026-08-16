@@ -704,18 +704,29 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         }
     }
 
-    public async Task<bool> SetLeverageAsync(string symbol, int leverage)
+    public async Task<bool> SetLeverageAsync(string symbol, int leverage) =>
+        (await SetLeverageDetailedAsync(symbol, leverage)).Success;
+
+    public async Task<LeverageSetResult> SetLeverageDetailedAsync(string symbol, int leverage)
     {
         try
         {
             var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+
+            // One-way mode: BingX accepts only PositionSide.Both here (per the API docs on
+            // /openApi/swap/v2/trade/leverage) — LONG/SHORT are hedge-mode values.
             var result = await _client.PerpetualFuturesApi.Account.SetLeverageAsync(
                 bingxSymbol, BingX.Net.Enums.PositionSide.Both, leverage);
-            return result.Success;
+
+            if (result.Success) return LeverageSetResult.Ok();
+
+            return LeverageErrorHelper.IsAlreadyAtTargetLeverage(result.Error?.Code, result.Error?.Message)
+                ? LeverageSetResult.Unchanged()
+                : LeverageSetResult.Fail(LeverageErrorHelper.Describe(result.Error?.Code, result.Error?.Message));
         }
-        catch
+        catch (Exception ex)
         {
-            return false;
+            return LeverageSetResult.Fail(ex.Message);
         }
     }
 

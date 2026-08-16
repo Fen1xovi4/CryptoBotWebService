@@ -815,18 +815,28 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         }
     }
 
-    public async Task<bool> SetLeverageAsync(string symbol, int leverage)
+    public async Task<bool> SetLeverageAsync(string symbol, int leverage) =>
+        (await SetLeverageDetailedAsync(symbol, leverage)).Success;
+
+    public async Task<LeverageSetResult> SetLeverageDetailedAsync(string symbol, int leverage)
     {
         try
         {
             var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
             var result = await _client.V5Api.Account.SetLeverageAsync(
                 Category.Linear, bybitSymbol, leverage, leverage);
-            return result.Success;
+
+            if (result.Success) return LeverageSetResult.Ok();
+
+            // retCode 110043 ("leverage not modified") means the symbol is already on the target —
+            // reporting it as a failure produced a bogus warning on every bot start.
+            return LeverageErrorHelper.IsAlreadyAtTargetLeverage(result.Error?.Code, result.Error?.Message)
+                ? LeverageSetResult.Unchanged()
+                : LeverageSetResult.Fail(LeverageErrorHelper.Describe(result.Error?.Code, result.Error?.Message));
         }
-        catch
+        catch (Exception ex)
         {
-            return false;
+            return LeverageSetResult.Fail(ex.Message);
         }
     }
 

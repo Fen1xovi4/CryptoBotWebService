@@ -27,7 +27,13 @@ public class ArbitrageLevelState
 
 public class ArbitrageState
 {
+    // True only once BOTH legs are pinned to the configured leverage. The per-leg flags let a
+    // retry re-attempt just the leg that failed; LeverageRetryAt throttles those retries so a
+    // permanently failing leg logs every few minutes instead of on every 5s tick.
     public bool LeverageSet { get; set; }
+    public bool LeveragePrimarySet { get; set; }
+    public bool LeverageSecondarySet { get; set; }
+    public DateTime? LeverageRetryAt { get; set; }
     public ArbitrageDirection Direction { get; set; } = ArbitrageDirection.None;
     public List<ArbitrageLevelState> Levels { get; set; } = new();
 
