@@ -38,6 +38,10 @@ builder.Services.AddScoped<TronGridService>();
 builder.Services.AddScoped<BscScanService>();
 
 builder.Services.AddHostedService<TradingHostedService>();
+
+// FuturesArbitrage only — 1s tick on top of the websocket quote cache. Excluded from
+// TradingHostedService's query so it is never processed by both loops.
+builder.Services.AddHostedService<CryptoBotWeb.Worker.ArbitrageFastLoopService>();
 builder.Services.AddHostedService<PaymentVerificationService>();
 builder.Services.AddHostedService<CryptoBotWeb.Worker.TelegramBotPollingService>();
 

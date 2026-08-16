@@ -29,9 +29,11 @@ namespace CryptoBotWeb.Infrastructure.Strategies;
 /// the first level that opens and released back to None when the last level closes
 /// (CompletedCycles++).
 ///
-/// Per tick (worker's 5s loop): set leverage once → read both books → compute spreads →
-/// unwind incomplete levels → threshold-close → open AT MOST ONE level. The one-level-per-tick
-/// cap keeps a violent divergence from firing the whole ladder as market orders in one burst.
+/// Per tick (ArbitrageFastLoopService, 1s — this strategy is excluded from the shared 5s loop):
+/// set leverage once → read both books off the websocket cache → compute spreads → unwind
+/// incomplete levels → threshold-close → open AT MOST ONE level. The one-level-per-tick cap is
+/// paired with MinSecondsBetweenOpens so a violent divergence still cannot fire the whole ladder
+/// as market orders in one burst, whatever the loop interval happens to be.
 ///
 /// Leg risk is the core hazard here: the two legs sit on different exchanges and cannot fill
 /// atomically. The long (cheap) leg goes first because it is the one we can always unwind with
@@ -61,6 +63,10 @@ public class ArbitrageHandler : IStrategyHandler
 
     // Back-off between leverage-pin retries after a leg rejects the change.
     private const int LeverageRetryMinutes = 15;
+
+    // Minimum spacing between two level openings, in seconds. Decoupled from the loop interval on
+    // purpose — see ProcessOpenAsync.
+    private const int MinSecondsBetweenOpens = 5;
 
     public string StrategyType => StrategyTypes.FuturesArbitrage;
 
@@ -391,8 +397,16 @@ public class ArbitrageHandler : IStrategyHandler
         if (entrySpread <= 0) return;
 
         // Shallowest qualifying level first, and AT MOST ONE per tick — a spread that blows
-        // through several thresholds at once still gets filled one level per 5s, which both
+        // through several thresholds at once still gets filled one level at a time, which both
         // rate-limits the venues and gives the operator a chance to react.
+        //
+        // The pace is enforced in seconds, not in ticks: the loop moved from 5s to 1s, and without
+        // this the same divergence would fire the whole ladder five times faster than the design
+        // this cap came from.
+        if (state.LastLevelOpenedAt.HasValue &&
+            (DateTime.UtcNow - state.LastLevelOpenedAt.Value).TotalSeconds < MinSecondsBetweenOpens)
+            return;
+
         var next = state.Levels
             .Where(l => !l.IsOpen && l.Index < levels.Count)
             .OrderBy(l => l.Index)
@@ -411,6 +425,11 @@ public class ArbitrageHandler : IStrategyHandler
         ArbitrageLevelConfig cfg, LegPair legs, ArbitrageDirection direction, decimal entrySpread,
         ArbitrageState state, CancellationToken ct)
     {
+        // Stamped before the orders go out, not after they succeed: a level that keeps getting
+        // rejected must back off too, otherwise the 1s loop would retry the same failing open
+        // every second against both venues.
+        state.LastLevelOpenedAt = DateTime.UtcNow;
+
         var longResult = await legs.LongExchange.OpenLongAsync(legs.LongSymbol, cfg.NotionalUsdt);
         if (!longResult.Success)
         {

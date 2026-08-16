@@ -1,4 +1,5 @@
-﻿using CryptoBotWeb.Core.Enums;
+﻿using CryptoBotWeb.Core.Constants;
+using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using CryptoBotWeb.Infrastructure.Services;
@@ -51,9 +52,12 @@ public class TradingHostedService : BackgroundService
                 var factory = scope.ServiceProvider.GetRequiredService<IExchangeServiceFactory>();
                 var handlers = scope.ServiceProvider.GetServices<IStrategyHandler>();
 
+                // FuturesArbitrage is deliberately absent: it runs in ArbitrageFastLoopService on a
+                // 1s tick, because its signal lives and dies inside seconds. Every other strategy
+                // keeps this 5s cadence.
                 var runningStrategies = await db.Strategies
                     .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
-                    .Where(s => s.Status == StrategyStatus.Running)
+                    .Where(s => s.Status == StrategyStatus.Running && s.Type != StrategyTypes.FuturesArbitrage)
                     .ToListAsync(stoppingToken);
 
                 await Parallel.ForEachAsync(runningStrategies,

@@ -43,6 +43,11 @@ public class ArbitrageState
     // Full open→flat round trips (all levels closed).
     public int CompletedCycles { get; set; }
 
+    // When the last level was opened. Paces the ladder independently of how fast the loop ticks:
+    // the "one level per tick" cap used to mean "one per 5s" and must keep meaning that now that
+    // arbitrage runs on a 1s loop.
+    public DateTime? LastLevelOpenedAt { get; set; }
+
     // Monitoring: last observed entry spread (signed: positive = primary expensive).
     public decimal LastSpreadPercent { get; set; }
     public DateTime? LastCheckAt { get; set; }
