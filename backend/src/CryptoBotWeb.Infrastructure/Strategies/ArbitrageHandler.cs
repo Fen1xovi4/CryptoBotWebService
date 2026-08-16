@@ -58,6 +58,9 @@ public class ArbitrageHandler : IStrategyHandler
     // Used when the config leaves MaxConsecutiveFailures at 0 (older/hand-written configs).
     private const int DefaultMaxFailures = 3;
 
+    // Back-off between leverage-pin retries after a leg rejects the change.
+    private const int LeverageRetryMinutes = 15;
+
     public string StrategyType => StrategyTypes.FuturesArbitrage;
 
     private readonly AppDbContext _db;
@@ -126,11 +129,24 @@ public class ArbitrageHandler : IStrategyHandler
         var symbolA = config.Symbol;
         var symbolB = string.IsNullOrWhiteSpace(config.SecondSymbol) ? config.Symbol : config.SecondSymbol!;
 
-        if (!state.LeverageSet)
+        if (!state.LeverageSet &&
+            (state.LeverageRetryAt == null || DateTime.UtcNow >= state.LeverageRetryAt.Value))
         {
-            await TrySetLeverageAsync(strategy, primaryExchange, symbolA, config.Leverage, "primary");
-            await TrySetLeverageAsync(strategy, secondExchange, symbolB, config.Leverage, "secondary");
-            state.LeverageSet = true;
+            if (!state.LeveragePrimarySet)
+                state.LeveragePrimarySet =
+                    await TrySetLeverageAsync(strategy, primaryExchange, symbolA, config.Leverage, "primary");
+
+            if (!state.LeverageSecondarySet)
+                state.LeverageSecondarySet =
+                    await TrySetLeverageAsync(strategy, secondExchange, symbolB, config.Leverage, "secondary");
+
+            state.LeverageSet = state.LeveragePrimarySet && state.LeverageSecondarySet;
+
+            // A failed pin is not fatal (sizing is by notional), but leaving it unset forever means
+            // every order runs on whatever leverage the account happens to carry — so retry slowly.
+            state.LeverageRetryAt = state.LeverageSet
+                ? null
+                : DateTime.UtcNow.AddMinutes(LeverageRetryMinutes);
         }
 
         var bookA = await SafeBookAsync(primaryExchange, symbolA);
@@ -741,9 +757,10 @@ public class ArbitrageHandler : IStrategyHandler
     /// <summary>
     /// Best-effort leverage pin, clamped to the symbol's risk-limit maximum. Never fatal: the bot
     /// sizes by fixed notional, so a stale leverage only risks an order rejection, which the
-    /// leg-risk path already handles.
+    /// leg-risk path already handles. Returns true when the leg ends up on the target leverage
+    /// (including "already there" rejections); false means the caller should retry later.
     /// </summary>
-    private async Task TrySetLeverageAsync(Strategy strategy, IFuturesExchangeService exchange,
+    private async Task<bool> TrySetLeverageAsync(Strategy strategy, IFuturesExchangeService exchange,
         string symbol, int leverage, string legName)
     {
         try
@@ -751,19 +768,41 @@ public class ArbitrageHandler : IStrategyHandler
             var maxLev = await exchange.GetMaxLeverageAsync(symbol);
             var target = maxLev.HasValue && maxLev.Value > 0 ? Math.Min(leverage, maxLev.Value) : leverage;
 
-            var ok = await exchange.SetLeverageAsync(symbol, target);
-            if (!ok)
+            if (target < leverage)
                 Log(strategy, "Warning",
-                    $"Could not set {target}x leverage on the {legName} leg ({symbol}) — using the account's current value");
-            else
-                _logger.LogDebug("Arbitrage {Id}: {Leg} leverage set to {Lev}x for {Symbol}",
-                    strategy.Id, legName, target, symbol);
+                    $"{legName} leg ({symbol}): requested {leverage}x exceeds the exchange risk limit " +
+                    $"({maxLev}x) — using {target}x");
+
+            var result = await exchange.SetLeverageDetailedAsync(symbol, target);
+            if (result.Success)
+            {
+                _logger.LogDebug("Arbitrage {Id}: {Leg} leverage {Lev}x for {Symbol} ({State})",
+                    strategy.Id, legName, target, symbol, result.AlreadySet ? "already set" : "set");
+                return true;
+            }
+
+            // The exchange's own text is the only thing that explains WHY — never drop it.
+            Log(strategy, "Warning",
+                $"Could not set {target}x leverage on the {legName} leg ({symbol}): " +
+                $"{Trim(result.Error ?? "unknown error")}. Using the account's current value; " +
+                $"retrying in {LeverageRetryMinutes} min");
+            _logger.LogWarning("Arbitrage {Id}: SetLeverage rejected on the {Leg} leg ({Symbol}): {Error}",
+                strategy.Id, legName, symbol, result.Error);
+            return false;
         }
-        catch (NotSupportedException) { }
+        catch (NotSupportedException)
+        {
+            // Exchange service doesn't expose leverage control — nothing to retry.
+            return true;
+        }
         catch (Exception ex)
         {
+            Log(strategy, "Warning",
+                $"Leverage pin failed on the {legName} leg ({symbol}): {Trim(ex.Message)}. " +
+                $"Retrying in {LeverageRetryMinutes} min");
             _logger.LogWarning(ex, "Arbitrage {Id}: SetLeverage failed on the {Leg} leg ({Symbol})",
                 strategy.Id, legName, symbol);
+            return false;
         }
     }
 

@@ -87,6 +87,15 @@ public interface IFuturesExchangeService : IDisposable
         throw new NotSupportedException("SetLeverageAsync not implemented");
 
     /// <summary>
+    /// Same as <see cref="SetLeverageAsync"/>, but keeps the exchange's rejection text so the
+    /// caller can log WHY the pin failed instead of a bare "could not set leverage", and reports
+    /// "already at that leverage" rejections as success.
+    /// Default: delegates to the bool overload, losing the detail.
+    /// </summary>
+    async Task<LeverageSetResult> SetLeverageDetailedAsync(string symbol, int leverage) =>
+        new(await SetLeverageAsync(symbol, leverage));
+
+    /// <summary>
     /// Returns the symbol's maximum allowed leverage from the exchange risk-limit table,
     /// or null if it can't be determined (network error / exchange doesn't expose it).
     /// Callers use this to clamp the leverage they set before placing orders so a stale

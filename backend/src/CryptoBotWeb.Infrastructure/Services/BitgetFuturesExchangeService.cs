@@ -853,18 +853,26 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         }
     }
 
-    public async Task<bool> SetLeverageAsync(string symbol, int leverage)
+    public async Task<bool> SetLeverageAsync(string symbol, int leverage) =>
+        (await SetLeverageDetailedAsync(symbol, leverage)).Success;
+
+    public async Task<LeverageSetResult> SetLeverageDetailedAsync(string symbol, int leverage)
     {
         try
         {
             var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
             var result = await _client.FuturesApiV2.Account.SetLeverageAsync(
                 BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT", leverage);
-            return result.Success;
+
+            if (result.Success) return LeverageSetResult.Ok();
+
+            return LeverageErrorHelper.IsAlreadyAtTargetLeverage(result.Error?.Code, result.Error?.Message)
+                ? LeverageSetResult.Unchanged()
+                : LeverageSetResult.Fail(LeverageErrorHelper.Describe(result.Error?.Code, result.Error?.Message));
         }
-        catch
+        catch (Exception ex)
         {
-            return false;
+            return LeverageSetResult.Fail(ex.Message);
         }
     }
 
