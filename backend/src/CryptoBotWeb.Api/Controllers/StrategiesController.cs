@@ -24,19 +24,22 @@ public class StrategiesController : ControllerBase
     private readonly GridHedgeHandler _gridHedgeHandler;
     private readonly SmartGridHedgeHandler _smartGridHedgeHandler;
     private readonly ArbitrageHandler _arbitrageHandler;
+    private readonly IQuoteStreamService _quotes;
 
     public StrategiesController(
         AppDbContext db,
         IExchangeServiceFactory exchangeFactory,
         GridHedgeHandler gridHedgeHandler,
         SmartGridHedgeHandler smartGridHedgeHandler,
-        ArbitrageHandler arbitrageHandler)
+        ArbitrageHandler arbitrageHandler,
+        IQuoteStreamService quotes)
     {
         _db = db;
         _exchangeFactory = exchangeFactory;
         _gridHedgeHandler = gridHedgeHandler;
         _smartGridHedgeHandler = smartGridHedgeHandler;
         _arbitrageHandler = arbitrageHandler;
+        _quotes = quotes;
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -1540,6 +1543,91 @@ public class StrategiesController : ControllerBase
 
         return Ok(new { message = "ĐŁĐ±Ń‹Ń‚ĐşĐ¸ ŃĐ±Ń€ĐľŃĐµĐ˝Ń‹", consecutiveLosses = 0 });
     }
+
+    /// <summary>
+    /// Live top-of-book and spread for a FuturesArbitrage bot, straight off the websocket streams.
+    ///
+    /// The bot's own state only carries the spread seen on its last 5s tick, so the UI could never
+    /// show more than a stale, sampled number. This reads the streams directly instead — the same
+    /// quotes and the same formulas (<see cref="ArbitrageSpreadMath"/>) the worker trades on.
+    ///
+    /// Subscribing here is on demand and shared: the first poll opens the streams, later polls
+    /// reuse them, and the quote service drops them once nobody has asked for ~5 minutes. So the
+    /// connections exist only while somebody is actually watching the page.
+    ///
+    /// Ages are returned per leg and NOT hidden: a quote that stopped updating still renders, and
+    /// the client is expected to show it as stale rather than pretend it is live.
+    /// </summary>
+    [HttpGet("{id:guid}/arbitrage-quotes")]
+    public async Task<IActionResult> GetArbitrageQuotes(Guid id)
+    {
+        var strategy = await _db.Strategies
+            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
+            .Include(s => s.SecondAccount!).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
+            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
+
+        if (strategy == null) return NotFound();
+        if (strategy.Type != StrategyTypes.FuturesArbitrage)
+            return BadRequest(new { message = "Живые котировки доступны только для стратегии «Арбитраж фьюч-фьюч»." });
+        if (strategy.SecondAccount == null)
+            return BadRequest(new { message = "У стратегии не задан второй аккаунт." });
+
+        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var config = JsonSerializer.Deserialize<ArbitrageConfig>(strategy.ConfigJson, jsonOpts);
+        if (config == null || string.IsNullOrWhiteSpace(config.Symbol))
+            return BadRequest(new { message = "Конфигурация стратегии не читается." });
+
+        var symbolA = config.Symbol;
+        var symbolB = string.IsNullOrWhiteSpace(config.SecondSymbol) ? config.Symbol : config.SecondSymbol!;
+
+        await _quotes.EnsureSubscribedAsync(strategy.Account, symbolA, HttpContext.RequestAborted);
+        await _quotes.EnsureSubscribedAsync(strategy.SecondAccount, symbolB, HttpContext.RequestAborted);
+
+        var now = DateTime.UtcNow;
+        var quoteA = _quotes.TryGetQuote(strategy.Account.ExchangeType, symbolA);
+        var quoteB = _quotes.TryGetQuote(strategy.SecondAccount.ExchangeType, symbolB);
+        var statusA = _quotes.GetStatus(strategy.Account.ExchangeType, symbolA);
+        var statusB = _quotes.GetStatus(strategy.SecondAccount.ExchangeType, symbolB);
+
+        object? primaryExpensive = null;
+        object? secondaryExpensive = null;
+
+        if (quoteA is { IsValid: true } && quoteB is { IsValid: true })
+        {
+            primaryExpensive = new
+            {
+                entrySpreadPercent = ArbitrageSpreadMath.EntrySpreadPercent(quoteA.Bid, quoteB.Ask),
+                exitSpreadPercent = ArbitrageSpreadMath.ExitSpreadPercent(quoteA.Ask, quoteB.Bid)
+            };
+            secondaryExpensive = new
+            {
+                entrySpreadPercent = ArbitrageSpreadMath.EntrySpreadPercent(quoteB.Bid, quoteA.Ask),
+                exitSpreadPercent = ArbitrageSpreadMath.ExitSpreadPercent(quoteB.Ask, quoteA.Bid)
+            };
+        }
+
+        return Ok(new
+        {
+            serverTimeUtc = now,
+            primary = LegQuote(strategy.Account.ExchangeType.ToString(), symbolA, quoteA, statusA, now),
+            secondary = LegQuote(strategy.SecondAccount.ExchangeType.ToString(), symbolB, quoteB, statusB, now),
+            primaryExpensive,
+            secondaryExpensive
+        });
+    }
+
+    private static object LegQuote(string exchange, string symbol, QuoteSnapshot? quote,
+        QuoteStreamStatus? status, DateTime nowUtc) => new
+    {
+        exchange,
+        symbol,
+        bid = quote?.Bid,
+        ask = quote?.Ask,
+        ageMs = quote == null ? (double?)null : Math.Round(quote.AgeMs(nowUtc)),
+        connected = status?.Connected ?? false,
+        updates = status?.UpdateCount ?? 0,
+        lastError = status?.LastError
+    };
 
     [HttpGet("{id:guid}/chart")]
     public async Task<IActionResult> GetChart(Guid id, [FromQuery] int limit = 300, [FromQuery] string? timeframe = null)

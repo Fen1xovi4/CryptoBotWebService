@@ -15,6 +15,10 @@ builder.Services.AddSingleton<IEncryptionService>(new EncryptionService(encrypti
 builder.Services.AddSingleton<IProxyHealthTracker, ProxyHealthTracker>();
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
 
+// Websocket top-of-book streams. Singleton because the connections must outlive the per-tick
+// REST clients; currently consumed by FuturesArbitrage only.
+builder.Services.AddSingleton<IQuoteStreamService, QuoteStreamService>();
+
 builder.Services.AddScoped<IStrategyHandler, EmaBounceHandler>();
 builder.Services.AddScoped<IStrategyHandler, HuntingFundingHandler>();
 builder.Services.AddScoped<IStrategyHandler, FundingClaimHandler>();
