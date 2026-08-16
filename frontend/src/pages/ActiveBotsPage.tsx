@@ -4449,6 +4449,104 @@ function arbDirectionColor(direction: number): string {
   return 'bg-bg-tertiary text-text-secondary';
 }
 
+// Rolling window of the live spread drawn on the bot card. Three minutes at one sample per second
+// is enough to see both the current move and whether the feed is alive at all.
+const SPREAD_WINDOW_MS = 180_000;
+const SPREAD_MAX_POINTS = 400;
+
+// A gap longer than this between two samples is drawn as a break in the line instead of a
+// straight segment across it — the whole point of the chart is that a frozen feed LOOKS frozen.
+const SPREAD_GAP_MS = 3000;
+
+interface SpreadPoint {
+  t: number;
+  v: number;
+}
+
+/**
+ * Spread pulse: signed entry spread over time, zero line in the middle, entry thresholds dashed.
+ * Positive = venue A is the expensive one, negative = venue B — same sign convention as the
+ * number above it and as the bot's own state.
+ */
+function SpreadSparkline({
+  points,
+  nowMs,
+  entryThreshold,
+  bothDirections,
+}: {
+  points: SpreadPoint[];
+  nowMs: number;
+  entryThreshold: number | null;
+  bothDirections: boolean;
+}) {
+  const from = nowMs - SPREAD_WINDOW_MS;
+  const visible = points.filter((p) => p.t >= from);
+
+  if (visible.length < 2) {
+    return (
+      <div className="h-14 flex items-center justify-center text-[10px] text-text-secondary/60">
+        Собираем историю спреда…
+      </div>
+    );
+  }
+
+  // Symmetric scale around zero so the sign is readable at a glance, and always tall enough to
+  // show the entry threshold — a chart that clipped the trigger line would be misleading.
+  const maxAbs =
+    Math.max(...visible.map((p) => Math.abs(p.v)), entryThreshold ?? 0, 0.0001) * 1.15;
+
+  const x = (t: number) => ((t - from) / SPREAD_WINDOW_MS) * 100;
+  const y = (v: number) => 15 - (v / maxAbs) * 13.5;
+
+  let path = '';
+  visible.forEach((p, i) => {
+    const gap = i > 0 && p.t - visible[i - 1].t > SPREAD_GAP_MS;
+    path += `${i === 0 || gap ? 'M' : 'L'}${x(p.t).toFixed(2)},${y(p.v).toFixed(2)} `;
+  });
+
+  const last = visible[visible.length - 1];
+  const lastFresh = nowMs - last.t <= SPREAD_GAP_MS;
+  const lineColor = last.v >= 0 ? 'text-accent-red' : 'text-accent-blue';
+  const thresholdY = entryThreshold != null ? y(entryThreshold) : null;
+  const thresholdYNeg = entryThreshold != null && bothDirections ? y(-entryThreshold) : null;
+
+  return (
+    <div className="relative">
+      <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="w-full h-14">
+        {/* zero line */}
+        <line x1="0" y1="15" x2="100" y2="15" className="stroke-border" strokeWidth="0.5"
+              vectorEffect="non-scaling-stroke" />
+
+        {/* entry thresholds — where the bot would open */}
+        {thresholdY != null && (
+          <line x1="0" y1={thresholdY} x2="100" y2={thresholdY} className="stroke-accent-yellow/60"
+                strokeWidth="0.5" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+        )}
+        {thresholdYNeg != null && (
+          <line x1="0" y1={thresholdYNeg} x2="100" y2={thresholdYNeg} className="stroke-accent-yellow/60"
+                strokeWidth="0.5" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+        )}
+
+        <path d={path.trim()} fill="none" className={`${lineColor} stroke-current`} strokeWidth="1.25"
+              strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+
+        {lastFresh && (
+          <circle cx={x(last.t)} cy={y(last.v)} r="1.5" className={`${lineColor} fill-current`}
+                  vectorEffect="non-scaling-stroke" />
+        )}
+      </svg>
+
+      <div className="flex items-center justify-between text-[9px] text-text-secondary/60 -mt-1">
+        <span>3 мин</span>
+        <span>
+          макс ±{maxAbs.toFixed(3)}%
+          {entryThreshold != null && <span className="text-accent-yellow/70"> · вход {entryThreshold}%</span>}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function formatArbBook(bid: number | null, ask: number | null): string {
   if (bid == null || ask == null) return '—';
   return `${bid} / ${ask}`;
@@ -4528,6 +4626,32 @@ function ArbitrageCard({
     : null;
 
   const spread = liveFresh && liveSpread != null ? liveSpread : state?.lastSpreadPercent ?? null;
+
+  // Rolling spread history for the chart. Only fresh samples are recorded — a stale quote must
+  // leave a visible gap rather than a flat line pretending the market stood still.
+  const [spreadHistory, setSpreadHistory] = useState<SpreadPoint[]>([]);
+  useEffect(() => {
+    if (!live || !liveFresh || liveSpread == null) return;
+    setSpreadHistory((prev) => {
+      const next = [...prev, { t: Date.now(), v: liveSpread }];
+      return next.length > SPREAD_MAX_POINTS ? next.slice(next.length - SPREAD_MAX_POINTS) : next;
+    });
+    // One point per server response, keyed on its timestamp.
+  }, [live?.serverTimeUtc]);
+
+  // Own clock so the window keeps scrolling even if polling dies: the line then stops and the gap
+  // grows on screen, which is exactly the "is anything frozen?" signal this chart is for.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isRunning) return;
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isRunning]);
+
+  const entryThreshold = cfg?.levels?.length
+    ? Math.min(...cfg.levels.map((l) => l.entrySpreadPercent))
+    : null;
+
   const spreadColor = spread == null || spread === 0
     ? 'text-text-secondary'
     : spread > 0
@@ -4674,6 +4798,14 @@ function ArbitrageCard({
                 Проверено: {formatArbTime(state.lastCheckAt)}
               </span>
             </div>
+
+            {/* Spread pulse — live chart of the cross-exchange spread */}
+            <SpreadSparkline
+              points={spreadHistory}
+              nowMs={nowMs}
+              entryThreshold={entryThreshold}
+              bothDirections={cfg?.allowBothDirections ?? false}
+            />
           </div>
         )}
       </div>
