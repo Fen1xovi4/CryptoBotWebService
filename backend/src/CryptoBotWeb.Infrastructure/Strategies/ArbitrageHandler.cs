@@ -3,6 +3,7 @@ using CryptoBotWeb.Core.Constants;
 using CryptoBotWeb.Core.DTOs;
 using CryptoBotWeb.Core.Entities;
 using CryptoBotWeb.Core.Enums;
+using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
@@ -63,14 +64,25 @@ public class ArbitrageHandler : IStrategyHandler
 
     public string StrategyType => StrategyTypes.FuturesArbitrage;
 
+    // A stream quote older than this is not trusted for a trading decision — we fall back to a
+    // REST snapshot for that tick. Streams push every few hundred ms at most, so anything past
+    // two seconds means the socket is silent, not that the market is quiet.
+    private const int MaxQuoteAgeMs = 2000;
+
+    // How often the "running on REST, stream is down" warning may reach the strategy log.
+    private const int QuoteFallbackWarnMinutes = 10;
+
     private readonly AppDbContext _db;
     private readonly IExchangeServiceFactory _factory;
+    private readonly IQuoteStreamService _quotes;
     private readonly ILogger<ArbitrageHandler> _logger;
 
-    public ArbitrageHandler(AppDbContext db, IExchangeServiceFactory factory, ILogger<ArbitrageHandler> logger)
+    public ArbitrageHandler(AppDbContext db, IExchangeServiceFactory factory,
+        IQuoteStreamService quotes, ILogger<ArbitrageHandler> logger)
     {
         _db = db;
         _factory = factory;
+        _quotes = quotes;
         _logger = logger;
     }
 
@@ -84,8 +96,9 @@ public class ArbitrageHandler : IStrategyHandler
 
         // Validation stops the bot itself (and saves) on failure — a misconfigured arbitrage bot
         // must not keep firing market orders across two accounts.
-        var secondAccount = await ValidateAsync(strategy, config, ct);
-        if (secondAccount == null) return;
+        var accounts = await ValidateAsync(strategy, config, ct);
+        if (accounts == null) return;
+        var (primaryAccount, secondAccount) = accounts.Value;
 
         var state = JsonSerializer.Deserialize<ArbitrageState>(strategy.StateJson, JsonOptions)
                     ?? new ArbitrageState();
@@ -107,7 +120,8 @@ public class ArbitrageHandler : IStrategyHandler
 
         try
         {
-            await RunTickAsync(strategy, config!, state, exchange, secondExchange, secondAccount, ct);
+            await RunTickAsync(strategy, config!, state, exchange, secondExchange,
+                primaryAccount, secondAccount, ct);
         }
         finally
         {
@@ -119,7 +133,7 @@ public class ArbitrageHandler : IStrategyHandler
 
     private async Task RunTickAsync(Strategy strategy, ArbitrageConfig config, ArbitrageState state,
         IFuturesExchangeService primaryExchange, IFuturesExchangeService secondExchange,
-        ExchangeAccount secondAccount, CancellationToken ct)
+        ExchangeAccount primaryAccount, ExchangeAccount secondAccount, CancellationToken ct)
     {
         // Level identity = position in the ascending-by-EntrySpreadPercent ordering. The config
         // list itself is never mutated; we sort a copy defensively every tick.
@@ -149,8 +163,9 @@ public class ArbitrageHandler : IStrategyHandler
                 : DateTime.UtcNow.AddMinutes(LeverageRetryMinutes);
         }
 
-        var bookA = await SafeBookAsync(primaryExchange, symbolA);
-        var bookB = await SafeBookAsync(secondExchange, symbolB);
+        var (bookA, bookB) = await ReadBooksAsync(strategy, state,
+            primaryExchange, primaryAccount, symbolA,
+            secondExchange, secondAccount, symbolB, ct);
         state.LastCheckAt = DateTime.UtcNow;
 
         // A missing/degenerate book is a transient fetch failure, not a trading signal — skip the
@@ -644,7 +659,8 @@ public class ArbitrageHandler : IStrategyHandler
     /// Validates config + both accounts. Returns the secondary account on success; on failure it
     /// logs, sets Status = Stopped, saves and returns null (the caller just returns).
     /// </summary>
-    private async Task<ExchangeAccount?> ValidateAsync(Strategy strategy, ArbitrageConfig? config, CancellationToken ct)
+    private async Task<(ExchangeAccount Primary, ExchangeAccount Secondary)?> ValidateAsync(
+        Strategy strategy, ArbitrageConfig? config, CancellationToken ct)
     {
         string? error = null;
 
@@ -692,11 +708,15 @@ public class ArbitrageHandler : IStrategyHandler
             }
         }
 
+        ExchangeAccount? primaryAccount = null;
+
         if (error == null)
         {
             // Read the primary account off our own context instead of the (possibly stale, possibly
-            // unloaded) navigation — the entity reaches us from the worker's outer scope.
-            var primaryAccount = await _db.ExchangeAccounts
+            // unloaded) navigation — the entity reaches us from the worker's outer scope. The proxy
+            // graph is included because the quote streams pick their proxy off this entity.
+            primaryAccount = await _db.ExchangeAccounts
+                .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
                 .FirstOrDefaultAsync(a => a.Id == strategy.AccountId, ct);
 
             if (primaryAccount == null)
@@ -709,7 +729,7 @@ public class ArbitrageHandler : IStrategyHandler
                         "cross-exchange arbitrage requires two different exchanges";
         }
 
-        if (error == null) return secondAccount;
+        if (error == null) return (primaryAccount!, secondAccount!);
 
         Log(strategy, "Error", $"Invalid configuration — {error}. Strategy stopped.");
         _logger.LogError("Arbitrage {Id}: invalid configuration — {Error}", strategy.Id, error);
@@ -806,6 +826,92 @@ public class ArbitrageHandler : IStrategyHandler
         }
     }
 
+    /// <summary>
+    /// Both legs' top-of-book for this tick, preferring the websocket streams.
+    ///
+    /// Why this shape matters: the spread is a comparison between two venues, so the two books
+    /// must describe the same instant. Reading them sequentially over REST put hundreds of
+    /// milliseconds between the snapshots and manufactured spreads that never existed. Stream
+    /// quotes are read from memory, so both sides are effectively simultaneous.
+    ///
+    /// A stream that is missing or stale (see <see cref="MaxQuoteAgeMs"/>) is NOT trusted — that
+    /// leg falls back to REST, and when both do they are fetched concurrently to keep the time
+    /// skew as small as REST allows. Falling back rather than skipping is deliberate: a socket
+    /// outage must never freeze a bot that holds open positions and needs to exit.
+    /// </summary>
+    private async Task<(BookTickerDto? Primary, BookTickerDto? Secondary)> ReadBooksAsync(
+        Strategy strategy, ArbitrageState state,
+        IFuturesExchangeService primaryExchange, ExchangeAccount primaryAccount, string symbolA,
+        IFuturesExchangeService secondExchange, ExchangeAccount secondAccount, string symbolB,
+        CancellationToken ct)
+    {
+        // Idempotent keep-alive: starts the streams on the first tick, refreshes their idle
+        // timers afterwards. Never blocks on the handshake.
+        await _quotes.EnsureSubscribedAsync(primaryAccount, symbolA, ct);
+        await _quotes.EnsureSubscribedAsync(secondAccount, symbolB, ct);
+
+        var now = DateTime.UtcNow;
+        var streamA = FreshQuote(primaryAccount.ExchangeType, symbolA, now);
+        var streamB = FreshQuote(secondAccount.ExchangeType, symbolB, now);
+
+        if (streamA != null && streamB != null)
+        {
+            state.QuoteSource = "stream";
+            return (streamA, streamB);
+        }
+
+        state.QuoteSource = streamA == null && streamB == null ? "rest" : "mixed";
+
+        // Report the leg that is actually missing (the primary if both are).
+        if (streamA == null)
+            WarnQuoteFallback(strategy, state, primaryAccount.ExchangeType, symbolA, now);
+        else
+            WarnQuoteFallback(strategy, state, secondAccount.ExchangeType, symbolB, now);
+
+        var taskA = streamA != null
+            ? Task.FromResult<BookTickerDto?>(streamA)
+            : SafeBookAsync(primaryExchange, symbolA);
+        var taskB = streamB != null
+            ? Task.FromResult<BookTickerDto?>(streamB)
+            : SafeBookAsync(secondExchange, symbolB);
+
+        await Task.WhenAll(taskA, taskB);
+        return (taskA.Result, taskB.Result);
+    }
+
+    /// <summary>Stream quote, or null when there is none yet, it is degenerate, or it is stale.</summary>
+    private BookTickerDto? FreshQuote(Core.Enums.ExchangeType exchange, string symbol, DateTime nowUtc)
+    {
+        var quote = _quotes.TryGetQuote(exchange, symbol);
+        if (quote == null || !quote.IsValid || quote.AgeMs(nowUtc) > MaxQuoteAgeMs) return null;
+
+        return new BookTickerDto
+        {
+            Symbol = symbol,
+            BidPrice = quote.Bid,
+            AskPrice = quote.Ask
+        };
+    }
+
+    /// <summary>
+    /// Tells the user the bot is running on REST because a stream is down — throttled, because
+    /// this would otherwise write to the strategy log on every 5s tick.
+    /// </summary>
+    private void WarnQuoteFallback(Strategy strategy, ArbitrageState state,
+        Core.Enums.ExchangeType exchange, string symbol, DateTime nowUtc)
+    {
+        if (state.QuoteFallbackWarnedAt.HasValue &&
+            nowUtc - state.QuoteFallbackWarnedAt.Value < TimeSpan.FromMinutes(QuoteFallbackWarnMinutes))
+            return;
+
+        state.QuoteFallbackWarnedAt = nowUtc;
+        var status = _quotes.GetStatus(exchange, symbol);
+
+        Log(strategy, "Warning",
+            $"No fresh websocket quote for {exchange} {symbol} — falling back to REST polling " +
+            $"({(status?.LastError is { } err ? Trim(err) : "stream not connected")})");
+    }
+
     /// <summary>Top-of-book read that swallows transient failures — null means "skip this tick".</summary>
     private async Task<BookTickerDto?> SafeBookAsync(IFuturesExchangeService exchange, string symbol)
     {
@@ -858,14 +964,14 @@ public class ArbitrageHandler : IStrategyHandler
 
         // Executable entry: sell the expensive venue at its bid, buy the cheap one at its ask.
         public decimal EntrySpreadPercent =>
-            ShortBook != null && LongBook != null && LongBook.AskPrice > 0
-                ? (ShortBook.BidPrice - LongBook.AskPrice) / LongBook.AskPrice * 100m
+            ShortBook != null && LongBook != null
+                ? ArbitrageSpreadMath.EntrySpreadPercent(ShortBook.BidPrice, LongBook.AskPrice)
                 : 0m;
 
         // Cost to unwind right now: buy back the short at its ask, sell the long at its bid.
         public decimal ExitSpreadPercent =>
-            ShortBook != null && LongBook != null && LongBook.BidPrice > 0
-                ? (ShortBook.AskPrice - LongBook.BidPrice) / LongBook.BidPrice * 100m
+            ShortBook != null && LongBook != null
+                ? ArbitrageSpreadMath.ExitSpreadPercent(ShortBook.AskPrice, LongBook.BidPrice)
                 : 0m;
     }
 

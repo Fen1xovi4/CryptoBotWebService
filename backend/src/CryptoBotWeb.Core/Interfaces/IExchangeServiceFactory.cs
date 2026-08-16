@@ -13,6 +13,13 @@ public interface IExchangeServiceFactory
     /// </summary>
     IExchangeService CreateWithProxy(ExchangeAccount account, ProxyServer? proxy);
 
+    /// <summary>
+    /// The proxy this account's clients would use right now (failover order + health checks
+    /// applied), or null for a direct connection. Lets non-REST clients — the FuturesArbitrage
+    /// websocket quote streams — share the account's egress IP instead of connecting directly.
+    /// </summary>
+    ProxyServer? SelectProxyFor(ExchangeAccount account);
+
     // V1 ships Bybit-only spot support. Other ExchangeType values throw NotSupportedException
     // — GridHedge SameTicker (spot+futures hedge) refuses to start on those exchanges.
     ISpotExchangeService CreateSpot(ExchangeAccount account);

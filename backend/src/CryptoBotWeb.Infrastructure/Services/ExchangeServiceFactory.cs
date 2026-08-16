@@ -103,21 +103,12 @@ public class ExchangeServiceFactory : IExchangeServiceFactory
         return proxies.FirstOrDefault(p => _health.IsUsable(p.Id)) ?? proxies[0];
     }
 
+    /// <summary>
+    /// Exposes the same failover/health-aware proxy pick the REST clients get, so websocket
+    /// streams (FuturesArbitrage quotes) leave from the same egress IP as the account's REST calls.
+    /// </summary>
+    public ProxyServer? SelectProxyFor(ExchangeAccount account) => SelectProxy(account);
+
     private ApiProxy? BuildProxy(ProxyServer? proxyServer)
-    {
-        if (proxyServer == null) return null;
-
-        // JKorf uses new Uri($"{Host}:{Port}"), so Host must include scheme
-        var host = proxyServer.Host;
-        if (!host.Contains("://"))
-            host = $"socks5://{host}";
-
-        if (proxyServer.Username != null && proxyServer.PasswordEncrypted != null)
-        {
-            var password = _encryption.Decrypt(proxyServer.PasswordEncrypted);
-            return new ApiProxy(host, proxyServer.Port, proxyServer.Username, password);
-        }
-
-        return new ApiProxy(host, proxyServer.Port);
-    }
+        => ProxyApiFactory.Build(proxyServer, _encryption);
 }

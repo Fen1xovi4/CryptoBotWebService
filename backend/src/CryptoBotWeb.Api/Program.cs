@@ -46,6 +46,11 @@ builder.Services.AddSingleton<IProxyHealthTracker, ProxyHealthTracker>();
 // Exchange factory
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
 
+// Quote streams. Used by the live-spread endpoint (GET strategies/{id}/arbitrage-quotes): the
+// first poll opens the websocket, later polls reuse it, and the service closes it once nobody has
+// polled for ~5 minutes — so the API holds connections only while someone is watching the page.
+builder.Services.AddSingleton<IQuoteStreamService, QuoteStreamService>();
+
 // GridHedge handler — used by the manual "Close" endpoint to invoke the same exit logic the
 // worker runs on a natural exit trigger. Scoped because it relies on the scoped AppDbContext.
 builder.Services.AddScoped<GridHedgeHandler>();

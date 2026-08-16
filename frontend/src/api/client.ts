@@ -82,4 +82,38 @@ export function setStrategyTakeProfit(
     .then((r) => r.data);
 }
 
+// ── FuturesArbitrage live quotes ──
+// Served straight off the API's websocket streams, so the spread here updates as fast as the
+// caller polls — unlike strategy state, which only carries the value from the bot's last 5s tick.
+
+export interface ArbitrageLegQuote {
+  exchange: string;
+  symbol: string;
+  bid: number | null;
+  ask: number | null;
+  /** Age of the quote in ms. null = no quote received yet. */
+  ageMs: number | null;
+  connected: boolean;
+  updates: number;
+  lastError: string | null;
+}
+
+export interface ArbitrageSpreadPair {
+  entrySpreadPercent: number;
+  exitSpreadPercent: number;
+}
+
+export interface ArbitrageQuotesResponse {
+  serverTimeUtc: string;
+  primary: ArbitrageLegQuote;
+  secondary: ArbitrageLegQuote;
+  /** Spreads for "primary venue is the expensive one" — null until both legs have a quote. */
+  primaryExpensive: ArbitrageSpreadPair | null;
+  secondaryExpensive: ArbitrageSpreadPair | null;
+}
+
+export function getArbitrageQuotes(strategyId: string): Promise<ArbitrageQuotesResponse> {
+  return api.get(`/strategies/${strategyId}/arbitrage-quotes`).then((r) => r.data);
+}
+
 export default api;

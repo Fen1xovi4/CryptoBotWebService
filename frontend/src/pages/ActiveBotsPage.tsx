@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import api, { optimizeSmartGridHedge } from '../api/client';
-import type { OptimizeSmartGridHedgeResponse } from '../api/client';
+import api, { optimizeSmartGridHedge, getArbitrageQuotes } from '../api/client';
+import type { OptimizeSmartGridHedgeResponse, ArbitrageQuotesResponse } from '../api/client';
 import Header from '../components/Layout/Header';
 import StatusBadge from '../components/ui/StatusBadge';
 import SearchableSelect from '../components/ui/SearchableSelect';
@@ -4449,6 +4449,18 @@ function arbDirectionColor(direction: number): string {
   return 'bg-bg-tertiary text-text-secondary';
 }
 
+function formatArbBook(bid: number | null, ask: number | null): string {
+  if (bid == null || ask == null) return '—';
+  return `${bid} / ${ask}`;
+}
+
+/** Exit spread of the direction the live entry spread points at (the one the bot would trade). */
+function formatArbExitSpread(live: ArbitrageQuotesResponse, signedEntrySpread: number): string {
+  const pair = signedEntrySpread >= 0 ? live.primaryExpensive : live.secondaryExpensive;
+  if (!pair) return '—';
+  return `${pair.exitSpreadPercent.toFixed(3)}%`;
+}
+
 function formatArbTime(iso: string | null): string {
   if (!iso) return '—';
   const t = new Date(iso);
@@ -4489,7 +4501,33 @@ function ArbitrageCard({
   const levels = state?.levels ?? [];
   const openLevels = levels.filter((l) => l.isOpen);
   const hasPosition = openLevels.length > 0;
-  const spread = state?.lastSpreadPercent ?? null;
+
+  // Live spread off the websocket streams. Polled once a second while the bot runs; the bot's own
+  // state only carries the value from its last 5s tick, which is too coarse to watch a spread on.
+  const { data: live } = useQuery({
+    queryKey: ['arbitrage-quotes', s.id],
+    queryFn: () => getArbitrageQuotes(s.id),
+    enabled: isRunning,
+    refetchInterval: 1000,
+    staleTime: 0,
+    retry: false,
+  });
+
+  // Same freshness rule the worker applies before trading on a quote: anything older than 2s is
+  // a silent socket, not a quiet market, so the card falls back to the last tick's value.
+  const liveAgeMs = live
+    ? Math.max(live.primary.ageMs ?? Number.POSITIVE_INFINITY, live.secondary.ageMs ?? Number.POSITIVE_INFINITY)
+    : Number.POSITIVE_INFINITY;
+  const liveFresh = liveAgeMs <= 2000;
+
+  // Signed like state.lastSpreadPercent: positive = venue A (primary) is the expensive one.
+  const liveSpread = live?.primaryExpensive && live?.secondaryExpensive
+    ? (live.primaryExpensive.entrySpreadPercent >= live.secondaryExpensive.entrySpreadPercent
+        ? live.primaryExpensive.entrySpreadPercent
+        : -live.secondaryExpensive.entrySpreadPercent)
+    : null;
+
+  const spread = liveFresh && liveSpread != null ? liveSpread : state?.lastSpreadPercent ?? null;
   const spreadColor = spread == null || spread === 0
     ? 'text-text-secondary'
     : spread > 0
@@ -4566,6 +4604,20 @@ function ArbitrageCard({
                   {spread == null ? '—' : `${spread >= 0 ? '+' : ''}${spread.toFixed(3)}%`}
                 </span>
               </span>
+              {isRunning && (
+                <span
+                  title={
+                    liveFresh
+                      ? 'Живые котировки по websocket'
+                      : 'Поток котировок молчит — показано значение с последнего тика бота'
+                  }
+                  className={`text-[9px] font-bold px-1 py-0.5 rounded ${
+                    liveFresh ? 'bg-accent-green/15 text-accent-green' : 'bg-bg-tertiary text-text-secondary/60'
+                  }`}
+                >
+                  {liveFresh ? 'LIVE' : 'ТИК 5с'}
+                </span>
+              )}
               <span className="text-[10px] text-text-secondary">
                 Уровней: <span className="text-text-primary font-medium">{openLevels.length}/{levels.length}</span>
               </span>
@@ -4573,6 +4625,23 @@ function ArbitrageCard({
                 Циклов: <span className="text-text-primary font-medium">{state.completedCycles ?? 0}</span>
               </span>
             </div>
+
+            {/* Per-leg top of book — the two prices the spread above is computed from */}
+            {isRunning && live && (
+              <div className="flex items-center gap-3 flex-wrap font-mono text-[10px] text-text-secondary/80">
+                <span title={live.primary.lastError ?? undefined}>
+                  A {live.primary.exchange}: {formatArbBook(live.primary.bid, live.primary.ask)}
+                </span>
+                <span title={live.secondary.lastError ?? undefined}>
+                  B {live.secondary.exchange}: {formatArbBook(live.secondary.bid, live.secondary.ask)}
+                </span>
+                {liveFresh && liveSpread != null && (
+                  <span title="Спред выхода: во что обойдётся закрытие прямо сейчас">
+                    выход: {formatArbExitSpread(live, liveSpread)}
+                  </span>
+                )}
+              </div>
+            )}
 
             {/* Open levels detail */}
             {openLevels.length > 0 && (

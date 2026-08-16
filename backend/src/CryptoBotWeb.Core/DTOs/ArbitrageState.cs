@@ -46,4 +46,12 @@ public class ArbitrageState
     // Monitoring: last observed entry spread (signed: positive = primary expensive).
     public decimal LastSpreadPercent { get; set; }
     public DateTime? LastCheckAt { get; set; }
+
+    // Where the last tick's quotes came from: "stream" (both legs on websocket), "mixed" (one leg
+    // fell back to REST) or "rest". Purely diagnostic — it tells the user whether the spread they
+    // see is live or polled.
+    public string? QuoteSource { get; set; }
+
+    // Throttle for the "stream is down, polling REST" warning.
+    public DateTime? QuoteFallbackWarnedAt { get; set; }
 }
