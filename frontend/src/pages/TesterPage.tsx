@@ -45,8 +45,8 @@ const POLL_MS: Record<string, number> = {
 };
 const DAY_PRESETS = [7, 30, 90, 180, 365];
 // Rough 1m-history download speed per exchange (candles/sec), from measured paging:
-// Bybit/BingX 1000 per page ≈ 2 pages/s; Bitget 200 per page ≈ 2 pages/s.
-const DOWNLOAD_CANDLES_PER_SEC: Record<number, number> = { 1: 2000, 2: 400, 3: 2000 };
+// Bybit/BingX 1000 per page ≈ 2 pages/s; Bitget 200 per page but 8 parallel slice workers (measured: 365d ≈ 3.7 min).
+const DOWNLOAD_CANDLES_PER_SEC: Record<number, number> = { 1: 2000, 2: 2300, 3: 2000 };
 const SIMULATE_TIMEOUT_MS = 30 * 60 * 1000; // paginated 1m-kline download: Bybit ~4 min/year, Bitget (200/page) ~20 min/year; nginx /api/tester/ allows 1800s
 
 export default function TesterPage() {

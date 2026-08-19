@@ -89,29 +89,110 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
     // [fromUtc,toUtc), and stop once a page runs entirely older than fromUtc (or is short/empty).
     private const int _rangeHardCap = 600_000; // > 365d of 1m bars (525_600) — SimulationEngine.MaxWindowDays
     private const int _rangePageDelayMs = 120;
+    private static readonly TimeSpan _rangeMaxRequestSpan = TimeSpan.FromDays(89); // Bitget: startTime..endTime ≤ 90 days per request
+    private const int _rangeMaxRetries = 6;
+    private const int _rangeRetryBaseDelayMs = 500;
+    private const int _rangeParallelism = 8;         // concurrent slice workers for long kline windows
+    private const int _rangeParallelMinBars = 5_000;  // ≥ this many bars per worker before adding another
+
+    // Bitget rate-limit rejections say "too many requests"/"frequent"; network-level failures
+    // (timeouts, connection resets, 5xx) come back from the SDK as a generic error with an empty
+    // or HTTP-status message. All of those are worth retrying; parameter errors are not.
+    private static bool IsTransient(CryptoExchange.Net.Objects.Error? error)
+    {
+        if (error == null) return true;
+        var m = error.Message ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(m)) return true;
+        return m.Contains("too many", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("frequent", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("connection", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("429") || m.Contains("502") || m.Contains("503") || m.Contains("504");
+    }
+
+    private static string DescribeError(CryptoExchange.Net.Objects.Error? error)
+    {
+        if (error == null) return "unknown error";
+        var msg = string.IsNullOrWhiteSpace(error.Message) ? "no message from exchange/transport" : error.Message;
+        var code = error.Code.HasValue ? $" (code {error.Code})" : string.Empty;
+        return $"{error.GetType().Name}{code}: {msg}";
+    }
 
     public async Task<List<CandleDto>> GetKlinesRangeAsync(
         string symbol, string timeframe, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default)
     {
-        const int pageSize = 200; // Bitget history-candles max per request
-
         var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
         var interval = MapInterval(timeframe);
         var span = GetTimeframeSpan(timeframe);
 
-        var byOpen = new Dictionary<DateTime, CandleDto>();
-        var cursorEnd = toUtc;
+        // Bitget pages only 200 candles per request (~0.6 s/page end-to-end), so a year of 1m bars
+        // is ~2600 sequential pages ≈ 27 min. Slice the window into disjoint sub-windows and walk
+        // them concurrently: _rangeParallelism workers × ~1.6 req/s stays well under Bitget's
+        // 20 req/s public-data limit. Each worker pages its own slice backward exactly as before.
+        var totalBars = (toUtc - fromUtc).Ticks / span.Ticks;
+        var workers = (int)Math.Clamp(totalBars / (_rangeParallelMinBars), 1, _rangeParallelism);
+        var sliceTicks = (toUtc - fromUtc).Ticks / workers;
 
-        while (cursorEnd > fromUtc)
+        var tasks = new List<Task<Dictionary<DateTime, CandleDto>>>(workers);
+        for (int w = 0; w < workers; w++)
+        {
+            var sliceFrom = fromUtc.AddTicks(sliceTicks * w);
+            var sliceTo = w == workers - 1 ? toUtc : fromUtc.AddTicks(sliceTicks * (w + 1));
+            tasks.Add(FetchKlinesSliceAsync(symbol, bitgetSymbol, interval, span, sliceFrom, sliceTo, fromUtc, toUtc, ct));
+        }
+        var slices = await Task.WhenAll(tasks);
+
+        var byOpen = new Dictionary<DateTime, CandleDto>();
+        foreach (var slice in slices)
+            foreach (var kv in slice)
+                byOpen.TryAdd(kv.Key, kv.Value);
+
+        if (byOpen.Count > _rangeHardCap)
+            throw new InvalidOperationException(
+                $"Bitget GetKlinesRange exceeded {_rangeHardCap} candles for {symbol} {timeframe} [{fromUtc:o}..{toUtc:o}] — narrow the window.");
+
+        return byOpen.Values.OrderBy(c => c.OpenTime).ToList();
+    }
+
+    /// <summary>Backward-pages one [sliceFrom, sliceTo) slice; clips rows to the overall [fromUtc, toUtc).</summary>
+    private async Task<Dictionary<DateTime, CandleDto>> FetchKlinesSliceAsync(
+        string symbol, string bitgetSymbol, BitgetFuturesKlineInterval interval, TimeSpan span,
+        DateTime sliceFrom, DateTime sliceTo, DateTime fromUtc, DateTime toUtc, CancellationToken ct)
+    {
+        const int pageSize = 200; // Bitget history-candles max per request
+
+        var byOpen = new Dictionary<DateTime, CandleDto>();
+        var cursorEnd = sliceTo;
+
+        while (cursorEnd > sliceFrom)
         {
             ct.ThrowIfCancellationRequested();
 
+            // Bitget rejects any request whose [startTime,endTime] spans more than 90 days
+            // ("40017 Parameter verification failed startTime || endTime"), independent of `limit`.
+            // The page is anchored on endTime anyway, so clamp startTime to a rolling window.
+            var pageStart = cursorEnd - _rangeMaxRequestSpan;
+            if (pageStart < sliceFrom) pageStart = sliceFrom;
+
             var result = await _client.FuturesApiV2.ExchangeData.GetHistoricalKlinesAsync(
                 BitgetProductTypeV2.UsdtFutures, bitgetSymbol, interval,
-                fromUtc, cursorEnd, pageSize, ct);
+                pageStart, cursorEnd, pageSize, ct);
+
+            // Over a long window this is thousands of requests; a transient hiccup (rate limit,
+            // socket timeout, 5xx — the SDK reports those with an empty message) must not kill
+            // the run. Retry with exponential backoff, then give up with the real error text.
+            for (var attempt = 0; !result.Success && IsTransient(result.Error) && attempt < _rangeMaxRetries; attempt++)
+            {
+                await Task.Delay(_rangeRetryBaseDelayMs * (int)Math.Pow(2, attempt), ct);
+                result = await _client.FuturesApiV2.ExchangeData.GetHistoricalKlinesAsync(
+                    BitgetProductTypeV2.UsdtFutures, bitgetSymbol, interval,
+                    pageStart, cursorEnd, pageSize, ct);
+            }
 
             if (!result.Success)
-                throw new Exception($"Bitget GetKlinesRange failed for {symbol}: {result.Error?.Message ?? "unknown error"}");
+                throw new Exception($"Bitget GetKlinesRange failed for {symbol}: {DescribeError(result.Error)}");
 
             var rows = result.Data?.ToList();
             if (rows == null || rows.Count == 0) break;
@@ -121,6 +202,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
             {
                 if (k.OpenTime < oldest) oldest = k.OpenTime;
                 if (k.OpenTime < fromUtc || k.OpenTime >= toUtc) continue;
+                if (k.OpenTime < sliceFrom || k.OpenTime >= sliceTo) continue; // belongs to a neighbour slice
                 if (byOpen.ContainsKey(k.OpenTime)) continue;
 
                 byOpen[k.OpenTime] = new CandleDto
@@ -137,9 +219,9 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
 
             if (byOpen.Count > _rangeHardCap)
                 throw new InvalidOperationException(
-                    $"Bitget GetKlinesRange exceeded {_rangeHardCap} candles for {symbol} {timeframe} [{fromUtc:o}..{toUtc:o}] — narrow the window.");
+                    $"Bitget GetKlinesRange exceeded {_rangeHardCap} candles for {symbol} [{fromUtc:o}..{toUtc:o}] — narrow the window.");
 
-            if (oldest <= fromUtc) break;
+            if (oldest <= sliceFrom) break;
             var nextEnd = oldest.AddTicks(-1);
             if (nextEnd >= cursorEnd) break; // no forward progress — bail rather than spin
             cursorEnd = nextEnd;
@@ -147,7 +229,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
             await Task.Delay(_rangePageDelayMs, ct);
         }
 
-        return byOpen.Values.OrderBy(c => c.OpenTime).ToList();
+        return byOpen;
     }
 
     public async Task<List<FundingEventDto>> GetFundingHistoryAsync(

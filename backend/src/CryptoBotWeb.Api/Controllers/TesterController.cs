@@ -109,6 +109,17 @@ public class TesterController : ControllerBase
         {
             return BadRequest(new { message = ex.Message });
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // client went away — nothing to report
+        }
+        catch (Exception ex)
+        {
+            // Exchange-side failures during the history download (rate limit, bad symbol, range
+            // rejected…) surface as plain Exception from the clients. Report them to the UI instead
+            // of a bare 500 — the message already names the exchange and symbol.
+            return BadRequest(new { message = ex.Message });
+        }
         finally
         {
             secondService?.Dispose();
