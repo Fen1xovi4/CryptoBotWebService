@@ -27,6 +27,8 @@ public class AppDbContext : DbContext
     public DbSet<TelegramSubscriber> TelegramSubscribers => Set<TelegramSubscriber>();
     public DbSet<SymbolBlacklistEntry> SymbolBlacklist => Set<SymbolBlacklistEntry>();
     public DbSet<BalanceSnapshot> BalanceSnapshots => Set<BalanceSnapshot>();
+    public DbSet<MarketCandle> MarketCandles => Set<MarketCandle>();
+    public DbSet<MarketCandleRange> MarketCandleRanges => Set<MarketCandleRange>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -357,6 +359,32 @@ public class AppDbContext : DbContext
                 .HasForeignKey(x => x.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => new { x.UserId, x.TakenAt });
+        });
+
+        // Simulator kline cache. No FK to anything — it's shared market data, not user data.
+        modelBuilder.Entity<MarketCandle>(e =>
+        {
+            e.ToTable("market_candles");
+            e.HasKey(x => new { x.ExchangeType, x.Symbol, x.Timeframe, x.OpenTime });
+            e.Property(x => x.ExchangeType).HasConversion<int>();
+            e.Property(x => x.Symbol).HasMaxLength(40);
+            e.Property(x => x.Timeframe).HasMaxLength(8);
+            e.Property(x => x.Open).HasPrecision(28, 12);
+            e.Property(x => x.High).HasPrecision(28, 12);
+            e.Property(x => x.Low).HasPrecision(28, 12);
+            e.Property(x => x.Close).HasPrecision(28, 12);
+            e.Property(x => x.Volume).HasPrecision(28, 8);
+        });
+
+        modelBuilder.Entity<MarketCandleRange>(e =>
+        {
+            e.ToTable("market_candle_ranges");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.ExchangeType).HasConversion<int>();
+            e.Property(x => x.Symbol).HasMaxLength(40);
+            e.Property(x => x.Timeframe).HasMaxLength(8);
+            e.HasIndex(x => new { x.ExchangeType, x.Symbol, x.Timeframe });
         });
     }
 }

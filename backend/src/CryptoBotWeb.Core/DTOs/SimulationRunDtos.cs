@@ -33,6 +33,23 @@ public class SimulationRunRequest
     /// <summary>Fee overrides as raw fractions (0.0006 = 0.06%). Null → exchange defaults.</summary>
     public decimal? MakerFeeRate { get; set; }
     public decimal? TakerFeeRate { get; set; }
+
+    /// <summary>
+    /// Skip the kline history cache and re-download the whole window from the exchange
+    /// (the fresh candles are still written to the cache). Default false.
+    /// </summary>
+    public bool BypassCache { get; set; }
+}
+
+/// <summary>Where the 1m price path came from — lets the UI show cache hits and download time.</summary>
+public class SimulationHistoryStats
+{
+    public bool CacheUsed { get; set; }
+    public int CandlesFromCache { get; set; }
+    public int CandlesDownloaded { get; set; }
+    public int GapsFilled { get; set; }
+    public double DownloadSeconds { get; set; }
+    public double CacheReadSeconds { get; set; }
 }
 
 /// <summary>
@@ -82,6 +99,8 @@ public class SimulationRunResult
 
     public SimulationRunSummary Summary { get; set; } = new();
     public List<string> Warnings { get; set; } = new();
+
+    public SimulationHistoryStats History { get; set; } = new();
 }
 
 public class SimTrade

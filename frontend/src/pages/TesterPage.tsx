@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 import api from '../api/client';
 import Header from '../components/Layout/Header';
@@ -12,7 +12,7 @@ import { buildSimConfig } from './tester/buildConfig';
 import { makeDefaultForms } from './tester/formDefaults';
 import type { AllForms } from './tester/formDefaults';
 import { STRATEGY_LABELS, STRATEGY_TYPES } from './tester/types';
-import type { Account, SimulateRequest, SimulationResult, StrategyType } from './tester/types';
+import type { Account, KlineCacheEntry, SimulateRequest, SimulationResult, StrategyType } from './tester/types';
 
 const EXCHANGE_NAMES: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX', 4: 'Dzengi' };
 // SimulationEngine downloads 1m history via GetKlinesRangeAsync, which only Bybit/Bitget/BingX
@@ -61,6 +61,9 @@ export default function TesterPage() {
   const [toDate, setToDate] = useState('');
   const [makerFeePercent, setMakerFeePercent] = useState('');
   const [takerFeePercent, setTakerFeePercent] = useState('');
+  const [bypassCache, setBypassCache] = useState(false);
+  const [showCache, setShowCache] = useState(false);
+  const queryClient = useQueryClient();
 
   const [forms, setForms] = useState<AllForms>(() => makeDefaultForms());
   const [formError, setFormError] = useState('');
@@ -128,6 +131,19 @@ export default function TesterPage() {
   const simulateMutation = useMutation({
     mutationFn: (body: SimulateRequest) =>
       api.post<SimulationResult>('/tester/simulate', body, { timeout: SIMULATE_TIMEOUT_MS }).then((r) => r.data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tester-cache'] }),
+  });
+
+  // Backend kline cache — which exchange/symbol windows are already on disk.
+  const { data: cacheEntries } = useQuery<KlineCacheEntry[]>({
+    queryKey: ['tester-cache'],
+    queryFn: () => api.get('/tester/cache').then((r) => r.data),
+    enabled: showCache,
+  });
+  const clearCacheMutation = useMutation({
+    mutationFn: (key: { exchangeType?: number; symbol?: string; timeframe?: string } | null) =>
+      api.delete('/tester/cache', { params: key ?? {} }).then((r) => r.data as { removedCandles: number }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tester-cache'] }),
   });
 
   // Elapsed-time ticker while a simulation is running.
@@ -170,6 +186,7 @@ export default function TesterPage() {
       configJson: build.configJson,
       makerFeeRate: makerFeePercent.trim() === '' ? null : Number(makerFeePercent) / 100,
       takerFeeRate: takerFeePercent.trim() === '' ? null : Number(takerFeePercent) / 100,
+      bypassCache,
     };
     simulateMutation.mutate(body);
   };
@@ -354,11 +371,83 @@ export default function TesterPage() {
             {simulateMutation.isPending ? `Симуляция... ${elapsedSec}с` : 'Запустить симуляцию'}
           </button>
           {estimatedMinutes !== null && (
-            <span className="text-[11px] text-text-secondary self-center" title="Оценка времени загрузки 1m-истории с биржи; сама симуляция занимает секунды">
-              ≈ {estimatedMinutes} мин загрузки истории
+            <span className="text-[11px] text-text-secondary self-center" title="Оценка времени загрузки 1m-истории с биржи, если её ещё нет в кэше; повторные прогоны по тому же окну — секунды">
+              ≈ {estimatedMinutes} мин, если истории нет в кэше
             </span>
           )}
         </div>
+
+        <div className="flex flex-wrap items-center gap-4 text-xs">
+          <label className="flex items-center gap-2 cursor-pointer select-none text-text-secondary">
+            <input type="checkbox" checked={bypassCache} onChange={(e) => setBypassCache(e.target.checked)}
+              className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+            Перекачать историю с биржи (не использовать кэш)
+          </label>
+          <button type="button" onClick={() => setShowCache((v) => !v)} className="text-accent-blue hover:underline">
+            {showCache ? 'Скрыть кэш истории' : 'Показать кэш истории'}
+          </button>
+        </div>
+
+        {showCache && (
+          <div className="border border-border rounded-lg p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-text-secondary">
+                Кэш 1m-истории в БД — скачанные окна, повторные симуляции по ним идут без обращения к бирже
+              </span>
+              {cacheEntries && cacheEntries.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { if (window.confirm('Очистить весь кэш истории?')) clearCacheMutation.mutate(null); }}
+                  className="text-xs text-accent-red hover:underline"
+                >
+                  Очистить всё
+                </button>
+              )}
+            </div>
+            {!cacheEntries ? (
+              <p className="text-xs text-text-secondary">Загрузка…</p>
+            ) : cacheEntries.length === 0 ? (
+              <p className="text-xs text-text-secondary">Кэш пуст — первая симуляция по символу скачает историю и сохранит её.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="text-xs w-full">
+                  <thead className="text-text-secondary">
+                    <tr>
+                      <th className="text-left font-medium pr-4 py-1">Биржа</th>
+                      <th className="text-left font-medium pr-4 py-1">Символ</th>
+                      <th className="text-left font-medium pr-4 py-1">TF</th>
+                      <th className="text-left font-medium pr-4 py-1">Окно (UTC)</th>
+                      <th className="text-right font-medium pr-4 py-1">Свечей</th>
+                      <th className="text-left font-medium pr-4 py-1">Скачано</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody className="text-text-primary">
+                    {cacheEntries.map((e, i) => (
+                      <tr key={i} className="border-t border-border/60">
+                        <td className="pr-4 py-1">{EXCHANGE_NAMES[e.exchangeType] ?? e.exchangeType}</td>
+                        <td className="pr-4 py-1 font-mono">{e.symbol}</td>
+                        <td className="pr-4 py-1">{e.timeframe}</td>
+                        <td className="pr-4 py-1 font-mono whitespace-nowrap">{e.fromUtc.slice(0, 16).replace('T', ' ')} → {e.toUtc.slice(0, 16).replace('T', ' ')}</td>
+                        <td className="pr-4 py-1 text-right font-mono">{e.candles.toLocaleString('ru-RU')}</td>
+                        <td className="pr-4 py-1 whitespace-nowrap">{e.downloadedAt.slice(0, 16).replace('T', ' ')}</td>
+                        <td className="py-1">
+                          <button
+                            type="button"
+                            onClick={() => clearCacheMutation.mutate({ exchangeType: e.exchangeType, symbol: e.symbol, timeframe: e.timeframe })}
+                            className="text-accent-red hover:underline"
+                          >
+                            удалить
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
 
         {fromDate && toDate && (
           <p className="text-xs text-text-secondary">
@@ -447,8 +536,18 @@ function SimulationResults({
   indicatorData: IndicatorDataPoint[];
 }) {
   const s = result.summary;
+  const h = result.history;
   return (
     <div className="space-y-4">
+      {h && (
+        <p className="text-[11px] text-text-secondary">
+          История 1m: {h.candlesFromCache.toLocaleString('ru-RU')} свечей из кэша
+          {h.cacheReadSeconds > 0 ? ` (${h.cacheReadSeconds}с)` : ''}, {h.candlesDownloaded.toLocaleString('ru-RU')} скачано с биржи
+          {h.downloadSeconds > 0 ? ` (${h.downloadSeconds}с)` : ''}
+          {h.gapsFilled > 0 ? `, докачано дыр: ${h.gapsFilled}` : ''}
+          {!h.cacheUsed ? ' — кэш не использовался' : ''}
+        </p>
+      )}
       {result.warnings.length > 0 && (
         <div className="bg-accent-yellow/10 border border-accent-yellow/30 rounded-lg px-4 py-3 space-y-1">
           {result.warnings.map((w, i) => (

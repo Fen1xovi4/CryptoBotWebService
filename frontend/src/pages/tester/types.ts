@@ -75,6 +75,29 @@ export interface SimulateRequest {
   configJson: string;
   makerFeeRate?: number | null;
   takerFeeRate?: number | null;
+  /** Re-download the whole window from the exchange instead of serving cached 1m history. */
+  bypassCache?: boolean;
+}
+
+/** Where the 1m price path came from (backend kline cache vs live download). */
+export interface SimulationHistoryStats {
+  cacheUsed: boolean;
+  candlesFromCache: number;
+  candlesDownloaded: number;
+  gapsFilled: number;
+  downloadSeconds: number;
+  cacheReadSeconds: number;
+}
+
+/** One covered window of the backend kline cache (GET /tester/cache). */
+export interface KlineCacheEntry {
+  exchangeType: number;
+  symbol: string;
+  timeframe: string;
+  fromUtc: string;
+  toUtc: string;
+  candles: number;
+  downloadedAt: string;
 }
 
 export interface SimulatedTrade {
@@ -124,4 +147,5 @@ export interface SimulationResult {
   chartCandles: CandleData[];
   summary: SimulationSummary;
   warnings: string[];
+  history?: SimulationHistoryStats;
 }
