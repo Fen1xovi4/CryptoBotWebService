@@ -41,6 +41,9 @@ public class SimulationEngine
             ?? throw new InvalidOperationException(
                 $"Нет симулятора для стратегии '{request.StrategyType}'. Доступны: {string.Join(", ", SupportedStrategyTypes)}");
 
+        // Reject obviously broken configs before paying for the 1m-history download.
+        simulator.ValidateConfig(request.ConfigJson);
+
         var to = request.ToUtc ?? DateTime.UtcNow;
         var from = request.FromUtc ?? to.AddDays(-Math.Clamp(request.Days, 1, MaxWindowDays));
         if (from >= to)

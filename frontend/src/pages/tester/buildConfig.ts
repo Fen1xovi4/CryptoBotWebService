@@ -260,6 +260,14 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
 
     case 'MaratG':
     default: {
+      const orderSize = Number(forms.mg.orderSize);
+      if (!(orderSize > 0)) return { ok: false, error: 'MaratG: сумма ставки (USDT) должна быть больше 0' };
+      if (forms.mg.useMartingale && !(Number(forms.mg.martingaleCoeff) > 0))
+        return { ok: false, error: 'MaratG: коэффициент мартингейла должен быть больше 0' };
+      if (forms.mg.useMartingale && forms.mg.useSteppedMartingale && !(Number(forms.mg.martingaleStep) >= 1))
+        return { ok: false, error: 'MaratG: шаг ступенчатого мартингейла должен быть ≥ 1' };
+      if (forms.mg.useDrawdownScale && !(Number(forms.mg.drawdownBalance) > 0))
+        return { ok: false, error: 'MaratG: баланс для масштабирования по просадке должен быть больше 0' };
       const configJson = JSON.stringify({
         indicatorType: forms.mg.indicatorType,
         indicatorLength: Number(forms.mg.indicatorLength),
@@ -269,6 +277,18 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
         stopLossPercent: Number(forms.mg.stopLossPercent),
         symbol: sym,
         timeframe: forms.mg.timeframe,
+        // Workspace-level fields, merged in exactly like StrategiesController.MergeWorkspaceConfig.
+        orderSize,
+        useMartingale: forms.mg.useMartingale,
+        martingaleCoeff: Number(forms.mg.martingaleCoeff),
+        useSteppedMartingale: forms.mg.useSteppedMartingale,
+        martingaleStep: Number(forms.mg.martingaleStep),
+        onlyLong: forms.mg.onlyLong,
+        onlyShort: forms.mg.onlyShort,
+        useDrawdownScale: forms.mg.useDrawdownScale,
+        drawdownBalance: Number(forms.mg.drawdownBalance),
+        drawdownPercent: Number(forms.mg.drawdownPercent),
+        drawdownTarget: Number(forms.mg.drawdownTarget),
       });
       return { ok: true, configJson };
     }

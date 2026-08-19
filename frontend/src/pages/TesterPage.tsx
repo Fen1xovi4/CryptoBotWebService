@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
+import axios from 'axios';
 import api from '../api/client';
 import Header from '../components/Layout/Header';
 import CandlestickChart from '../components/Chart/CandlestickChart';
@@ -13,7 +14,26 @@ import type { AllForms } from './tester/formDefaults';
 import { STRATEGY_LABELS, STRATEGY_TYPES } from './tester/types';
 import type { Account, SimulateRequest, SimulationResult, StrategyType } from './tester/types';
 
-const EXCHANGE_NAMES: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
+const EXCHANGE_NAMES: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX', 4: 'Dzengi' };
+// SimulationEngine downloads 1m history via GetKlinesRangeAsync, which only Bybit/Bitget/BingX
+// implement — Dzengi accounts would 400 on /tester/simulate, so they are not offered here.
+const SIM_SUPPORTED_EXCHANGES = new Set([1, 2, 3]);
+
+/** Prefer the server's `message` (the controller's friendly 400 text) over axios's generic one. */
+function describeError(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const data = err.response?.data as { message?: string; title?: string; errors?: Record<string, string[]> } | undefined;
+    if (data?.message) return data.message;
+    if (data?.errors) {
+      const first = Object.values(data.errors).flat()[0];
+      if (first) return first;
+    }
+    if (data?.title) return data.title;
+    if (err.code === 'ECONNABORTED') return 'Таймаут запроса — попробуйте меньший период или более крупный таймфрейм';
+    if (err.response?.status) return `Ошибка сервера (HTTP ${err.response.status})`;
+  }
+  return (err as Error)?.message || 'Ошибка симуляции';
+}
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 const POLL_MS: Record<string, number> = {
   '1m': 5000,
@@ -53,12 +73,18 @@ export default function TesterPage() {
     staleTime: 5 * 60 * 1000,
   });
 
+  const simAccounts = useMemo(
+    () => (accounts ?? []).filter((a) => SIM_SUPPORTED_EXCHANGES.has(a.exchangeType)),
+    [accounts],
+  );
+  const hiddenAccountCount = (accounts?.length ?? 0) - simAccounts.length;
+
   useEffect(() => {
-    if (accounts?.length && !accountId) {
-      const active = accounts.find((a) => a.isActive);
-      setAccountId((active ?? accounts[0]).id);
+    if (simAccounts.length && !accountId) {
+      const active = simAccounts.find((a) => a.isActive);
+      setAccountId((active ?? simAccounts[0]).id);
     }
-  }, [accounts, accountId]);
+  }, [simAccounts, accountId]);
 
   const canFetch = !!accountId && !!symbol.trim();
 
@@ -170,12 +196,17 @@ export default function TesterPage() {
           <label className="text-xs font-medium text-text-secondary">Account</label>
           <select value={accountId} onChange={(e) => setAccountId(e.target.value)} className={`${inputCls} min-w-[200px]`}>
             <option value="">Select account...</option>
-            {accounts?.map((a) => (
+            {simAccounts.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name} ({EXCHANGE_NAMES[a.exchangeType]})
               </option>
             ))}
           </select>
+          {hiddenAccountCount > 0 && (
+            <span className="text-[11px] text-text-secondary">
+              Скрыто {hiddenAccountCount}: симулятор работает только с Bybit / Bitget / BingX
+            </span>
+          )}
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -217,15 +248,15 @@ export default function TesterPage() {
                 className={`${inputCls} min-w-[200px]`}
               >
                 <option value="">Select account...</option>
-                {accounts?.filter((a) => a.id !== accountId).map((a) => (
+                {simAccounts.filter((a) => a.id !== accountId).map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name} ({EXCHANGE_NAMES[a.exchangeType]})
                   </option>
                 ))}
               </select>
-              {secondAccountId && accounts && (() => {
-                const acc1 = accounts.find((a) => a.id === accountId);
-                const acc2 = accounts.find((a) => a.id === secondAccountId);
+              {secondAccountId && (() => {
+                const acc1 = simAccounts.find((a) => a.id === accountId);
+                const acc2 = simAccounts.find((a) => a.id === secondAccountId);
                 if (acc1 && acc2 && acc1.exchangeType === acc2.exchangeType) {
                   return <p className="text-xs text-accent-yellow">⚠ Второй аккаунт должен быть на другой бирже</p>;
                 }
@@ -312,7 +343,7 @@ export default function TesterPage() {
 
         {(formError || simulateMutation.isError) && (
           <div className="bg-accent-red/10 border border-accent-red/20 text-accent-red text-sm px-4 py-2.5 rounded-lg">
-            {formError || (simulateMutation.error as Error)?.message || 'Ошибка симуляции'}
+            {formError || describeError(simulateMutation.error)}
           </div>
         )}
 
@@ -357,7 +388,7 @@ export default function TesterPage() {
 
           {previewError && (
             <div className="bg-accent-red/10 border border-accent-red/20 text-accent-red text-sm px-4 py-2.5 rounded-lg mb-4">
-              Failed to load chart data. Check that the symbol is correct for the selected exchange.
+              Не удалось загрузить график: {describeError(previewError)}. Проверьте, что символ существует на выбранной бирже.
             </div>
           )}
 
