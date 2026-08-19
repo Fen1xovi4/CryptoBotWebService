@@ -87,7 +87,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
     // Funding: Bitget's history-funding-rate endpoint is PAGE-numbered (pageSize + page), NOT
     // time-ranged — it returns settlements newest-first. We walk pages forward, clip each to
     // [fromUtc,toUtc), and stop once a page runs entirely older than fromUtc (or is short/empty).
-    private const int _rangeHardCap = 200_000;
+    private const int _rangeHardCap = 600_000; // > 365d of 1m bars (525_600) — SimulationEngine.MaxWindowDays
     private const int _rangePageDelayMs = 120;
 
     public async Task<List<CandleDto>> GetKlinesRangeAsync(

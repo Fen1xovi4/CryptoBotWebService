@@ -121,7 +121,7 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
     // toUtc to the oldest bar of each page (minus one tick) until the window is covered, the page
     // comes back empty, or the cursor stops advancing. Results are deduped by OpenTime/Timestamp
     // and returned ascending. A hard cap guards against a runaway loop on a mis-sized window.
-    private const int _rangeHardCap = 200_000;
+    private const int _rangeHardCap = 600_000; // > 365d of 1m bars (525_600) — SimulationEngine.MaxWindowDays
     private const int _rangePageDelayMs = 120;
     private const int _rangeMaxRetries = 6;
     private const int _rangeRetryBaseDelayMs = 500;

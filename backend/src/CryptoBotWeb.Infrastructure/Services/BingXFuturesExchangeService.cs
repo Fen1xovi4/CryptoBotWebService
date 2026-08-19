@@ -76,7 +76,7 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
     // recent bars within the window when it holds more than `limit`. Same backward-paging shape as
     // Bybit: fix startTime=fromUtc, walk endTime down from toUtc to each page's oldest bar (minus a
     // tick) until covered / empty / no progress. Deduped by OpenTime/Timestamp, returned ascending.
-    private const int _rangeHardCap = 200_000;
+    private const int _rangeHardCap = 600_000; // > 365d of 1m bars (525_600) — SimulationEngine.MaxWindowDays
     private const int _rangePageDelayMs = 120;
 
     public async Task<List<CandleDto>> GetKlinesRangeAsync(

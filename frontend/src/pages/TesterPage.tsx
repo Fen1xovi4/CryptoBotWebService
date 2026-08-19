@@ -43,8 +43,11 @@ const POLL_MS: Record<string, number> = {
   '4h': 120000,
   '1d': 300000,
 };
-const DAY_PRESETS = [7, 30, 90, 180];
-const SIMULATE_TIMEOUT_MS = 10 * 60 * 1000; // paginated 1m-kline download can take a while
+const DAY_PRESETS = [7, 30, 90, 180, 365];
+// Rough 1m-history download speed per exchange (candles/sec), from measured paging:
+// Bybit/BingX 1000 per page ≈ 2 pages/s; Bitget 200 per page ≈ 2 pages/s.
+const DOWNLOAD_CANDLES_PER_SEC: Record<number, number> = { 1: 2000, 2: 400, 3: 2000 };
+const SIMULATE_TIMEOUT_MS = 30 * 60 * 1000; // paginated 1m-kline download: Bybit ~4 min/year, Bitget (200/page) ~20 min/year; nginx /api/tester/ allows 1800s
 
 export default function TesterPage() {
   const [accountId, setAccountId] = useState('');
@@ -78,6 +81,23 @@ export default function TesterPage() {
     [accounts],
   );
   const hiddenAccountCount = (accounts?.length ?? 0) - simAccounts.length;
+
+  // Rough wall-clock estimate for the history download so a 180/365-day run on Bitget
+  // doesn't look hung. Explicit date range overrides the day preset, same as in handleSimulate.
+  const estimatedMinutes = useMemo(() => {
+    const acc = simAccounts.find((a) => a.id === accountId);
+    if (!acc) return null;
+    let windowDays = days;
+    if (fromDate && toDate) {
+      const ms = new Date(`${toDate}T23:59:59Z`).getTime() - new Date(`${fromDate}T00:00:00Z`).getTime();
+      if (!(ms > 0)) return null;
+      windowDays = ms / 86_400_000;
+    }
+    const rate = DOWNLOAD_CANDLES_PER_SEC[acc.exchangeType] ?? 1000;
+    // FuturesArbitrage / CrossTicker GridHedge pull a second series; ballpark ×2.
+    const series = strategyType === 'FuturesArbitrage' || (strategyType === 'GridHedge' && forms.gh.mode === 2) ? 2 : 1;
+    return Math.max(1, Math.round((windowDays * 1440 * series) / rate / 60));
+  }, [simAccounts, accountId, days, fromDate, toDate, strategyType, forms.gh.mode]);
 
   useEffect(() => {
     if (simAccounts.length && !accountId) {
@@ -333,6 +353,11 @@ export default function TesterPage() {
           >
             {simulateMutation.isPending ? `Симуляция... ${elapsedSec}с` : 'Запустить симуляцию'}
           </button>
+          {estimatedMinutes !== null && (
+            <span className="text-[11px] text-text-secondary self-center" title="Оценка времени загрузки 1m-истории с биржи; сама симуляция занимает секунды">
+              ≈ {estimatedMinutes} мин загрузки истории
+            </span>
+          )}
         </div>
 
         {fromDate && toDate && (
