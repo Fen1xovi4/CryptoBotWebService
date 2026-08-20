@@ -20,12 +20,15 @@ public class TesterController : ControllerBase
     private readonly AppDbContext _db;
     private readonly IExchangeServiceFactory _exchangeFactory;
     private readonly SimulationEngine _engine;
+    private readonly KlineHistoryCache _klineCache;
 
-    public TesterController(AppDbContext db, IExchangeServiceFactory exchangeFactory, SimulationEngine engine)
+    public TesterController(AppDbContext db, IExchangeServiceFactory exchangeFactory, SimulationEngine engine,
+        KlineHistoryCache klineCache)
     {
         _db = db;
         _exchangeFactory = exchangeFactory;
         _engine = engine;
+        _klineCache = klineCache;
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -98,7 +101,8 @@ public class TesterController : ControllerBase
             if (secondAccount != null)
                 secondService = _exchangeFactory.CreateFutures(secondAccount);
 
-            var result = await _engine.RunAsync(request, service, secondService, ct);
+            var result = await _engine.RunAsync(request, service, secondService, ct,
+                account.ExchangeType, secondAccount?.ExchangeType);
             return Ok(result);
         }
         catch (NotSupportedException)
@@ -109,10 +113,37 @@ public class TesterController : ControllerBase
         {
             return BadRequest(new { message = ex.Message });
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // client went away — nothing to report
+        }
+        catch (Exception ex)
+        {
+            // Exchange-side failures during the history download (rate limit, bad symbol, range
+            // rejected…) surface as plain Exception from the clients. Report them to the UI instead
+            // of a bare 500 — the message already names the exchange and symbol.
+            return BadRequest(new { message = ex.Message });
+        }
         finally
         {
             secondService?.Dispose();
         }
+    }
+
+    // ───────────── kline history cache (admin maintenance) ─────────────
+
+    [HttpGet("cache")]
+    public async Task<IActionResult> GetCache(CancellationToken ct) =>
+        Ok(await _klineCache.ListAsync(ct));
+
+    /// <summary>Drop cached history. No filters = everything; otherwise one exchange/symbol/timeframe key.</summary>
+    [HttpDelete("cache")]
+    public async Task<IActionResult> ClearCache(
+        [FromQuery] ExchangeType? exchangeType, [FromQuery] string? symbol, [FromQuery] string? timeframe,
+        CancellationToken ct)
+    {
+        var removed = await _klineCache.ClearAsync(exchangeType, symbol, timeframe, ct);
+        return Ok(new { removedCandles = removed });
     }
 
     /// <summary>Account lookup with the proxy graph the exchange factory needs, scoped to the caller.</summary>

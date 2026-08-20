@@ -13,5 +13,12 @@ public interface IStrategySimulator
     /// <summary>Must equal one of <see cref="Constants.StrategyTypes"/>.</summary>
     string StrategyType { get; }
 
+    /// <summary>
+    /// Cheap config sanity check run by the engine BEFORE the (slow) price-history download, so an
+    /// obviously broken config fails fast with a readable message. Throw <see cref="ArgumentException"/>
+    /// to reject; the default accepts everything.
+    /// </summary>
+    void ValidateConfig(string configJson) { }
+
     SimulationRunResult Run(SimulationContext context);
 }

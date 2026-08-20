@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useQuery, useMutation } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import axios from 'axios';
 import api from '../api/client';
 import Header from '../components/Layout/Header';
 import CandlestickChart from '../components/Chart/CandlestickChart';
@@ -11,9 +12,28 @@ import { buildSimConfig } from './tester/buildConfig';
 import { makeDefaultForms } from './tester/formDefaults';
 import type { AllForms } from './tester/formDefaults';
 import { STRATEGY_LABELS, STRATEGY_TYPES } from './tester/types';
-import type { Account, SimulateRequest, SimulationResult, StrategyType } from './tester/types';
+import type { Account, KlineCacheEntry, SimulateRequest, SimulationResult, StrategyType } from './tester/types';
 
-const EXCHANGE_NAMES: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX' };
+const EXCHANGE_NAMES: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX', 4: 'Dzengi' };
+// SimulationEngine downloads 1m history via GetKlinesRangeAsync, which only Bybit/Bitget/BingX
+// implement — Dzengi accounts would 400 on /tester/simulate, so they are not offered here.
+const SIM_SUPPORTED_EXCHANGES = new Set([1, 2, 3]);
+
+/** Prefer the server's `message` (the controller's friendly 400 text) over axios's generic one. */
+function describeError(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const data = err.response?.data as { message?: string; title?: string; errors?: Record<string, string[]> } | undefined;
+    if (data?.message) return data.message;
+    if (data?.errors) {
+      const first = Object.values(data.errors).flat()[0];
+      if (first) return first;
+    }
+    if (data?.title) return data.title;
+    if (err.code === 'ECONNABORTED') return 'Таймаут запроса — попробуйте меньший период или более крупный таймфрейм';
+    if (err.response?.status) return `Ошибка сервера (HTTP ${err.response.status})`;
+  }
+  return (err as Error)?.message || 'Ошибка симуляции';
+}
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 const POLL_MS: Record<string, number> = {
   '1m': 5000,
@@ -23,8 +43,11 @@ const POLL_MS: Record<string, number> = {
   '4h': 120000,
   '1d': 300000,
 };
-const DAY_PRESETS = [7, 30, 90, 180];
-const SIMULATE_TIMEOUT_MS = 10 * 60 * 1000; // paginated 1m-kline download can take a while
+const DAY_PRESETS = [7, 30, 90, 180, 365];
+// Rough 1m-history download speed per exchange (candles/sec), from measured paging:
+// Bybit/BingX 1000 per page ≈ 2 pages/s; Bitget 200 per page but 8 parallel slice workers (measured: 365d ≈ 3.7 min).
+const DOWNLOAD_CANDLES_PER_SEC: Record<number, number> = { 1: 2000, 2: 2300, 3: 2000 };
+const SIMULATE_TIMEOUT_MS = 30 * 60 * 1000; // paginated 1m-kline download: Bybit ~4 min/year, Bitget (200/page) ~20 min/year; nginx /api/tester/ allows 1800s
 
 export default function TesterPage() {
   const [accountId, setAccountId] = useState('');
@@ -38,6 +61,9 @@ export default function TesterPage() {
   const [toDate, setToDate] = useState('');
   const [makerFeePercent, setMakerFeePercent] = useState('');
   const [takerFeePercent, setTakerFeePercent] = useState('');
+  const [bypassCache, setBypassCache] = useState(false);
+  const [showCache, setShowCache] = useState(false);
+  const queryClient = useQueryClient();
 
   const [forms, setForms] = useState<AllForms>(() => makeDefaultForms());
   const [formError, setFormError] = useState('');
@@ -53,12 +79,35 @@ export default function TesterPage() {
     staleTime: 5 * 60 * 1000,
   });
 
-  useEffect(() => {
-    if (accounts?.length && !accountId) {
-      const active = accounts.find((a) => a.isActive);
-      setAccountId((active ?? accounts[0]).id);
+  const simAccounts = useMemo(
+    () => (accounts ?? []).filter((a) => SIM_SUPPORTED_EXCHANGES.has(a.exchangeType)),
+    [accounts],
+  );
+  const hiddenAccountCount = (accounts?.length ?? 0) - simAccounts.length;
+
+  // Rough wall-clock estimate for the history download so a 180/365-day run on Bitget
+  // doesn't look hung. Explicit date range overrides the day preset, same as in handleSimulate.
+  const estimatedMinutes = useMemo(() => {
+    const acc = simAccounts.find((a) => a.id === accountId);
+    if (!acc) return null;
+    let windowDays = days;
+    if (fromDate && toDate) {
+      const ms = new Date(`${toDate}T23:59:59Z`).getTime() - new Date(`${fromDate}T00:00:00Z`).getTime();
+      if (!(ms > 0)) return null;
+      windowDays = ms / 86_400_000;
     }
-  }, [accounts, accountId]);
+    const rate = DOWNLOAD_CANDLES_PER_SEC[acc.exchangeType] ?? 1000;
+    // FuturesArbitrage / CrossTicker GridHedge pull a second series; ballpark ×2.
+    const series = strategyType === 'FuturesArbitrage' || (strategyType === 'GridHedge' && forms.gh.mode === 2) ? 2 : 1;
+    return Math.max(1, Math.round((windowDays * 1440 * series) / rate / 60));
+  }, [simAccounts, accountId, days, fromDate, toDate, strategyType, forms.gh.mode]);
+
+  useEffect(() => {
+    if (simAccounts.length && !accountId) {
+      const active = simAccounts.find((a) => a.isActive);
+      setAccountId((active ?? simAccounts[0]).id);
+    }
+  }, [simAccounts, accountId]);
 
   const canFetch = !!accountId && !!symbol.trim();
 
@@ -82,6 +131,19 @@ export default function TesterPage() {
   const simulateMutation = useMutation({
     mutationFn: (body: SimulateRequest) =>
       api.post<SimulationResult>('/tester/simulate', body, { timeout: SIMULATE_TIMEOUT_MS }).then((r) => r.data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tester-cache'] }),
+  });
+
+  // Backend kline cache — which exchange/symbol windows are already on disk.
+  const { data: cacheEntries } = useQuery<KlineCacheEntry[]>({
+    queryKey: ['tester-cache'],
+    queryFn: () => api.get('/tester/cache').then((r) => r.data),
+    enabled: showCache,
+  });
+  const clearCacheMutation = useMutation({
+    mutationFn: (key: { exchangeType?: number; symbol?: string; timeframe?: string } | null) =>
+      api.delete('/tester/cache', { params: key ?? {} }).then((r) => r.data as { removedCandles: number }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tester-cache'] }),
   });
 
   // Elapsed-time ticker while a simulation is running.
@@ -124,6 +186,7 @@ export default function TesterPage() {
       configJson: build.configJson,
       makerFeeRate: makerFeePercent.trim() === '' ? null : Number(makerFeePercent) / 100,
       takerFeeRate: takerFeePercent.trim() === '' ? null : Number(takerFeePercent) / 100,
+      bypassCache,
     };
     simulateMutation.mutate(body);
   };
@@ -170,12 +233,17 @@ export default function TesterPage() {
           <label className="text-xs font-medium text-text-secondary">Account</label>
           <select value={accountId} onChange={(e) => setAccountId(e.target.value)} className={`${inputCls} min-w-[200px]`}>
             <option value="">Select account...</option>
-            {accounts?.map((a) => (
+            {simAccounts.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name} ({EXCHANGE_NAMES[a.exchangeType]})
               </option>
             ))}
           </select>
+          {hiddenAccountCount > 0 && (
+            <span className="text-[11px] text-text-secondary">
+              Скрыто {hiddenAccountCount}: симулятор работает только с Bybit / Bitget / BingX
+            </span>
+          )}
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -217,15 +285,15 @@ export default function TesterPage() {
                 className={`${inputCls} min-w-[200px]`}
               >
                 <option value="">Select account...</option>
-                {accounts?.filter((a) => a.id !== accountId).map((a) => (
+                {simAccounts.filter((a) => a.id !== accountId).map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name} ({EXCHANGE_NAMES[a.exchangeType]})
                   </option>
                 ))}
               </select>
-              {secondAccountId && accounts && (() => {
-                const acc1 = accounts.find((a) => a.id === accountId);
-                const acc2 = accounts.find((a) => a.id === secondAccountId);
+              {secondAccountId && (() => {
+                const acc1 = simAccounts.find((a) => a.id === accountId);
+                const acc2 = simAccounts.find((a) => a.id === secondAccountId);
                 if (acc1 && acc2 && acc1.exchangeType === acc2.exchangeType) {
                   return <p className="text-xs text-accent-yellow">⚠ Второй аккаунт должен быть на другой бирже</p>;
                 }
@@ -302,7 +370,84 @@ export default function TesterPage() {
           >
             {simulateMutation.isPending ? `Симуляция... ${elapsedSec}с` : 'Запустить симуляцию'}
           </button>
+          {estimatedMinutes !== null && (
+            <span className="text-[11px] text-text-secondary self-center" title="Оценка времени загрузки 1m-истории с биржи, если её ещё нет в кэше; повторные прогоны по тому же окну — секунды">
+              ≈ {estimatedMinutes} мин, если истории нет в кэше
+            </span>
+          )}
         </div>
+
+        <div className="flex flex-wrap items-center gap-4 text-xs">
+          <label className="flex items-center gap-2 cursor-pointer select-none text-text-secondary">
+            <input type="checkbox" checked={bypassCache} onChange={(e) => setBypassCache(e.target.checked)}
+              className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+            Перекачать историю с биржи (не использовать кэш)
+          </label>
+          <button type="button" onClick={() => setShowCache((v) => !v)} className="text-accent-blue hover:underline">
+            {showCache ? 'Скрыть кэш истории' : 'Показать кэш истории'}
+          </button>
+        </div>
+
+        {showCache && (
+          <div className="border border-border rounded-lg p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-text-secondary">
+                Кэш 1m-истории в БД — скачанные окна, повторные симуляции по ним идут без обращения к бирже
+              </span>
+              {cacheEntries && cacheEntries.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { if (window.confirm('Очистить весь кэш истории?')) clearCacheMutation.mutate(null); }}
+                  className="text-xs text-accent-red hover:underline"
+                >
+                  Очистить всё
+                </button>
+              )}
+            </div>
+            {!cacheEntries ? (
+              <p className="text-xs text-text-secondary">Загрузка…</p>
+            ) : cacheEntries.length === 0 ? (
+              <p className="text-xs text-text-secondary">Кэш пуст — первая симуляция по символу скачает историю и сохранит её.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="text-xs w-full">
+                  <thead className="text-text-secondary">
+                    <tr>
+                      <th className="text-left font-medium pr-4 py-1">Биржа</th>
+                      <th className="text-left font-medium pr-4 py-1">Символ</th>
+                      <th className="text-left font-medium pr-4 py-1">TF</th>
+                      <th className="text-left font-medium pr-4 py-1">Окно (UTC)</th>
+                      <th className="text-right font-medium pr-4 py-1">Свечей</th>
+                      <th className="text-left font-medium pr-4 py-1">Скачано</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody className="text-text-primary">
+                    {cacheEntries.map((e, i) => (
+                      <tr key={i} className="border-t border-border/60">
+                        <td className="pr-4 py-1">{EXCHANGE_NAMES[e.exchangeType] ?? e.exchangeType}</td>
+                        <td className="pr-4 py-1 font-mono">{e.symbol}</td>
+                        <td className="pr-4 py-1">{e.timeframe}</td>
+                        <td className="pr-4 py-1 font-mono whitespace-nowrap">{e.fromUtc.slice(0, 16).replace('T', ' ')} → {e.toUtc.slice(0, 16).replace('T', ' ')}</td>
+                        <td className="pr-4 py-1 text-right font-mono">{e.candles.toLocaleString('ru-RU')}</td>
+                        <td className="pr-4 py-1 whitespace-nowrap">{e.downloadedAt.slice(0, 16).replace('T', ' ')}</td>
+                        <td className="py-1">
+                          <button
+                            type="button"
+                            onClick={() => clearCacheMutation.mutate({ exchangeType: e.exchangeType, symbol: e.symbol, timeframe: e.timeframe })}
+                            className="text-accent-red hover:underline"
+                          >
+                            удалить
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
 
         {fromDate && toDate && (
           <p className="text-xs text-text-secondary">
@@ -312,7 +457,7 @@ export default function TesterPage() {
 
         {(formError || simulateMutation.isError) && (
           <div className="bg-accent-red/10 border border-accent-red/20 text-accent-red text-sm px-4 py-2.5 rounded-lg">
-            {formError || (simulateMutation.error as Error)?.message || 'Ошибка симуляции'}
+            {formError || describeError(simulateMutation.error)}
           </div>
         )}
 
@@ -357,7 +502,7 @@ export default function TesterPage() {
 
           {previewError && (
             <div className="bg-accent-red/10 border border-accent-red/20 text-accent-red text-sm px-4 py-2.5 rounded-lg mb-4">
-              Failed to load chart data. Check that the symbol is correct for the selected exchange.
+              Не удалось загрузить график: {describeError(previewError)}. Проверьте, что символ существует на выбранной бирже.
             </div>
           )}
 
@@ -391,8 +536,18 @@ function SimulationResults({
   indicatorData: IndicatorDataPoint[];
 }) {
   const s = result.summary;
+  const h = result.history;
   return (
     <div className="space-y-4">
+      {h && (
+        <p className="text-[11px] text-text-secondary">
+          История 1m: {h.candlesFromCache.toLocaleString('ru-RU')} свечей из кэша
+          {h.cacheReadSeconds > 0 ? ` (${h.cacheReadSeconds}с)` : ''}, {h.candlesDownloaded.toLocaleString('ru-RU')} скачано с биржи
+          {h.downloadSeconds > 0 ? ` (${h.downloadSeconds}с)` : ''}
+          {h.gapsFilled > 0 ? `, докачано дыр: ${h.gapsFilled}` : ''}
+          {!h.cacheUsed ? ' — кэш не использовался' : ''}
+        </p>
+      )}
       {result.warnings.length > 0 && (
         <div className="bg-accent-yellow/10 border border-accent-yellow/30 rounded-lg px-4 py-3 space-y-1">
           {result.warnings.map((w, i) => (

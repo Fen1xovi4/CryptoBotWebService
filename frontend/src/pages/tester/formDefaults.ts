@@ -13,6 +13,19 @@ export interface MgForm {
   offsetPercent: string;
   takeProfitPercent: string;
   stopLossPercent: string;
+  // Workspace-level fields (WorkspaceConfig in ActiveBotsPage), flattened into configJson for
+  // simulation the same way StrategiesController.MergeWorkspaceConfig does at bot start.
+  orderSize: string; // = workspace betAmount (USDT)
+  useMartingale: boolean;
+  martingaleCoeff: string;
+  useSteppedMartingale: boolean;
+  martingaleStep: string;
+  onlyLong: boolean;
+  onlyShort: boolean;
+  useDrawdownScale: boolean;
+  drawdownBalance: string;
+  drawdownPercent: string;
+  drawdownTarget: string;
 }
 
 export interface HfForm {
@@ -128,6 +141,17 @@ export const defaultMgForm: MgForm = {
   offsetPercent: '0',
   takeProfitPercent: '3',
   stopLossPercent: '3',
+  orderSize: '100',
+  useMartingale: false,
+  martingaleCoeff: '2',
+  useSteppedMartingale: false,
+  martingaleStep: '3',
+  onlyLong: false,
+  onlyShort: false,
+  useDrawdownScale: false,
+  drawdownBalance: '1000',
+  drawdownPercent: '10',
+  drawdownTarget: '5',
 };
 
 export const defaultHfForm: HfForm = {

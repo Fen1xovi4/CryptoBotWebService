@@ -896,6 +896,85 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
           <input type="number" value={mg.stopLossPercent} onChange={(e) => patch('mg', { stopLossPercent: e.target.value })} className={inputCls} />
         </div>
       </div>
+
+      {/* Workspace-level settings. Live bots take these from the workspace
+          (WorkspaceConfig → MergeWorkspaceConfig at start); the sim has no
+          workspace, so they are entered here and flattened into configJson. */}
+      <div className="border-t border-border pt-3 mt-1">
+        <p className="text-xs uppercase tracking-wide text-text-secondary mb-2">Настройки воркспейса (для симуляции)</p>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>Сумма ставки (USDT)</label>
+            <input type="number" min="0" step="1" value={mg.orderSize} onChange={(e) => patch('mg', { orderSize: e.target.value })} className={inputCls} />
+          </div>
+          <div className="flex flex-col justify-end gap-2 pb-1">
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input type="checkbox" checked={mg.onlyLong}
+                onChange={(e) => patch('mg', { onlyLong: e.target.checked, onlyShort: e.target.checked ? false : mg.onlyShort })}
+                className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+              <span className="text-sm font-medium text-accent-green">Только Long</span>
+            </label>
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input type="checkbox" checked={mg.onlyShort}
+                onChange={(e) => patch('mg', { onlyShort: e.target.checked, onlyLong: e.target.checked ? false : mg.onlyLong })}
+                className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+              <span className="text-sm font-medium text-accent-red">Только Short</span>
+            </label>
+          </div>
+        </div>
+
+        <div className="mt-3">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input type="checkbox" checked={mg.useMartingale} onChange={(e) => patch('mg', { useMartingale: e.target.checked })}
+              className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+            <span className="text-sm text-text-primary">Мартингейл</span>
+          </label>
+          {mg.useMartingale && (
+            <div className="mt-2 grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelCls}>Коэффициент (x)</label>
+                <input type="number" step="0.1" min="0" value={mg.martingaleCoeff} onChange={(e) => patch('mg', { martingaleCoeff: e.target.value })} className={inputCls} />
+              </div>
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer select-none mb-1">
+                  <input type="checkbox" checked={mg.useSteppedMartingale} onChange={(e) => patch('mg', { useSteppedMartingale: e.target.checked })}
+                    className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+                  <span className="text-xs font-medium text-text-secondary">Ступенчатый — каждые N убытков</span>
+                </label>
+                <input type="number" step="1" min="1" value={mg.martingaleStep} disabled={!mg.useSteppedMartingale}
+                  onChange={(e) => patch('mg', { martingaleStep: e.target.value })} className={inputCls + (mg.useSteppedMartingale ? '' : ' opacity-50')} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {mg.useMartingale && (
+          <div className="mt-3">
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input type="checkbox" checked={mg.useDrawdownScale} onChange={(e) => patch('mg', { useDrawdownScale: e.target.checked })}
+                className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+              <span className="text-sm text-text-primary">Масштабировать по просадке</span>
+            </label>
+            {mg.useDrawdownScale && (
+              <div className="mt-2 grid grid-cols-3 gap-3">
+                <div>
+                  <label className={labelCls}>Баланс $</label>
+                  <input type="number" step="1" min="0" value={mg.drawdownBalance} onChange={(e) => patch('mg', { drawdownBalance: e.target.value })} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Просадка %</label>
+                  <input type="number" step="0.1" min="0" value={mg.drawdownPercent} onChange={(e) => patch('mg', { drawdownPercent: e.target.value })} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Цель %</label>
+                  <input type="number" step="0.1" min="0" value={mg.drawdownTarget} onChange={(e) => patch('mg', { drawdownTarget: e.target.value })} className={inputCls} />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </>
   );
 }

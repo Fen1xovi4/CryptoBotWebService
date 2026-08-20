@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CryptoBotWeb.Core.Constants;
 using CryptoBotWeb.Core.DTOs;
+using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
 
@@ -18,10 +19,12 @@ public class SimulationEngine
     private const int MaxChartCandles = 3000;
 
     private readonly IEnumerable<IStrategySimulator> _simulators;
+    private readonly KlineHistoryCache? _klineCache;
 
-    public SimulationEngine(IEnumerable<IStrategySimulator> simulators)
+    public SimulationEngine(IEnumerable<IStrategySimulator> simulators, KlineHistoryCache? klineCache = null)
     {
         _simulators = simulators;
+        _klineCache = klineCache;
     }
 
     public IReadOnlyList<string> SupportedStrategyTypes =>
@@ -33,13 +36,19 @@ public class SimulationEngine
     /// which prices a spread between two DIFFERENT venues, and null for every other strategy type.
     /// The caller owns and disposes it, exactly like <paramref name="exchange"/>.
     /// </param>
+    /// <param name="exchangeType">Exchange of the primary account — the kline-cache key. Null disables caching.</param>
+    /// <param name="secondExchangeType">Exchange of the secondary account; null disables caching for its series.</param>
     public async Task<SimulationRunResult> RunAsync(
         SimulationRunRequest request, IFuturesExchangeService exchange,
-        IFuturesExchangeService? secondExchange = null, CancellationToken ct = default)
+        IFuturesExchangeService? secondExchange = null, CancellationToken ct = default,
+        ExchangeType? exchangeType = null, ExchangeType? secondExchangeType = null)
     {
         var simulator = _simulators.FirstOrDefault(s => s.StrategyType == request.StrategyType)
             ?? throw new InvalidOperationException(
                 $"Нет симулятора для стратегии '{request.StrategyType}'. Доступны: {string.Join(", ", SupportedStrategyTypes)}");
+
+        // Reject obviously broken configs before paying for the 1m-history download.
+        simulator.ValidateConfig(request.ConfigJson);
 
         var to = request.ToUtc ?? DateTime.UtcNow;
         var from = request.FromUtc ?? to.AddDays(-Math.Clamp(request.Days, 1, MaxWindowDays));
@@ -57,7 +66,8 @@ public class SimulationEngine
             TakerFeeRate = request.TakerFeeRate ?? exchange.TakerFeeRate
         };
 
-        ctx.PathCandles = await exchange.GetKlinesRangeAsync(request.Symbol, "1m", from, to, ct);
+        var stats = new KlineHistoryCache.FetchStats();
+        ctx.PathCandles = await LoadKlinesAsync(exchange, exchangeType, request.Symbol, from, to, request.BypassCache, stats, ct);
         if (ctx.PathCandles.Count == 0)
             throw new InvalidOperationException($"Биржа не вернула свечи по {request.Symbol} за запрошенный период.");
 
@@ -77,7 +87,7 @@ public class SimulationEngine
 
             ctx.SecondSymbol = secondSymbol;
             ctx.SecondSymbolPathCandles =
-                await secondExchange.GetKlinesRangeAsync(secondSymbol, "1m", from, to, ct);
+                await LoadKlinesAsync(secondExchange, secondExchangeType, secondSymbol, from, to, request.BypassCache, stats, ct);
 
             if (ctx.SecondSymbolPathCandles.Count == 0)
                 throw new InvalidOperationException(
@@ -94,7 +104,7 @@ public class SimulationEngine
         {
             ctx.SecondSymbol = request.SecondSymbol;
             ctx.SecondSymbolPathCandles =
-                await exchange.GetKlinesRangeAsync(request.SecondSymbol, "1m", from, to, ct);
+                await LoadKlinesAsync(exchange, exchangeType, request.SecondSymbol, from, to, request.BypassCache, stats, ct);
         }
 
         if (request.StrategyType is StrategyTypes.HuntingFunding or StrategyTypes.FundingClaim)
@@ -117,10 +127,43 @@ public class SimulationEngine
         foreach (var w in ctx.Warnings.Where(w => !result.Warnings.Contains(w)))
             result.Warnings.Add(w);
 
+        result.History = new SimulationHistoryStats
+        {
+            CandlesFromCache = stats.FromCache,
+            CandlesDownloaded = stats.Downloaded,
+            GapsFilled = stats.GapsFilled,
+            DownloadSeconds = Math.Round(stats.DownloadSeconds, 1),
+            CacheReadSeconds = Math.Round(stats.CacheReadSeconds, 1),
+            CacheUsed = _klineCache != null && !request.BypassCache && exchangeType.HasValue
+        };
+
         if (result.ChartCandles.Count == 0)
             result.ChartCandles = BuildChartCandles(ctx.PathCandles, request.ConfigJson);
 
         return result;
+    }
+
+    /// <summary>
+    /// 1m price path for one symbol: through the kline cache when we know the exchange (cache key)
+    /// and the caller hasn't asked to bypass it; straight from the exchange otherwise.
+    /// </summary>
+    private async Task<List<CandleDto>> LoadKlinesAsync(
+        IFuturesExchangeService service, ExchangeType? exchangeType, string symbol,
+        DateTime from, DateTime to, bool bypassCache, KlineHistoryCache.FetchStats stats, CancellationToken ct)
+    {
+        if (_klineCache == null || bypassCache || !exchangeType.HasValue)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var candles = await service.GetKlinesRangeAsync(symbol, "1m", from, to, ct);
+            stats.Downloaded += candles.Count;
+            stats.DownloadSeconds += sw.Elapsed.TotalSeconds;
+            return candles;
+        }
+
+        return await _klineCache.GetOrDownloadAsync(
+            exchangeType.Value, symbol, "1m", from, to,
+            (gapFrom, gapTo, token) => service.GetKlinesRangeAsync(symbol, "1m", gapFrom, gapTo, token),
+            stats, ct);
     }
 
     /// <summary>

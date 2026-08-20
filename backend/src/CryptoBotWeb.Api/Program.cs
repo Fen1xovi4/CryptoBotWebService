@@ -67,6 +67,7 @@ builder.Services.AddScoped<IStrategySimulator, SmartGridHedgeSimulator>();
 builder.Services.AddScoped<IStrategySimulator, HuntingFundingSimulator>();
 builder.Services.AddScoped<IStrategySimulator, FundingClaimSimulator>();
 builder.Services.AddScoped<IStrategySimulator, ArbitrageSimulator>();
+builder.Services.AddScoped<KlineHistoryCache>(); // DB-backed 1m history cache used by the engine
 builder.Services.AddScoped<SimulationEngine>();
 
 // CORS

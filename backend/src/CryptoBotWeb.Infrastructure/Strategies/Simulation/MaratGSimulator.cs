@@ -32,6 +32,33 @@ public class MaratGSimulator : IStrategySimulator
 
     public string StrategyType => StrategyTypes.MaratG;
 
+    public void ValidateConfig(string configJson)
+    {
+        EmaBounceConfig? config;
+        try { config = JsonSerializer.Deserialize<EmaBounceConfig>(configJson, JsonOptions); }
+        catch (JsonException ex) { throw new ArgumentException($"MaratG: некорректный configJson — {ex.Message}"); }
+        if (config == null) throw new ArgumentException("MaratG: пустой configJson.");
+
+        // Live bots get OrderSize from the workspace (betAmount) at start; the sim has no workspace,
+        // so the request must carry it explicitly — otherwise every fill would have qty 0.
+        if (config.OrderSize <= 0)
+            throw new ArgumentException("MaratG: orderSize (сумма ставки, USDT) должен быть больше 0 — укажите его в конфиге симуляции.");
+        if (config.IndicatorLength < 1)
+            throw new ArgumentException("MaratG: период индикатора должен быть ≥ 1.");
+        if (config.CandleCount < 1)
+            throw new ArgumentException("MaratG: количество свечей должно быть ≥ 1.");
+        if (config.TakeProfitPercent <= 0 || config.StopLossPercent <= 0)
+            throw new ArgumentException("MaratG: Take Profit % и Stop Loss % должны быть больше 0.");
+        if (config.OnlyLong && config.OnlyShort)
+            throw new ArgumentException("MaratG: нельзя одновременно включить «только Long» и «только Short».");
+        if (config.UseMartingale && config.MartingaleCoeff <= 0)
+            throw new ArgumentException("MaratG: коэффициент мартингейла должен быть больше 0.");
+        if (config.UseMartingale && config.UseSteppedMartingale && config.MartingaleStep < 1)
+            throw new ArgumentException("MaratG: шаг ступенчатого мартингейла должен быть ≥ 1.");
+        if (string.IsNullOrWhiteSpace(config.Timeframe))
+            throw new ArgumentException("MaratG: не указан таймфрейм.");
+    }
+
     public SimulationRunResult Run(SimulationContext context)
     {
         var result = new SimulationRunResult();
