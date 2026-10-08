@@ -23,8 +23,12 @@ namespace CryptoBotWeb.Infrastructure.Simulation;
 /// </summary>
 public class KlineHistoryCache
 {
-    /// <summary>Candles younger than this are re-fetched live and not stored (may be incomplete).</summary>
-    private static readonly TimeSpan LiveTail = TimeSpan.FromMinutes(3);
+    /// <summary>
+    /// Extra safety margin on top of one candle span: candles whose OpenTime is younger than
+    /// (now − span − this) are re-fetched live and never stored — the last candle of a timeframe
+    /// is still forming until a full span has passed since it opened.
+    /// </summary>
+    private static readonly TimeSpan LiveTailMargin = TimeSpan.FromMinutes(3);
 
     private readonly AppDbContext _db;
     private readonly ILogger<KlineHistoryCache> _logger;
@@ -60,8 +64,10 @@ public class KlineHistoryCache
         toUtc = FloorMinute(toUtc);
         if (toUtc <= fromUtc) return new List<CandleDto>();
 
-        // Nothing newer than (now - LiveTail) is cached; that tail is fetched live below.
-        var cacheTo = FloorMinute(DateTime.UtcNow - LiveTail);
+        // Nothing newer than (now - candle span - margin) is cached — a candle opened less than a
+        // full span ago is still forming; that tail is fetched live below.
+        var span = SymbolHelper.GetTimeframeSpan(timeframe);
+        var cacheTo = FloorMinute(DateTime.UtcNow - span - LiveTailMargin);
         if (cacheTo > toUtc) cacheTo = toUtc;
 
         var merged = new SortedDictionary<DateTime, CandleDto>();

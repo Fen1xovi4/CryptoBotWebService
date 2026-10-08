@@ -28,7 +28,7 @@ export default function EquityChart({ data }: Props) {
       },
       crosshair: { mode: 0 },
       rightPriceScale: { borderColor: '#333a50' },
-      timeScale: { borderColor: '#333a50', timeVisible: true, secondsVisible: false },
+      timeScale: { borderColor: '#333a50', timeVisible: true, secondsVisible: false, minBarSpacing: 0.001 },
       width: containerRef.current.clientWidth,
       height: 260,
     });

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import axios from 'axios';
 import api from '../api/client';
 import Header from '../components/Layout/Header';
 import CandlestickChart from '../components/Chart/CandlestickChart';
@@ -8,6 +7,8 @@ import type { CandleData, ChartMarker, IndicatorDataPoint } from '../components/
 import StrategyConfigForm from './tester/StrategyConfigForm';
 import EquityChart from './tester/EquityChart';
 import TradesTable from './tester/TradesTable';
+import OptimizationPanel from './tester/OptimizationPanel';
+import { describeError } from './tester/errors';
 import { buildSimConfig } from './tester/buildConfig';
 import { makeDefaultForms } from './tester/formDefaults';
 import type { AllForms } from './tester/formDefaults';
@@ -15,25 +16,9 @@ import { STRATEGY_LABELS, STRATEGY_TYPES } from './tester/types';
 import type { Account, KlineCacheEntry, SimulateRequest, SimulationResult, StrategyType } from './tester/types';
 
 const EXCHANGE_NAMES: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX', 4: 'Dzengi' };
-// SimulationEngine downloads 1m history via GetKlinesRangeAsync, which only Bybit/Bitget/BingX
+// SimulationEngine downloads kline history via GetKlinesRangeAsync, which only Bybit/Bitget/BingX
 // implement — Dzengi accounts would 400 on /tester/simulate, so they are not offered here.
 const SIM_SUPPORTED_EXCHANGES = new Set([1, 2, 3]);
-
-/** Prefer the server's `message` (the controller's friendly 400 text) over axios's generic one. */
-function describeError(err: unknown): string {
-  if (axios.isAxiosError(err)) {
-    const data = err.response?.data as { message?: string; title?: string; errors?: Record<string, string[]> } | undefined;
-    if (data?.message) return data.message;
-    if (data?.errors) {
-      const first = Object.values(data.errors).flat()[0];
-      if (first) return first;
-    }
-    if (data?.title) return data.title;
-    if (err.code === 'ECONNABORTED') return 'Таймаут запроса — попробуйте меньший период или более крупный таймфрейм';
-    if (err.response?.status) return `Ошибка сервера (HTTP ${err.response.status})`;
-  }
-  return (err as Error)?.message || 'Ошибка симуляции';
-}
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 const POLL_MS: Record<string, number> = {
   '1m': 5000,
@@ -43,11 +28,19 @@ const POLL_MS: Record<string, number> = {
   '4h': 120000,
   '1d': 300000,
 };
-const DAY_PRESETS = [7, 30, 90, 180, 365];
-// Rough 1m-history download speed per exchange (candles/sec), from measured paging:
-// Bybit/BingX 1000 per page ≈ 2 pages/s; Bitget 200 per page but 8 parallel slice workers (measured: 365d ≈ 3.7 min).
+const DAY_PRESETS = [7, 30, 90, 180, 365, 730, 1095, 1460];
+// Timeframe of the downloaded price path — coarser bars make long windows cheap
+// (1h is 60× fewer candles than 1m) at the cost of intrabar fill fidelity.
+const PATH_TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
+const PATH_TF_MINUTES: Record<string, number> = {
+  '1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440,
+};
+// Mirrors SimulationEngine.MaxPathCandles — the backend rejects windows above this many bars.
+const MAX_PATH_BARS = 530_000;
+// Rough history download speed per exchange (candles/sec), from measured paging:
+// Bybit/BingX 1000 per page ≈ 2 pages/s; Bitget 200 per page but 8 parallel slice workers (measured: 365d of 1m ≈ 3.7 min).
 const DOWNLOAD_CANDLES_PER_SEC: Record<number, number> = { 1: 2000, 2: 2300, 3: 2000 };
-const SIMULATE_TIMEOUT_MS = 30 * 60 * 1000; // paginated 1m-kline download: Bybit ~4 min/year, Bitget (200/page) ~20 min/year; nginx /api/tester/ allows 1800s
+const SIMULATE_TIMEOUT_MS = 30 * 60 * 1000; // paginated kline download: Bybit ~4 min per 500k bars, Bitget (200/page) ~20 min; nginx /api/tester/ allows 1800s
 
 export default function TesterPage() {
   const [accountId, setAccountId] = useState('');
@@ -59,6 +52,7 @@ export default function TesterPage() {
   const [days, setDays] = useState(30);
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [pathTimeframe, setPathTimeframe] = useState('1m');
   const [makerFeePercent, setMakerFeePercent] = useState('');
   const [takerFeePercent, setTakerFeePercent] = useState('');
   const [bypassCache, setBypassCache] = useState(false);
@@ -85,22 +79,44 @@ export default function TesterPage() {
   );
   const hiddenAccountCount = (accounts?.length ?? 0) - simAccounts.length;
 
-  // Rough wall-clock estimate for the history download so a 180/365-day run on Bitget
-  // doesn't look hung. Explicit date range overrides the day preset, same as in handleSimulate.
-  const estimatedMinutes = useMemo(() => {
-    const acc = simAccounts.find((a) => a.id === accountId);
-    if (!acc) return null;
-    let windowDays = days;
+  // The path-timeframe default follows the strategy: indicator strategies model on their own
+  // timeframe (downloading finer bars would be wasted), everything else (grids/funding/arbitrage)
+  // is tick-driven and defaults to 1m. The user can still override until the strategy TF changes.
+  const strategyDefaultPathTf = useMemo(() => {
+    if (strategyType === 'MaratG') return forms.mg.timeframe;
+    if (strategyType === 'SmaDca') return forms.sd.timeframe;
+    if (strategyType === 'GridFloat') return forms.gf.timeframe;
+    return '1m';
+  }, [strategyType, forms.mg.timeframe, forms.sd.timeframe, forms.gf.timeframe]);
+  useEffect(() => {
+    setPathTimeframe(PATH_TIMEFRAMES.includes(strategyDefaultPathTf) ? strategyDefaultPathTf : '1m');
+  }, [strategyDefaultPathTf]);
+
+  // Window length in days — explicit date range overrides the preset, same as in handleSimulate.
+  const windowDays = useMemo(() => {
     if (fromDate && toDate) {
       const ms = new Date(`${toDate}T23:59:59Z`).getTime() - new Date(`${fromDate}T00:00:00Z`).getTime();
-      if (!(ms > 0)) return null;
-      windowDays = ms / 86_400_000;
+      return ms > 0 ? ms / 86_400_000 : null;
     }
+    return days;
+  }, [days, fromDate, toDate]);
+
+  // Bars per price series at the chosen path timeframe — shown next to the run button and
+  // checked against the backend limit.
+  const pathBars = useMemo(() => {
+    if (windowDays == null) return null;
+    return Math.round((windowDays * 1440) / (PATH_TF_MINUTES[pathTimeframe] ?? 1));
+  }, [windowDays, pathTimeframe]);
+
+  // Rough wall-clock estimate for the history download so a long run on Bitget doesn't look hung.
+  const estimatedMinutes = useMemo(() => {
+    const acc = simAccounts.find((a) => a.id === accountId);
+    if (!acc || pathBars == null) return null;
     const rate = DOWNLOAD_CANDLES_PER_SEC[acc.exchangeType] ?? 1000;
     // FuturesArbitrage / CrossTicker GridHedge pull a second series; ballpark ×2.
     const series = strategyType === 'FuturesArbitrage' || (strategyType === 'GridHedge' && forms.gh.mode === 2) ? 2 : 1;
-    return Math.max(1, Math.round((windowDays * 1440 * series) / rate / 60));
-  }, [simAccounts, accountId, days, fromDate, toDate, strategyType, forms.gh.mode]);
+    return Math.max(1, Math.round((pathBars * series) / rate / 60));
+  }, [simAccounts, accountId, pathBars, strategyType, forms.gh.mode]);
 
   useEffect(() => {
     if (simAccounts.length && !accountId) {
@@ -158,37 +174,55 @@ export default function TesterPage() {
     return () => clearInterval(id);
   }, [simulateMutation.isPending]);
 
+  // Base config built from the current form — used by the simulate button and as the
+  // template the optimization panel discovers sweepable numeric fields in.
+  const baseBuild = useMemo(() => buildSimConfig(strategyType, symbol, forms), [strategyType, symbol, forms]);
+
+  const buildRequestBody = (): { body?: SimulateRequest; error?: string } => {
+    if (!accountId || !symbol.trim()) return { error: 'Выберите аккаунт и укажите символ' };
+    if (strategyType === 'FuturesArbitrage' && !secondAccountId)
+      return { error: 'Выберите второй аккаунт (другая биржа) для арбитража' };
+    const build = buildSimConfig(strategyType, symbol, forms);
+    if (!build.ok || !build.configJson) return { error: build.error ?? 'Некорректная конфигурация' };
+    const useExplicitRange = !!fromDate && !!toDate;
+    return {
+      body: {
+        accountId,
+        strategyType,
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        secondSymbol: build.secondSymbol ?? null,
+        secondAccountId: strategyType === 'FuturesArbitrage' ? secondAccountId : null,
+        fromUtc: useExplicitRange ? new Date(`${fromDate}T00:00:00Z`).toISOString() : null,
+        toUtc: useExplicitRange ? new Date(`${toDate}T23:59:59Z`).toISOString() : null,
+        days,
+        pathTimeframe,
+        configJson: build.configJson,
+        makerFeeRate: makerFeePercent.trim() === '' ? null : Number(makerFeePercent) / 100,
+        takerFeeRate: takerFeePercent.trim() === '' ? null : Number(takerFeePercent) / 100,
+        bypassCache,
+      },
+    };
+  };
+
   const handleSimulate = () => {
     setFormError('');
-    if (!accountId || !symbol.trim()) {
-      setFormError('Выберите аккаунт и укажите символ');
+    const req = buildRequestBody();
+    if (!req.body) {
+      setFormError(req.error ?? 'Некорректная конфигурация');
       return;
     }
-    if (strategyType === 'FuturesArbitrage' && !secondAccountId) {
-      setFormError('Выберите второй аккаунт (другая биржа) для арбитража');
+    simulateMutation.mutate(req.body);
+  };
+
+  /** Full simulation of one optimizer combination — its configJson replaces the form-built one. */
+  const handleSimulateConfig = (configJson: string) => {
+    setFormError('');
+    const req = buildRequestBody();
+    if (!req.body) {
+      setFormError(req.error ?? 'Некорректная конфигурация');
       return;
     }
-    const build = buildSimConfig(strategyType, symbol, forms);
-    if (!build.ok || !build.configJson) {
-      setFormError(build.error ?? 'Некорректная конфигурация');
-      return;
-    }
-    const useExplicitRange = !!fromDate && !!toDate;
-    const body: SimulateRequest = {
-      accountId,
-      strategyType,
-      symbol: symbol.replace(/\s+/g, '').toUpperCase(),
-      secondSymbol: build.secondSymbol ?? null,
-      secondAccountId: strategyType === 'FuturesArbitrage' ? secondAccountId : null,
-      fromUtc: useExplicitRange ? new Date(`${fromDate}T00:00:00Z`).toISOString() : null,
-      toUtc: useExplicitRange ? new Date(`${toDate}T23:59:59Z`).toISOString() : null,
-      days,
-      configJson: build.configJson,
-      makerFeeRate: makerFeePercent.trim() === '' ? null : Number(makerFeePercent) / 100,
-      takerFeeRate: takerFeePercent.trim() === '' ? null : Number(takerFeePercent) / 100,
-      bypassCache,
-    };
-    simulateMutation.mutate(body);
+    simulateMutation.mutate({ ...req.body, configJson });
   };
 
   const simResult = simulateMutation.data;
@@ -331,10 +365,21 @@ export default function TesterPage() {
                       : 'bg-bg-primary text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
                   }`}
                 >
-                  {d}д
+                  {d >= 365 ? `${Math.round(d / 365)}г` : `${d}д`}
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-medium text-text-secondary" title="Таймфрейм скачиваемых баров: крупнее ТФ — в разы меньше данных и быстрее загрузка, но ниже точность внутрибарных заполнений (4 тика на бар)">
+              ТФ данных
+            </label>
+            <select value={pathTimeframe} onChange={(e) => setPathTimeframe(e.target.value)} className={`${inputCls} w-[90px]`}>
+              {PATH_TIMEFRAMES.map((tf) => (
+                <option key={tf} value={tf}>{tf}</option>
+              ))}
+            </select>
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -370,11 +415,15 @@ export default function TesterPage() {
           >
             {simulateMutation.isPending ? `Симуляция... ${elapsedSec}с` : 'Запустить симуляцию'}
           </button>
-          {estimatedMinutes !== null && (
-            <span className="text-[11px] text-text-secondary self-center" title="Оценка времени загрузки 1m-истории с биржи, если её ещё нет в кэше; повторные прогоны по тому же окну — секунды">
-              ≈ {estimatedMinutes} мин, если истории нет в кэше
+          {pathBars !== null && pathBars > MAX_PATH_BARS ? (
+            <span className="text-[11px] text-accent-red self-center">
+              ~{pathBars.toLocaleString('ru-RU')} баров на {pathTimeframe} — больше лимита {MAX_PATH_BARS.toLocaleString('ru-RU')}. Возьмите крупнее ТФ данных или короче период.
             </span>
-          )}
+          ) : estimatedMinutes !== null && pathBars !== null ? (
+            <span className="text-[11px] text-text-secondary self-center" title="Оценка времени загрузки истории с биржи, если её ещё нет в кэше; повторные прогоны по тому же окну — секунды">
+              ~{pathBars.toLocaleString('ru-RU')} баров ({pathTimeframe}) · ≈ {estimatedMinutes} мин, если истории нет в кэше
+            </span>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center gap-4 text-xs">
@@ -392,7 +441,7 @@ export default function TesterPage() {
           <div className="border border-border rounded-lg p-3 space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium text-text-secondary">
-                Кэш 1m-истории в БД — скачанные окна, повторные симуляции по ним идут без обращения к бирже
+                Кэш истории в БД — скачанные окна (по биржа/символ/ТФ), повторные симуляции по ним идут без обращения к бирже
               </span>
               {cacheEntries && cacheEntries.length > 0 && (
                 <button
@@ -476,6 +525,14 @@ export default function TesterPage() {
         </div>
       </div>
 
+      {/* Parameter optimization (grid search over config fields) */}
+      <OptimizationPanel
+        baseConfigJson={baseBuild.ok ? baseBuild.configJson : undefined}
+        buildRequestBody={buildRequestBody}
+        onSimulateConfig={handleSimulateConfig}
+        simulatePending={simulateMutation.isPending}
+      />
+
       {/* Results or live preview */}
       {simResult ? (
         <SimulationResults result={simResult} chartMarkers={chartMarkers} indicatorData={indicatorData} />
@@ -541,7 +598,7 @@ function SimulationResults({
     <div className="space-y-4">
       {h && (
         <p className="text-[11px] text-text-secondary">
-          История 1m: {h.candlesFromCache.toLocaleString('ru-RU')} свечей из кэша
+          История: {h.candlesFromCache.toLocaleString('ru-RU')} свечей из кэша
           {h.cacheReadSeconds > 0 ? ` (${h.cacheReadSeconds}с)` : ''}, {h.candlesDownloaded.toLocaleString('ru-RU')} скачано с биржи
           {h.downloadSeconds > 0 ? ` (${h.downloadSeconds}с)` : ''}
           {h.gapsFilled > 0 ? `, докачано дыр: ${h.gapsFilled}` : ''}

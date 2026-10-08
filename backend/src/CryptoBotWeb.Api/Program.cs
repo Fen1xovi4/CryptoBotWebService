@@ -69,6 +69,9 @@ builder.Services.AddScoped<IStrategySimulator, FundingClaimSimulator>();
 builder.Services.AddScoped<IStrategySimulator, ArbitrageSimulator>();
 builder.Services.AddScoped<KlineHistoryCache>(); // DB-backed 1m history cache used by the engine
 builder.Services.AddScoped<SimulationEngine>();
+// Parameter optimizer: singleton because sweep jobs run in the background past the request's
+// scope — the job creates its own DI scope for the engine and its dependencies.
+builder.Services.AddSingleton<OptimizationJobService>();
 
 // CORS
 builder.Services.AddCors(options =>
