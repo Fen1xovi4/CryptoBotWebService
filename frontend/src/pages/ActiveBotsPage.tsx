@@ -4413,6 +4413,8 @@ interface ArbitrageCfg {
   allowBothDirections: boolean;
   levels: ArbitrageLevelCfg[];
   maxConsecutiveFailures: number;
+  orderMode?: 'Market' | 'LimitIoc';
+  maxSlippagePercent?: number;
 }
 
 interface ArbitrageLevelState {
@@ -4713,6 +4715,14 @@ function ArbitrageCard({
           {cfg.allowBothDirections && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-blue/10 text-accent-blue">
               обе стороны
+            </span>
+          )}
+          {cfg.orderMode === 'LimitIoc' && (
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded bg-accent-yellow/10 text-accent-yellow"
+              title="Лимитные IOC-ордера с допуском проскальзывания"
+            >
+              IOC ±{cfg.maxSlippagePercent ?? 0.05}%
             </span>
           )}
         </div>
@@ -5093,6 +5103,8 @@ function AddStrategyModal({
     leverage: '1',
     allowBothDirections: true,
     maxConsecutiveFailures: '3',
+    orderMode: 'Market' as 'Market' | 'LimitIoc',
+    maxSlippagePercent: '0.05',
   });
   const [arbLevels, setArbLevels] = useState<Array<{ entrySpreadPercent: string; exitSpreadPercent: string; notionalUsdt: string }>>(
     [{ entrySpreadPercent: '1', exitSpreadPercent: '0', notionalUsdt: '100' }],
@@ -5438,6 +5450,11 @@ function AddStrategyModal({
         setError('Макс. ошибок подряд не может быть отрицательным');
         return;
       }
+      const maxSlippage = Number(arbForm.maxSlippagePercent);
+      if (arbForm.orderMode === 'LimitIoc' && !(maxSlippage >= 0 && maxSlippage <= 2)) {
+        setError('Допуск проскальзывания: от 0 до 2%');
+        return;
+      }
       const parsedLevels = arbLevels.map((l) => ({
         entrySpreadPercent: Number(l.entrySpreadPercent),
         exitSpreadPercent: Number(l.exitSpreadPercent),
@@ -5471,6 +5488,8 @@ function AddStrategyModal({
         allowBothDirections: arbForm.allowBothDirections,
         levels: sortedLevels,
         maxConsecutiveFailures: maxFailures,
+        orderMode: arbForm.orderMode,
+        maxSlippagePercent: maxSlippage,
       });
     } else {
       configJson = JSON.stringify({
@@ -6678,6 +6697,40 @@ function AddStrategyModal({
                 Выключено — бот входит только когда биржа A дороже (шорт A + лонг B).
               </p>
 
+              {/* Order execution mode */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Исполнение ордеров</label>
+                  <select
+                    value={arbForm.orderMode}
+                    onChange={(e) => setArbForm({ ...arbForm, orderMode: e.target.value as 'Market' | 'LimitIoc' })}
+                    className={inputCls}
+                  >
+                    <option value="Market">Маркет</option>
+                    <option value="LimitIoc">Лимит IOC</option>
+                  </select>
+                </div>
+                {arbForm.orderMode === 'LimitIoc' && (
+                  <div>
+                    <label className={labelCls}>Допуск проскальзывания, %</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="2"
+                      value={arbForm.maxSlippagePercent}
+                      onChange={(e) => setArbForm({ ...arbForm, maxSlippagePercent: e.target.value })}
+                      className={inputCls}
+                    />
+                  </div>
+                )}
+              </div>
+              <p className="text-xs text-text-secondary -mt-2">
+                {arbForm.orderMode === 'LimitIoc'
+                  ? 'Обе ноги — лимит «исполнить сразу или отменить» по котировке ± допуск: хуже допуска не исполнится, но может исполниться частично или никак. Разницу между ногами бот сразу закрывает маркетом, уровень всегда держит равные объёмы.'
+                  : 'Обе ноги — маркет: исполнятся всегда, по той цене, что даст стакан.'}
+              </p>
+
               {/* Levels table */}
               <div>
                 <label className={labelCls}>Уровни сетки спреда</label>
@@ -7215,6 +7268,8 @@ function EditStrategyModal({
     leverage: String(cfg.leverage ?? 1),
     allowBothDirections: cfg.allowBothDirections !== false,
     maxConsecutiveFailures: String(cfg.maxConsecutiveFailures ?? 3),
+    orderMode: (cfg.orderMode === 'LimitIoc' ? 'LimitIoc' : 'Market') as 'Market' | 'LimitIoc',
+    maxSlippagePercent: String(cfg.maxSlippagePercent ?? 0.05),
   });
   const [arbLevels, setArbLevels] = useState<Array<{ entrySpreadPercent: string; exitSpreadPercent: string; notionalUsdt: string }>>(
     Array.isArray(cfg.levels) && cfg.levels.length > 0
@@ -7556,6 +7611,11 @@ function EditStrategyModal({
         setError('Макс. ошибок подряд не может быть отрицательным');
         return;
       }
+      const maxSlippage = Number(arbForm.maxSlippagePercent);
+      if (arbForm.orderMode === 'LimitIoc' && !(maxSlippage >= 0 && maxSlippage <= 2)) {
+        setError('Допуск проскальзывания: от 0 до 2%');
+        return;
+      }
       const parsedLevels = arbLevels.map((l) => ({
         entrySpreadPercent: Number(l.entrySpreadPercent),
         exitSpreadPercent: Number(l.exitSpreadPercent),
@@ -7589,6 +7649,8 @@ function EditStrategyModal({
         allowBothDirections: arbForm.allowBothDirections,
         levels: sortedLevels,
         maxConsecutiveFailures: maxFailures,
+        orderMode: arbForm.orderMode,
+        maxSlippagePercent: maxSlippage,
       });
     } else {
       configJson = JSON.stringify({
@@ -8698,6 +8760,40 @@ function EditStrategyModal({
               </label>
               <p className="text-xs text-text-secondary -mt-2">
                 Выключено — бот входит только когда биржа A дороже (шорт A + лонг B).
+              </p>
+
+              {/* Order execution mode */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Исполнение ордеров</label>
+                  <select
+                    value={arbForm.orderMode}
+                    onChange={(e) => setArbForm({ ...arbForm, orderMode: e.target.value as 'Market' | 'LimitIoc' })}
+                    className={inputCls}
+                  >
+                    <option value="Market">Маркет</option>
+                    <option value="LimitIoc">Лимит IOC</option>
+                  </select>
+                </div>
+                {arbForm.orderMode === 'LimitIoc' && (
+                  <div>
+                    <label className={labelCls}>Допуск проскальзывания, %</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      max="2"
+                      value={arbForm.maxSlippagePercent}
+                      onChange={(e) => setArbForm({ ...arbForm, maxSlippagePercent: e.target.value })}
+                      className={inputCls}
+                    />
+                  </div>
+                )}
+              </div>
+              <p className="text-xs text-text-secondary -mt-2">
+                {arbForm.orderMode === 'LimitIoc'
+                  ? 'Обе ноги — лимит «исполнить сразу или отменить» по котировке ± допуск: хуже допуска не исполнится, но может исполниться частично или никак. Разницу между ногами бот сразу закрывает маркетом, уровень всегда держит равные объёмы.'
+                  : 'Обе ноги — маркет: исполнятся всегда, по той цене, что даст стакан.'}
               </p>
 
               {/* Levels table */}

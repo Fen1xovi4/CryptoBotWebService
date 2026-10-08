@@ -27,6 +27,11 @@ public class ArbitrageLevelState
     public decimal ShortEntryFee { get; set; }
     public decimal LongEntryFee { get; set; }
 
+    // Throttles: last IOC close attempt (an attempt that filled nothing backs off briefly) and
+    // last attempt to trim a lopsided level (a rejected trim is not retried every second).
+    public DateTime? CloseAttemptAt { get; set; }
+    public DateTime? RebalanceAttemptAt { get; set; }
+
     // Actual entry spread at the moment the level opened.
     public decimal EntrySpreadPercent { get; set; }
     public DateTime? OpenedAt { get; set; }
@@ -80,4 +85,9 @@ public class ArbitrageState
     // Ticks that fell back to REST since the last such warning. Turns a throttled warning into a
     // frequency measurement: "2 ticks in 10 minutes" is a hiccup, "600" is a broken stream.
     public long QuoteFallbackTicks { get; set; }
+
+    // LimitIoc opens that filled nothing on either leg since the last report, and when that
+    // report went out — misses are summarised every few minutes instead of logged one by one.
+    public long IocMissCount { get; set; }
+    public DateTime? IocMissLoggedAt { get; set; }
 }

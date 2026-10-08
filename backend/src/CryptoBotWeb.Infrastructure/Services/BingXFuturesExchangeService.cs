@@ -512,6 +512,79 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    // Instrument rules are public and change rarely. BingX has no per-symbol contract query, so
+    // a miss downloads the whole contract list — and caches every contract in it, process-wide.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, InstrumentRulesDto Rules)>
+        _rulesCache = new();
+    private static readonly TimeSpan _rulesCacheTtl = TimeSpan.FromHours(1);
+
+    public async Task<InstrumentRulesDto?> GetInstrumentRulesAsync(string symbol)
+    {
+        var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+        if (_rulesCache.TryGetValue(bingxSymbol, out var hit) && DateTime.UtcNow - hit.At < _rulesCacheTtl)
+            return hit.Rules;
+
+        try
+        {
+            var result = await _client.PerpetualFuturesApi.ExchangeData.GetContractsAsync();
+            if (result.Success && result.Data != null)
+            {
+                var now = DateTime.UtcNow;
+                foreach (var c in result.Data)
+                {
+                    if (string.IsNullOrEmpty(c.Symbol)) continue;
+                    _rulesCache[c.Symbol] = (now, new InstrumentRulesDto(
+                        (decimal)Math.Pow(10, -c.QuantityPrecision),
+                        c.MinOrderQuantity,
+                        (decimal)Math.Pow(10, -c.PricePrecision)));
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // fall through to the stale entry, if any
+        }
+
+        return _rulesCache.TryGetValue(bingxSymbol, out var entry) ? entry.Rules : null;
+    }
+
+    public async Task<OrderResultDto> PlaceTakerOrderAsync(string symbol, string side, decimal quantity,
+        decimal? limitPrice, bool reduceOnly)
+    {
+        try
+        {
+            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
+            var orderSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? OrderSide.Buy : OrderSide.Sell;
+            var rules = await GetInstrumentRulesAsync(symbol);
+            var qty = rules != null ? FloorToStep(quantity, rules.QtyStep) : quantity;
+            if (qty <= 0)
+                return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} rounds to 0 for {symbol}" };
+
+            // One-way mode: PositionSide.Both; reduceOnly so a close never flips the position.
+            var result = limitPrice.HasValue
+                ? await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
+                    bingxSymbol, orderSide, FuturesOrderType.Limit, PositionSide.Both, qty,
+                    price: limitPrice.Value, reduceOnly: reduceOnly ? true : null,
+                    timeInForce: TimeInForce.ImmediateOrCancel)
+                : await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
+                    bingxSymbol, orderSide, FuturesOrderType.Market, PositionSide.Both, qty,
+                    price: null, reduceOnly: reduceOnly ? true : null);
+
+            return new OrderResultDto
+            {
+                Success = result.Success,
+                OrderId = result.Data?.OrderId.ToString(),
+                FilledPrice = limitPrice,
+                FilledQuantity = qty,
+                ErrorMessage = result.Error?.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
+        }
+    }
+
     public async Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol)
     {
         try

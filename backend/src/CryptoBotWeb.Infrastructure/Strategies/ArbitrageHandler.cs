@@ -35,11 +35,18 @@ namespace CryptoBotWeb.Infrastructure.Strategies;
 /// paired with MinSecondsBetweenOpens so a violent divergence still cannot fire the whole ladder
 /// as market orders in one burst, whatever the loop interval happens to be.
 ///
+/// Execution: both legs are sized to ONE base quantity (valid on both venues' lot steps) from
+/// the books already in hand and sent concurrently — no ticker or contract lookups in between
+/// (instrument rules come from a cache). Every fill is read back from the exchange: price,
+/// quantity and fee are booked as filled, never as quoted. OrderMode picks market orders or
+/// limit ImmediateOrCancel at the quote ± MaxSlippagePercent.
+///
 /// Leg risk is the core hazard here: the two legs sit on different exchanges and cannot fill
-/// atomically. The long (cheap) leg goes first because it is the one we can always unwind with
-/// a plain reduce-only market close; if the short leg is then rejected, the long is rolled back
-/// immediately. If even the rollback fails, the naked leg is written into level state so the
-/// next tick's unwind pass keeps retrying it — it is never dropped from bookkeeping.
+/// atomically, and an IOC leg may fill partly or not at all. After every open or close the
+/// level is squared to the matched quantity at once — the fuller leg's excess is closed at
+/// market, reduce-only; a lone filled leg is closed entirely (rollback). If that trim fails,
+/// the lopsided level stays in state and the unwind pass keeps retrying it — exposure is never
+/// dropped from bookkeeping.
 ///
 /// After MaxConsecutiveFailures consecutive order failures the strategy stops itself WITHOUT
 /// touching open positions (a broken order path is exactly when blind market closes are most
@@ -78,6 +85,16 @@ public class ArbitrageHandler : IStrategyHandler
     // failed read is retried after this many minutes while the published constant fills in.
     private const int FeeRateRefreshHours = 24;
     private const int FeeRateRetryMinutes = 15;
+
+    // A lopsided level whose trim failed is retried no faster than this.
+    private const int RebalanceRetrySeconds = 30;
+
+    // An IOC close that filled nothing waits this long before re-firing both legs.
+    private const int IocCloseRetrySeconds = 2;
+
+    // Leg-size differences below this share of the larger leg are lot-step noise, not exposure
+    // worth an order (and usually below the exchange's minimum order size anyway).
+    private const decimal MinImbalanceFraction = 0.02m;
 
     public string StrategyType => StrategyTypes.FuturesArbitrage;
 
@@ -218,7 +235,7 @@ public class ArbitrageHandler : IStrategyHandler
         if (state.Direction != ArbitrageDirection.None)
         {
             var legs = BuildLegs(ctx, state.Direction);
-            await ProcessClosesAsync(strategy, levels, state, legs, ct);
+            await ProcessClosesAsync(strategy, config, levels, state, legs, ct);
         }
 
         if (!CheckFailureLimit(strategy, config, state)) return;
@@ -230,8 +247,8 @@ public class ArbitrageHandler : IStrategyHandler
 
     // ────────────────────────── Closing ──────────────────────────
 
-    private async Task ProcessClosesAsync(Strategy strategy, List<ArbitrageLevelConfig> levels,
-        ArbitrageState state, LegPair legs, CancellationToken ct)
+    private async Task ProcessClosesAsync(Strategy strategy, ArbitrageConfig config,
+        List<ArbitrageLevelConfig> levels, ArbitrageState state, LegPair legs, CancellationToken ct)
     {
         // Bookkeeping-only levels (flagged open but carrying no quantity) need no orders.
         foreach (var empty in state.Levels.Where(l => l.IsOpen && l.ShortQty <= 0 && l.LongQty <= 0).ToList())
@@ -251,19 +268,32 @@ public class ArbitrageHandler : IStrategyHandler
         foreach (var level in incomplete)
         {
             var reason = IsStaleLevel(level, levels.Count) ? "StaleUnwind" : "LegUnwind";
-            var (flat, net) = await CloseLevelAsync(strategy, level, legs, reason, state, ct);
+            var (flat, net) = await CloseLevelAsync(strategy, level, legs, reason, state, null, ct);
             if (flat)
             {
                 closedAny = true;
                 Log(strategy, "Warning",
                     $"Level #{level.Index}: incomplete pair unwound ({reason}), net={Fmt(net)} USDT");
             }
-            await Task.Delay(InterOrderDelayMs, ct);
+        }
+
+        // ── Pass 1b: lopsided levels. Both legs present but of materially different size (a
+        // trim that failed earlier) — the excess is a naked position, so it is trimmed at market.
+        // Throttled per level: a trim the exchange keeps rejecting must not fire every second.
+        foreach (var level in state.Levels.Where(l => l.IsOpen && l.ShortQty > 0 && l.LongQty > 0).ToList())
+        {
+            if (level.RebalanceAttemptAt.HasValue &&
+                (DateTime.UtcNow - level.RebalanceAttemptAt.Value).TotalSeconds < RebalanceRetrySeconds)
+                continue;
+            if (!await IsMaterialImbalanceAsync(level, legs)) continue;
+
+            await RebalanceLevelAsync(strategy, level, legs, "LegTrim", state, ct);
         }
 
         // ── Pass 2: threshold closes. Deepest levels (highest entry spread) first — they are the
         // ones that were opened last and carry the most spread risk if the divergence resumes.
         var exitSpread = legs.ExitSpreadPercent;
+        var limitIoc = ArbitrageOrderModes.IsLimitIoc(config.OrderMode);
 
         var candidates = state.Levels
             .Where(l => l.IsOpen && l.Index < levels.Count && l.ShortQty > 0 && l.LongQty > 0)
@@ -275,7 +305,14 @@ public class ArbitrageHandler : IStrategyHandler
             var cfg = levels[level.Index];
             if (exitSpread > cfg.ExitSpreadPercent) continue;
 
-            var (flat, net) = await CloseLevelAsync(strategy, level, legs, "SpreadExit", state, ct);
+            // An IOC close that filled nothing backs off briefly instead of re-firing both legs
+            // every tick into a book that just moved away.
+            if (limitIoc && level.CloseAttemptAt.HasValue &&
+                (DateTime.UtcNow - level.CloseAttemptAt.Value).TotalSeconds < IocCloseRetrySeconds)
+                continue;
+
+            var (flat, net) = await CloseLevelAsync(strategy, level, legs, "SpreadExit", state,
+                limitIoc ? config.MaxSlippagePercent : null, ct);
             if (flat)
             {
                 closedAny = true;
@@ -287,7 +324,13 @@ public class ArbitrageHandler : IStrategyHandler
                 _logger.LogInformation("Arbitrage {Id}: level {Lvl} closed, net={Net}",
                     strategy.Id, level.Index, Math.Round(net, 4));
             }
-            await Task.Delay(InterOrderDelayMs, ct);
+            else if (net != 0m)
+            {
+                Log(strategy, "Info",
+                    $"Level #{level.Index}: partly closed at exitSpread={Fmt(exitSpread, 4)}% " +
+                    $"(IOC), net so far {Fmt(net)} USDT — the remaining " +
+                    $"{Fmt(level.ShortQty, 8)}/{Fmt(level.LongQty, 8)} stays open");
+            }
         }
 
         // Flat again → the direction lock is released and the round trip is counted.
@@ -302,126 +345,226 @@ public class ArbitrageHandler : IStrategyHandler
     }
 
     /// <summary>
-    /// Market-closes whichever legs of <paramref name="level"/> still carry quantity and records
-    /// one Trade per closed leg (each on its own account). A leg that closes successfully has its
-    /// quantity zeroed immediately, so a failure on the other leg only leaves the survivor to be
-    /// retried by the next tick's unwind pass. Returns whether the level ended flat plus the net
-    /// PnL booked by this call.
+    /// Closes whatever both legs of <paramref name="level"/> still carry, sending the two orders
+    /// concurrently (reduce-only) and only then reading the fills back. With
+    /// <paramref name="iocSlippagePercent"/> null the closes are market orders and always go
+    /// through; with a value they are limit IOC at the quote ± slippage and may fill partly.
+    /// Whatever filled is booked; if the two legs end up of different size, the excess is
+    /// trimmed at market right away so the level never sits lopsided. Returns whether the level
+    /// ended flat plus the net PnL booked by this call.
     /// </summary>
     private async Task<(bool Flat, decimal NetPnl)> CloseLevelAsync(Strategy strategy,
-        ArbitrageLevelState level, LegPair legs, string status, ArbitrageState state, CancellationToken ct)
+        ArbitrageLevelState level, LegPair legs, string status, ArbitrageState state,
+        decimal? iocSlippagePercent, CancellationToken ct)
     {
-        // Both closes are sent first and only then read back: confirming the short's fill before
-        // sending the long would hold a naked long for the confirmation round-trips.
-        OrderResultDto? shortResult = null;
-        OrderResultDto? longResult = null;
-
-        if (level.ShortQty > 0)
+        var ioc = iocSlippagePercent.HasValue;
+        decimal? shortLimit = null, longLimit = null;
+        if (ioc)
         {
-            shortResult = await legs.ShortExchange.CloseShortAsync(legs.ShortSymbol, level.ShortQty);
-            if (!shortResult.Success)
+            var (shortRules, longRules) = await GetRulesAsync(legs);
+            // Buying the short back: pay up to ask + slippage. Selling the long: down to bid − slippage.
+            shortLimit = LimitPrice(legs.ShortBook?.AskPrice, iocSlippagePercent!.Value, isBuy: true, shortRules);
+            longLimit = LimitPrice(legs.LongBook?.BidPrice, iocSlippagePercent!.Value, isBuy: false, longRules);
+            if (shortLimit == null || longLimit == null)
             {
-                state.ConsecutiveFailures++;
-                Log(strategy, "Warning",
-                    $"Level #{level.Index}: short close on {legs.ShortSymbol} failed: {Trim(shortResult.ErrorMessage)} " +
-                    $"— retry next tick (failures {state.ConsecutiveFailures})");
-                _logger.LogWarning("Arbitrage {Id}: short close failed for level {Lvl}: {Err}",
-                    strategy.Id, level.Index, shortResult.ErrorMessage);
+                // No book / no tick size → a safe limit cannot be priced; let the next tick retry.
+                return (false, 0m);
             }
-
-            await Task.Delay(InterOrderDelayMs, ct);
+            level.CloseAttemptAt = DateTime.UtcNow;
         }
 
-        if (level.LongQty > 0)
-        {
-            longResult = await legs.LongExchange.CloseLongAsync(legs.LongSymbol, level.LongQty);
-            if (!longResult.Success)
-            {
-                state.ConsecutiveFailures++;
-                Log(strategy, "Warning",
-                    $"Level #{level.Index}: long close on {legs.LongSymbol} failed: {Trim(longResult.ErrorMessage)} " +
-                    $"— retry next tick (failures {state.ConsecutiveFailures})");
-                _logger.LogWarning("Arbitrage {Id}: long close failed for level {Lvl}: {Err}",
-                    strategy.Id, level.Index, longResult.ErrorMessage);
-            }
-        }
+        var shortQty = level.ShortQty;
+        var longQty = level.LongQty;
+
+        var shortTask = shortQty > 0
+            ? AsNullable(legs.ShortExchange.PlaceTakerOrderAsync(legs.ShortSymbol, "Buy", shortQty, shortLimit, reduceOnly: true))
+            : Task.FromResult<OrderResultDto?>(null);
+        var longTask = longQty > 0
+            ? AsNullable(legs.LongExchange.PlaceTakerOrderAsync(legs.LongSymbol, "Sell", longQty, longLimit, reduceOnly: true))
+            : Task.FromResult<OrderResultDto?>(null);
+        await Task.WhenAll(shortTask, longTask);
+        var shortResult = await shortTask;
+        var longResult = await longTask;
+
+        ReportRejection(strategy, level, state, shortResult, $"short close on {legs.ShortSymbol}");
+        ReportRejection(strategy, level, state, longResult, $"long close on {legs.LongSymbol}");
+
+        var shortFillTask = shortResult?.Success == true
+            ? AsNullable(ConfirmFillAsync(strategy, legs.ShortExchange, legs.ShortSymbol, shortResult.OrderId,
+                shortLimit ?? PositivePrice(null, legs.ShortBook?.AskPrice, level.ShortEntryPrice),
+                shortQty, legs.ShortFeeRate, "short close", ioc, ct))
+            : Task.FromResult<Fill?>(null);
+        var longFillTask = longResult?.Success == true
+            ? AsNullable(ConfirmFillAsync(strategy, legs.LongExchange, legs.LongSymbol, longResult.OrderId,
+                longLimit ?? PositivePrice(null, legs.LongBook?.BidPrice, level.LongEntryPrice),
+                longQty, legs.LongFeeRate, "long close", ioc, ct))
+            : Task.FromResult<Fill?>(null);
+        await Task.WhenAll(shortFillTask, longFillTask);
 
         decimal net = 0m;
-        if (shortResult?.Success == true)
-            net += await BookClosedLegAsync(strategy, level, legs, isShort: true, shortResult, status, state, ct);
-        if (longResult?.Success == true)
-            net += await BookClosedLegAsync(strategy, level, legs, isShort: false, longResult, status, state, ct);
+        if (await shortFillTask is { Quantity: > 0 } sf)
+            net += BookClosedLeg(strategy, level, legs, isShort: true, sf, shortQty, shortResult!.OrderId, status, state);
+        if (await longFillTask is { Quantity: > 0 } lf)
+            net += BookClosedLeg(strategy, level, legs, isShort: false, lf, longQty, longResult!.OrderId, status, state);
+
+        // A partial IOC close (or one leg rejected) leaves the legs lopsided — square them now.
+        if (level.ShortQty > 0 && level.LongQty > 0 && level.ShortQty != level.LongQty &&
+            await IsMaterialImbalanceAsync(level, legs))
+        {
+            net += await RebalanceLevelAsync(strategy, level, legs, "LegTrim", state, ct);
+        }
 
         var flat = level.ShortQty <= 0 && level.LongQty <= 0;
         if (flat)
         {
             level.IsOpen = false;
             level.OpenedAt = null;
+            level.CloseAttemptAt = null;
+            level.RebalanceAttemptAt = null;
         }
         return (flat, net);
     }
 
     /// <summary>
-    /// Books one successfully closed leg: reads the real fill back, records the closing Trade and
-    /// moves the leg's quantity (and the entry fee it carried) off the level. PnlDollar on the
-    /// closing Trade is net of BOTH fees — the entry fee was booked on the opening Trade's
-    /// Commission, the closing Trade carries the exit fee only, same convention as the other
-    /// handlers. A partial fill leaves the remainder on the level for the next unwind pass.
+    /// Books one closed (or trimmed) leg from its confirmed fill: records the closing Trade and
+    /// takes the filled quantity — and the matching share of the entry fee — off the level.
+    /// PnlDollar on the closing Trade is net of BOTH fees: the entry fee was booked on the
+    /// opening Trade's Commission, the closing Trade carries the exit fee only (same convention
+    /// as the other handlers). Whatever did not fill stays on the level.
     /// </summary>
-    private async Task<decimal> BookClosedLegAsync(Strategy strategy, ArbitrageLevelState level,
-        LegPair legs, bool isShort, OrderResultDto result, string status, ArbitrageState state,
-        CancellationToken ct)
+    private decimal BookClosedLeg(Strategy strategy, ArbitrageLevelState level, LegPair legs,
+        bool isShort, Fill fill, decimal requestedQty, string? orderId, string status, ArbitrageState state)
     {
-        var exchange = isShort ? legs.ShortExchange : legs.LongExchange;
-        var symbol = isShort ? legs.ShortSymbol : legs.LongSymbol;
-        var feeRate = isShort ? legs.ShortFeeRate : legs.LongFeeRate;
-        var qty = isShort ? level.ShortQty : level.LongQty;
+        var legQty = isShort ? level.ShortQty : level.LongQty;
+        if (legQty <= 0) return 0m;
+
         var entryPrice = isShort ? level.ShortEntryPrice : level.LongEntryPrice;
         var entryFeeCarried = isShort ? level.ShortEntryFee : level.LongEntryFee;
+        var feeRate = isShort ? legs.ShortFeeRate : legs.LongFeeRate;
 
-        // Estimate = the book price the close was priced against (the side we cross).
-        var estimate = PositivePrice(result.FilledPrice,
-            isShort ? legs.ShortBook?.AskPrice : legs.LongBook?.BidPrice, entryPrice);
+        var closedQty = Math.Min(Math.Min(fill.Quantity, requestedQty), legQty);
+        if (closedQty <= 0) return 0m;
 
-        var fill = await ConfirmFillAsync(strategy, exchange, symbol, result.OrderId,
-            estimate, qty, feeRate, isShort ? "short close" : "long close", ct);
-
-        var closedQty = fill.Confirmed ? Math.Min(fill.Quantity, qty) : qty;
         var gross = isShort
             ? (entryPrice - fill.Price) * closedQty
             : (fill.Price - entryPrice) * closedQty;
 
-        // Entry fee: what the exchange actually charged when the level opened (pro-rated if this
-        // close is partial); levels from before entry fees were recorded fall back to the rate.
+        // Entry fee: what the exchange actually charged on the open, pro-rated to the closed
+        // part; levels from before entry fees were recorded fall back to the rate.
         var entryFee = entryFeeCarried > 0
-            ? entryFeeCarried * (closedQty / qty)
+            ? entryFeeCarried * (closedQty / legQty)
             : entryPrice * closedQty * feeRate;
-        var exitFee = fill.Fee;
+        // A partial fill's fee covers only what filled; scale the order's fee to closedQty when
+        // the order filled more than this level owned (never happens with reduce-only, defensive).
+        var exitFee = fill.Quantity > 0 ? fill.Fee * (closedQty / fill.Quantity) : 0m;
         var legNet = gross - entryFee - exitFee;
 
-        RecordTrade(strategy, isShort ? legs.ShortAccountId : legs.LongAccountId, symbol,
-            isShort ? "Buy" : "Sell", closedQty, fill.Price, result.OrderId, status, legNet, exitFee);
+        RecordTrade(strategy, isShort ? legs.ShortAccountId : legs.LongAccountId,
+            isShort ? legs.ShortSymbol : legs.LongSymbol, isShort ? "Buy" : "Sell",
+            closedQty, fill.Price, orderId, status, legNet, exitFee);
         state.RealizedPnlUsdt += legNet;
 
-        var remaining = qty - closedQty;
+        var remaining = legQty - closedQty;
         if (isShort)
         {
             level.ShortQty = remaining;
-            level.ShortEntryFee = remaining > 0 ? entryFeeCarried - entryFee : 0m;
+            level.ShortEntryFee = remaining > 0 ? Math.Max(0m, entryFeeCarried - entryFee) : 0m;
         }
         else
         {
             level.LongQty = remaining;
-            level.LongEntryFee = remaining > 0 ? entryFeeCarried - entryFee : 0m;
+            level.LongEntryFee = remaining > 0 ? Math.Max(0m, entryFeeCarried - entryFee) : 0m;
         }
-
-        if (remaining > 0)
-            Log(strategy, "Warning",
-                $"Level #{level.Index}: {(isShort ? "short" : "long")} close on {symbol} filled " +
-                $"{Fmt(closedQty, 8)} of {Fmt(qty, 8)} — the rest is unwound next tick");
-
         return legNet;
     }
+
+    /// <summary>
+    /// Squares a lopsided level: market-closes (reduce-only) the excess of the larger leg so both
+    /// legs carry the same quantity. Used right after an open or close whose legs filled
+    /// differently, and by the unwind pass for a trim that failed earlier. A failure is counted
+    /// towards MaxConsecutiveFailures and retried no faster than every RebalanceRetrySeconds.
+    /// </summary>
+    private async Task<decimal> RebalanceLevelAsync(Strategy strategy, ArbitrageLevelState level,
+        LegPair legs, string status, ArbitrageState state, CancellationToken ct)
+    {
+        var diff = level.ShortQty - level.LongQty;
+        if (diff == 0m) return 0m;
+
+        level.RebalanceAttemptAt = DateTime.UtcNow;
+        var isShort = diff > 0;
+        var qty = Math.Abs(diff);
+        var exchange = isShort ? legs.ShortExchange : legs.LongExchange;
+        var symbol = isShort ? legs.ShortSymbol : legs.LongSymbol;
+
+        var result = await exchange.PlaceTakerOrderAsync(symbol, isShort ? "Buy" : "Sell", qty,
+            limitPrice: null, reduceOnly: true);
+        if (!result.Success)
+        {
+            state.ConsecutiveFailures++;
+            Log(strategy, "Error",
+                $"⚠️ Level #{level.Index}: could not trim the {Fmt(qty, 8)} excess " +
+                $"{(isShort ? "SHORT" : "LONG")} on {symbol}: {Trim(result.ErrorMessage)} — the level is " +
+                $"lopsided ({Fmt(level.ShortQty, 8)} short / {Fmt(level.LongQty, 8)} long), retry in " +
+                $"{RebalanceRetrySeconds}s (failures {state.ConsecutiveFailures})");
+            _logger.LogError("Arbitrage {Id}: trim failed for level {Lvl} ({Qty} {Sym}): {Err}",
+                strategy.Id, level.Index, qty, symbol, result.ErrorMessage);
+            return 0m;
+        }
+
+        var estPrice = PositivePrice(null,
+            isShort ? legs.ShortBook?.AskPrice : legs.LongBook?.BidPrice,
+            isShort ? level.ShortEntryPrice : level.LongEntryPrice);
+        var fill = await ConfirmFillAsync(strategy, exchange, symbol, result.OrderId, estPrice, qty,
+            isShort ? legs.ShortFeeRate : legs.LongFeeRate, isShort ? "short trim" : "long trim",
+            immediateOrCancel: false, ct);
+
+        var net = BookClosedLeg(strategy, level, legs, isShort, fill, qty, result.OrderId, status, state);
+        Log(strategy, "Warning",
+            $"Level #{level.Index}: legs filled unevenly — trimmed {Fmt(Math.Min(fill.Quantity, qty), 8)} " +
+            $"{(isShort ? "SHORT" : "LONG")} {symbol} at {Fmt(fill.Price, 8)}, net={Fmt(net)} USDT; level now " +
+            $"{Fmt(level.ShortQty, 8)} short / {Fmt(level.LongQty, 8)} long");
+
+        if (level.ShortQty <= 0 && level.LongQty <= 0)
+        {
+            level.IsOpen = false;
+            level.OpenedAt = null;
+            level.RebalanceAttemptAt = null;
+        }
+        return net;
+    }
+
+    /// <summary>
+    /// True when the two legs differ by enough to be worth an order: at least the larger leg's
+    /// exchange minimum, and at least MinImbalanceFraction of the larger leg. Smaller differences
+    /// come from the two venues' lot steps and are a negligible directional exposure — trying to
+    /// trim them would only collect "below minimum order size" rejections.
+    /// </summary>
+    private static async Task<bool> IsMaterialImbalanceAsync(ArbitrageLevelState level, LegPair legs)
+    {
+        var diff = Math.Abs(level.ShortQty - level.LongQty);
+        if (diff == 0m) return false;
+
+        var larger = Math.Max(level.ShortQty, level.LongQty);
+        if (larger > 0 && diff / larger < MinImbalanceFraction) return false;
+
+        var exchange = level.ShortQty > level.LongQty ? legs.ShortExchange : legs.LongExchange;
+        var symbol = level.ShortQty > level.LongQty ? legs.ShortSymbol : legs.LongSymbol;
+        var rules = await SafeRulesAsync(exchange, symbol);
+        return rules == null || diff >= Math.Max(rules.MinQty, rules.QtyStep);
+    }
+
+    private void ReportRejection(Strategy strategy, ArbitrageLevelState level, ArbitrageState state,
+        OrderResultDto? result, string what)
+    {
+        if (result == null || result.Success) return;
+        state.ConsecutiveFailures++;
+        Log(strategy, "Warning",
+            $"Level #{level.Index}: {what} rejected: {Trim(result.ErrorMessage)} (failures {state.ConsecutiveFailures})");
+        _logger.LogWarning("Arbitrage {Id}: {What} rejected for level {Lvl}: {Err}",
+            strategy.Id, what, level.Index, result.ErrorMessage);
+    }
+
+    private static async Task<T?> AsNullable<T>(Task<T> task) where T : class => await task;
 
     // ────────────────────────── Opening ──────────────────────────
 
@@ -466,162 +609,237 @@ public class ArbitrageHandler : IStrategyHandler
             .FirstOrDefault(l => entrySpread >= levels[l.Index].EntrySpreadPercent);
         if (next == null) return;
 
-        await TryOpenLevelAsync(strategy, next, levels[next.Index], legs, direction, entrySpread, state, ct);
+        await TryOpenLevelAsync(strategy, config, next, levels[next.Index], legs, direction, entrySpread, state, ct);
     }
 
     /// <summary>
-    /// Opens one delta-neutral pair: LONG on the cheap venue first, then SHORT on the expensive
-    /// one. The order matters — the long is the leg we can unwind unconditionally, so if the
-    /// short is rejected we roll the long back immediately instead of sitting on naked exposure.
+    /// Opens one delta-neutral pair: SHORT on the expensive venue and LONG on the cheap one, for
+    /// the SAME base quantity, both orders sent concurrently.
+    ///
+    /// Concurrency is the point: sending the legs one after the other — each preceded by its own
+    /// ticker and contract lookups — left about a second between them, and on a moving book that
+    /// second cost more than the spread being captured. Quantity is sized once from the book
+    /// already in hand and rounded to a step both venues accept, so the legs match exactly.
+    ///
+    /// Leg risk: the two venues cannot fill atomically, and in LimitIoc mode either leg may fill
+    /// partly or not at all. Whatever happens, the fills are read back and the level is squared
+    /// to the matched quantity at once (<see cref="RebalanceLevelAsync"/>): the excess of the
+    /// fuller leg is closed at market, reduce-only. One leg filled and the other not is the
+    /// limiting case — the filled leg is closed entirely and the level is not opened. If even
+    /// that trim fails, the lopsided level is kept in state (never dropped from bookkeeping) and
+    /// the unwind pass keeps retrying it.
     /// </summary>
-    private async Task TryOpenLevelAsync(Strategy strategy, ArbitrageLevelState level,
+    private async Task TryOpenLevelAsync(Strategy strategy, ArbitrageConfig config, ArbitrageLevelState level,
         ArbitrageLevelConfig cfg, LegPair legs, ArbitrageDirection direction, decimal entrySpread,
         ArbitrageState state, CancellationToken ct)
     {
         // Stamped before the orders go out, not after they succeed: a level that keeps getting
-        // rejected must back off too, otherwise the 1s loop would retry the same failing open
-        // every second against both venues.
+        // rejected (or keeps missing in IOC mode) must back off too.
         state.LastLevelOpenedAt = DateTime.UtcNow;
 
-        var longResult = await legs.LongExchange.OpenLongAsync(legs.LongSymbol, cfg.NotionalUsdt);
-        if (!longResult.Success)
+        var askLong = legs.LongBook?.AskPrice ?? 0m;
+        var bidShort = legs.ShortBook?.BidPrice ?? 0m;
+        if (askLong <= 0 || bidShort <= 0) return;
+
+        var (shortRules, longRules) = await GetRulesAsync(legs);
+        if (shortRules == null || longRules == null)
         {
-            // Nothing filled — no exposure, no rollback needed.
-            state.ConsecutiveFailures++;
             Log(strategy, "Warning",
-                $"Level #{level.Index}: long leg on {legs.LongSymbol} rejected: {Trim(longResult.ErrorMessage)} " +
-                $"(failures {state.ConsecutiveFailures}) — level not opened");
-            _logger.LogWarning("Arbitrage {Id}: long open failed for level {Lvl}: {Err}",
-                strategy.Id, level.Index, longResult.ErrorMessage);
+                $"Level #{level.Index}: contract rules (lot step / tick) unavailable for " +
+                $"{(shortRules == null ? legs.ShortSymbol : legs.LongSymbol)} — not opening this tick");
             return;
         }
 
-        // The service's FilledPrice/FilledQuantity are the ticker price it sized against and the
-        // quantity it sent — placeholders until the fill is read back below. The read-back waits
-        // until BOTH legs are placed: confirming the long first would widen the window in which
-        // the pair is naked.
-        var longEstPrice = PositivePrice(longResult.FilledPrice, legs.LongBook?.AskPrice, 0m);
-        var longEstQty = longResult.FilledQuantity ?? (longEstPrice > 0 ? cfg.NotionalUsdt / longEstPrice : 0m);
-
-        await Task.Delay(InterOrderDelayMs, ct);
-
-        var shortResult = await legs.ShortExchange.OpenShortAsync(legs.ShortSymbol, cfg.NotionalUsdt);
-        if (!shortResult.Success)
+        // One quantity for both legs: sized off the cheap leg's ask, floored to a step that is
+        // valid on BOTH venues, so the pair is delta-neutral to the unit.
+        var qty = CommonQuantity(cfg.NotionalUsdt / askLong, shortRules.QtyStep, longRules.QtyStep);
+        var minQty = Math.Max(shortRules.MinQty, longRules.MinQty);
+        if (qty <= 0 || qty < minQty)
         {
             state.ConsecutiveFailures++;
             Log(strategy, "Error",
-                $"Level #{level.Index}: short leg on {legs.ShortSymbol} rejected: {Trim(shortResult.ErrorMessage)} " +
-                $"— rolling back the {Fmt(longEstQty, 8)} long leg (failures {state.ConsecutiveFailures})");
-            _logger.LogError("Arbitrage {Id}: short open failed for level {Lvl}: {Err}",
-                strategy.Id, level.Index, shortResult.ErrorMessage);
-
-            // The rollback must close what was REALLY filled, so the long is read back first.
-            var nakedLong = await ConfirmFillAsync(strategy, legs.LongExchange, legs.LongSymbol,
-                longResult.OrderId, longEstPrice, longEstQty, legs.LongFeeRate, "long", ct);
-            RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Buy", nakedLong.Quantity,
-                nakedLong.Price, longResult.OrderId, "Filled", commission: nakedLong.Fee);
-
-            await RollbackLongAsync(strategy, level, legs, direction, nakedLong, entrySpread, state, ct);
+                $"Level #{level.Index}: ${Fmt(cfg.NotionalUsdt, 2)} buys {Fmt(qty, 8)} {legs.LongSymbol}, below the " +
+                $"exchange minimum {Fmt(minQty, 8)} — raise the level's notional (failures {state.ConsecutiveFailures})");
             return;
         }
 
-        var shortEstPrice = PositivePrice(shortResult.FilledPrice, legs.ShortBook?.BidPrice, 0m);
-        var shortEstQty = shortResult.FilledQuantity ?? (shortEstPrice > 0 ? cfg.NotionalUsdt / shortEstPrice : 0m);
+        var limitIoc = ArbitrageOrderModes.IsLimitIoc(config.OrderMode);
+        decimal? longLimit = null, shortLimit = null;
+        if (limitIoc)
+        {
+            longLimit = LimitPrice(askLong, config.MaxSlippagePercent, isBuy: true, longRules);
+            shortLimit = LimitPrice(bidShort, config.MaxSlippagePercent, isBuy: false, shortRules);
+            if (longLimit == null || shortLimit == null) return;
+        }
 
-        var longFill = await ConfirmFillAsync(strategy, legs.LongExchange, legs.LongSymbol,
-            longResult.OrderId, longEstPrice, longEstQty, legs.LongFeeRate, "long", ct);
-        var shortFill = await ConfirmFillAsync(strategy, legs.ShortExchange, legs.ShortSymbol,
-            shortResult.OrderId, shortEstPrice, shortEstQty, legs.ShortFeeRate, "short", ct);
+        // ── Both legs at once. ──
+        var longTask = legs.LongExchange.PlaceTakerOrderAsync(legs.LongSymbol, "Buy", qty, longLimit, reduceOnly: false);
+        var shortTask = legs.ShortExchange.PlaceTakerOrderAsync(legs.ShortSymbol, "Sell", qty, shortLimit, reduceOnly: false);
+        await Task.WhenAll(longTask, shortTask);
+        var longResult = await longTask;
+        var shortResult = await shortTask;
 
-        var longPrice = longFill.Price;
-        var longQty = longFill.Quantity;
-        var shortPrice = shortFill.Price;
-        var shortQty = shortFill.Quantity;
+        ReportRejection(strategy, level, state, longResult, $"long open on {legs.LongSymbol}");
+        ReportRejection(strategy, level, state, shortResult, $"short open on {legs.ShortSymbol}");
+        if (!longResult.Success && !shortResult.Success) return;   // nothing filled, no exposure
 
-        RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Buy", longQty, longPrice,
-            longResult.OrderId, "Filled", commission: longFill.Fee);
-        RecordTrade(strategy, legs.ShortAccountId, legs.ShortSymbol, "Sell", shortQty, shortPrice,
-            shortResult.OrderId, "Filled", commission: shortFill.Fee);
+        var longFillTask = longResult.Success
+            ? ConfirmFillAsync(strategy, legs.LongExchange, legs.LongSymbol, longResult.OrderId,
+                longLimit ?? askLong, qty, legs.LongFeeRate, "long", limitIoc, ct)
+            : Task.FromResult(new Fill(askLong, 0m, 0m, Confirmed: true));
+        var shortFillTask = shortResult.Success
+            ? ConfirmFillAsync(strategy, legs.ShortExchange, legs.ShortSymbol, shortResult.OrderId,
+                shortLimit ?? bidShort, qty, legs.ShortFeeRate, "short", limitIoc, ct)
+            : Task.FromResult(new Fill(bidShort, 0m, 0m, Confirmed: true));
+        await Task.WhenAll(longFillTask, shortFillTask);
+        var longFill = await longFillTask;
+        var shortFill = await shortFillTask;
 
+        if (longFill.Quantity <= 0 && shortFill.Quantity <= 0)
+        {
+            // IOC miss on both legs: the book moved away before the orders landed. No exposure.
+            NoteIocMiss(strategy, state, level, entrySpread);
+            return;
+        }
+
+        if (longFill.Quantity > 0)
+            RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Buy", longFill.Quantity,
+                longFill.Price, longResult.OrderId, "Filled", commission: longFill.Fee);
+        if (shortFill.Quantity > 0)
+            RecordTrade(strategy, legs.ShortAccountId, legs.ShortSymbol, "Sell", shortFill.Quantity,
+                shortFill.Price, shortResult.OrderId, "Filled", commission: shortFill.Fee);
+
+        // The level owns exactly what filled — matched or not — before any squaring, so a failed
+        // trim still leaves every unit of exposure in bookkeeping.
         level.IsOpen = true;
-        level.ShortQty = shortQty;
-        level.LongQty = longQty;
-        level.ShortEntryPrice = shortPrice;
-        level.LongEntryPrice = longPrice;
-        level.ShortEntryFee = shortFill.Fee;
+        level.LongQty = longFill.Quantity;
+        level.ShortQty = shortFill.Quantity;
+        level.LongEntryPrice = longFill.Price;
+        level.ShortEntryPrice = shortFill.Price;
         level.LongEntryFee = longFill.Fee;
+        level.ShortEntryFee = shortFill.Fee;
         level.EntrySpreadPercent = entrySpread;
         level.OpenedAt = DateTime.UtcNow;
-
-        // The spread the fills actually locked in, as opposed to the one the books promised. On a
-        // thin or stale book the two drift apart — this is the number that tells the user whether
-        // the entry threshold is doing its job.
-        var filledSpread = longPrice > 0 ? (shortPrice - longPrice) / longPrice * 100m : 0m;
-
+        level.CloseAttemptAt = null;
+        level.RebalanceAttemptAt = null;
         state.Direction = direction;
+
+        var lopsided = longFill.Quantity != shortFill.Quantity;
+        if (lopsided)
+        {
+            Log(strategy, "Warning",
+                $"Level #{level.Index}: legs filled unevenly — LONG {Fmt(longFill.Quantity, 8)} / SHORT " +
+                $"{Fmt(shortFill.Quantity, 8)} of {Fmt(qty, 8)}{(limitIoc ? " (IOC)" : "")} — squaring the pair at market");
+
+            // A single filled leg is always trimmed (it IS the whole exposure); a small mismatch
+            // between two filled legs only if it is material.
+            if (IsSingleLegged(level) || await IsMaterialImbalanceAsync(level, legs))
+                await RebalanceLevelAsync(strategy, level, legs, "LegTrim", state, ct);
+        }
+
+        if (!level.IsOpen || level.ShortQty <= 0 || level.LongQty <= 0)
+        {
+            // Nothing matched: the filled leg was rolled back (or is still being unwound).
+            if (!level.IsOpen && state.Levels.All(l => !l.IsOpen))
+                state.Direction = ArbitrageDirection.None;
+            if (!level.IsOpen)
+                Log(strategy, "Warning",
+                    $"Level #{level.Index}: only one leg filled — rolled back, level not opened " +
+                    $"(realized {Fmt(state.RealizedPnlUsdt)} USDT)");
+            return;
+        }
+
         state.ConsecutiveFailures = 0;
+
+        // The spread the fills actually locked in, as opposed to the one the books promised.
+        var filledSpread = level.LongEntryPrice > 0
+            ? (level.ShortEntryPrice - level.LongEntryPrice) / level.LongEntryPrice * 100m
+            : 0m;
 
         Log(strategy, "Info",
             $"Level #{level.Index} opened @ spread {Fmt(entrySpread, 4)}% (threshold {Fmt(cfg.EntrySpreadPercent, 4)}%, " +
-            $"filled at {Fmt(filledSpread, 4)}%): " +
-            $"SHORT {legs.ShortSymbol} {Fmt(shortQty, 8)} @ {Fmt(shortPrice, 8)} / " +
-            $"LONG {legs.LongSymbol} {Fmt(longQty, 8)} @ {Fmt(longPrice, 8)}, " +
+            $"filled at {Fmt(filledSpread, 4)}%{(limitIoc ? $", IOC ±{Fmt(config.MaxSlippagePercent, 3)}%" : "")}): " +
+            $"SHORT {legs.ShortSymbol} {Fmt(level.ShortQty, 8)} @ {Fmt(level.ShortEntryPrice, 8)} / " +
+            $"LONG {legs.LongSymbol} {Fmt(level.LongQty, 8)} @ {Fmt(level.LongEntryPrice, 8)}, " +
             $"fees {Fmt(shortFill.Fee + longFill.Fee, 4)} USDT, " +
             $"notional=${Fmt(cfg.NotionalUsdt, 2)}/leg, exit at ≤{Fmt(cfg.ExitSpreadPercent, 4)}%");
         _logger.LogInformation(
-            "Arbitrage {Id}: level {Lvl} opened, dir={Dir}, spread={Spread}%",
-            strategy.Id, level.Index, direction, Math.Round(entrySpread, 4));
+            "Arbitrage {Id}: level {Lvl} opened, dir={Dir}, spread={Spread}%, filled={Filled}%",
+            strategy.Id, level.Index, direction, Math.Round(entrySpread, 4), Math.Round(filledSpread, 4));
     }
 
     /// <summary>
-    /// Unwinds a long leg whose short counterpart was rejected. If the rollback itself fails the
-    /// leg is written into level state (long only, IsOpen) and the direction is locked, so the
-    /// next tick's incomplete-level pass keeps retrying the close — a naked position is never
-    /// silently dropped from bookkeeping.
+    /// Counts IOC opens that filled nothing and reports them in batches — at one attempt every
+    /// few seconds while the quoted spread sits above a threshold, a line per miss would bury
+    /// the log.
     /// </summary>
-    private async Task RollbackLongAsync(Strategy strategy, ArbitrageLevelState level, LegPair legs,
-        ArbitrageDirection direction, Fill longFill, decimal entrySpread, ArbitrageState state,
-        CancellationToken ct)
+    private void NoteIocMiss(Strategy strategy, ArbitrageState state, ArbitrageLevelState level, decimal entrySpread)
     {
-        var longQty = longFill.Quantity;
-        var longPrice = longFill.Price;
-        if (longQty <= 0) return;
-
-        var result = await legs.LongExchange.CloseLongAsync(legs.LongSymbol, longQty);
-        if (result.Success)
-        {
-            var estimate = PositivePrice(result.FilledPrice, legs.LongBook?.BidPrice, longPrice);
-            var exitFill = await ConfirmFillAsync(strategy, legs.LongExchange, legs.LongSymbol,
-                result.OrderId, estimate, longQty, legs.LongFeeRate, "long rollback", ct);
-
-            var gross = (exitFill.Price - longPrice) * longQty;
-            var net = gross - longFill.Fee - exitFill.Fee;
-
-            RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Sell", longQty, exitFill.Price,
-                result.OrderId, "LegRollback", net, exitFill.Fee);
-            state.RealizedPnlUsdt += net;
-
-            Log(strategy, "Warning",
-                $"Level #{level.Index}: long leg rolled back at {Fmt(exitFill.Price, 8)}, cost={Fmt(net)} USDT — level not opened");
+        state.IocMissCount++;
+        var now = DateTime.UtcNow;
+        if (state.IocMissLoggedAt.HasValue &&
+            now - state.IocMissLoggedAt.Value < TimeSpan.FromMinutes(QuoteFallbackWarnMinutes))
             return;
-        }
 
-        level.IsOpen = true;
-        level.LongQty = longQty;
-        level.LongEntryPrice = longPrice;
-        level.LongEntryFee = longFill.Fee;
-        level.ShortQty = 0;
-        level.ShortEntryPrice = 0;
-        level.ShortEntryFee = 0;
-        level.EntrySpreadPercent = entrySpread;
-        level.OpenedAt = DateTime.UtcNow;
-        state.Direction = direction;
+        Log(strategy, "Info",
+            $"IOC open missed on both legs ({state.IocMissCount} miss(es) in the last {QuoteFallbackWarnMinutes} min; " +
+            $"latest: level #{level.Index} at quoted {Fmt(entrySpread, 4)}%) — the book moved past the slippage limit " +
+            $"before the orders landed, nothing was opened");
+        state.IocMissLoggedAt = now;
+        state.IocMissCount = 0;
+    }
 
-        Log(strategy, "Error",
-            $"⚠️ Level #{level.Index}: rollback FAILED ({Trim(result.ErrorMessage)}) — naked LONG " +
-            $"{Fmt(longQty, 8)} {legs.LongSymbol} left on the exchange, unwind will be retried every tick");
-        _logger.LogError("Arbitrage {Id}: rollback failed for level {Lvl}, naked long {Qty} {Sym}",
-            strategy.Id, level.Index, longQty, legs.LongSymbol);
+    // ────────────────────────── Order sizing helpers ──────────────────────────
+
+    private static async Task<(InstrumentRulesDto? Short, InstrumentRulesDto? Long)> GetRulesAsync(LegPair legs)
+    {
+        var s = SafeRulesAsync(legs.ShortExchange, legs.ShortSymbol);
+        var l = SafeRulesAsync(legs.LongExchange, legs.LongSymbol);
+        await Task.WhenAll(s, l);
+        return (await s, await l);
+    }
+
+    private static async Task<InstrumentRulesDto?> SafeRulesAsync(IFuturesExchangeService exchange, string symbol)
+    {
+        try { return await exchange.GetInstrumentRulesAsync(symbol); }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>
+    /// Largest quantity ≤ <paramref name="raw"/> that is a whole multiple of both lot steps.
+    /// Steps are almost always powers of ten, where this is simply the coarser one.
+    /// </summary>
+    internal static decimal CommonQuantity(decimal raw, decimal stepA, decimal stepB)
+    {
+        if (raw <= 0) return 0m;
+        if (stepA <= 0) stepA = stepB;
+        if (stepB <= 0) stepB = stepA;
+        if (stepA <= 0) return raw;
+
+        var coarse = Math.Max(stepA, stepB);
+        var fine = Math.Min(stepA, stepB);
+        var q = Math.Floor(raw / coarse) * coarse;
+        if (coarse % fine == 0m) return q;
+
+        // Non-nested steps (rare): walk down in coarse steps until fine divides too.
+        for (var i = 0; i < 1000 && q > 0; i++, q -= coarse)
+            if (q % fine == 0m) return q;
+        return 0m;
+    }
+
+    /// <summary>
+    /// Limit price for an IOC leg: the quote pushed by the slippage allowance, rounded to the
+    /// tick AWAY from the quote (buy up, sell down) so rounding never eats the allowance.
+    /// Null when there is no quote or no tick to round to.
+    /// </summary>
+    internal static decimal? LimitPrice(decimal? quote, decimal slippagePercent, bool isBuy, InstrumentRulesDto? rules)
+    {
+        if (quote is not > 0 || rules == null || rules.PriceStep <= 0) return null;
+        var slip = Math.Max(0m, slippagePercent) / 100m;
+        var raw = isBuy ? quote.Value * (1m + slip) : quote.Value * (1m - slip);
+        var ticks = raw / rules.PriceStep;
+        var rounded = (isBuy ? Math.Ceiling(ticks) : Math.Floor(ticks)) * rules.PriceStep;
+        return rounded > 0 ? rounded : null;
     }
 
     // ────────────────────────── Manual force-close (controller entry) ──────────────────────────
@@ -728,7 +946,7 @@ public class ArbitrageHandler : IStrategyHandler
             var flatCount = 0;
             foreach (var level in openLevels)
             {
-                var (flat, net) = await CloseLevelAsync(strategy, level, legs, "ForceClose", state, ct);
+                var (flat, net) = await CloseLevelAsync(strategy, level, legs, "ForceClose", state, null, ct);
                 total += net;
                 if (flat) flatCount++;
                 await Task.Delay(InterOrderDelayMs, ct);
@@ -1010,7 +1228,7 @@ public class ArbitrageHandler : IStrategyHandler
     /// </summary>
     private async Task<Fill> ConfirmFillAsync(Strategy strategy, IFuturesExchangeService exchange,
         string symbol, string? orderId, decimal estPrice, decimal estQty, decimal feeRate,
-        string legName, CancellationToken ct)
+        string legName, bool immediateOrCancel, CancellationToken ct)
     {
         var estimate = new Fill(estPrice, estQty, estPrice * estQty * feeRate, Confirmed: false);
         if (string.IsNullOrEmpty(orderId)) return estimate;
@@ -1021,8 +1239,11 @@ public class ArbitrageHandler : IStrategyHandler
             try
             {
                 var order = await exchange.GetOrderAsync(symbol, orderId);
+                // An IOC order is final as soon as the exchange has processed it: whatever did not
+                // fill was cancelled, so "partially filled" is its terminal state too.
                 var settled = order?.Status is OrderLifecycleStatus.Filled or OrderLifecycleStatus.Cancelled
-                              or OrderLifecycleStatus.Rejected;
+                                  or OrderLifecycleStatus.Rejected
+                              || (immediateOrCancel && order?.Status == OrderLifecycleStatus.PartiallyFilled);
 
                 if (order != null && order.FilledQuantity > 0 && order.AverageFilledPrice > 0 &&
                     (settled || attempt == FillConfirmAttempts))
@@ -1030,6 +1251,11 @@ public class ArbitrageHandler : IStrategyHandler
                     var fee = order.Fee ?? order.AverageFilledPrice * order.FilledQuantity * feeRate;
                     return new Fill(order.AverageFilledPrice, order.FilledQuantity, fee, Confirmed: true);
                 }
+
+                // Settled with nothing filled — a legitimate IOC outcome (or a rejected market
+                // order): zero exposure, confirmed.
+                if (order != null && settled && order.FilledQuantity <= 0)
+                    return new Fill(estPrice, 0m, 0m, Confirmed: true);
 
                 failure = order == null ? "order not found" : $"status={order.Status}, filled={order.FilledQuantity}";
             }

@@ -58,6 +58,30 @@ public interface IFuturesExchangeService : IDisposable
     Task<BookTickerDto?> GetBookTickerAsync(string symbol) =>
         throw new NotSupportedException("GetBookTickerAsync not implemented");
 
+    /// <summary>
+    /// Quantity step, minimum quantity and price tick for <paramref name="symbol"/>, from a
+    /// process-wide cache (refreshed hourly). Null when the exchange could not be reached and
+    /// nothing is cached yet.
+    /// </summary>
+    Task<InstrumentRulesDto?> GetInstrumentRulesAsync(string symbol) =>
+        Task.FromResult<InstrumentRulesDto?>(null);
+
+    /// <summary>
+    /// Places one taker order for an exact base quantity — no ticker lookup, no sizing, nothing
+    /// but the order request itself (instrument rules come from the cache). Built for
+    /// FuturesArbitrage, where both legs go out concurrently and every extra round-trip before
+    /// the order widens the gap between them.
+    ///
+    /// <paramref name="limitPrice"/> null → market order. Otherwise a limit order with
+    /// ImmediateOrCancel: whatever is fillable at that price or better fills at once, the rest is
+    /// cancelled by the exchange, nothing rests on the book. Quantity is floored to the step,
+    /// the price is passed as given (caller rounds it to the tick in the safe direction).
+    /// One-way mode; <paramref name="reduceOnly"/> for closes.
+    /// </summary>
+    Task<OrderResultDto> PlaceTakerOrderAsync(string symbol, string side, decimal quantity,
+        decimal? limitPrice, bool reduceOnly) =>
+        throw new NotSupportedException("PlaceTakerOrderAsync not implemented");
+
     Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount);
     Task<OrderResultDto> OpenShortAsync(string symbol, decimal quoteAmount);
     Task<OrderResultDto> CloseLongAsync(string symbol, decimal quantity);

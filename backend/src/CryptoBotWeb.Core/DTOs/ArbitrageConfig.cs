@@ -16,7 +16,8 @@ namespace CryptoBotWeb.Core.DTOs;
 // a widening to 3% adds size, a partial convergence to 1% trims it, full convergence flattens.
 //
 // All open levels share one direction (which exchange is expensive), fixed when the first
-// level opens. Both legs are market orders in one-way position mode. Funding is NOT modeled
+// level opens. Both legs go out concurrently (market or limit-IOC, see OrderMode) in one-way
+// position mode. Funding is NOT modeled
 // in V1 — it lands on the exchange balances and is not part of the recorded PnL.
 public class ArbitrageLevelConfig
 {
@@ -50,4 +51,26 @@ public class ArbitrageConfig
 
     // Stop the bot after this many consecutive order failures (leg-risk protection).
     public int MaxConsecutiveFailures { get; set; } = 3;
+
+    // How the two legs are executed on threshold opens and closes:
+    //   "Market"   — plain market orders: always fill, at whatever price the book gives.
+    //   "LimitIoc" — limit ImmediateOrCancel at the quoted price ± MaxSlippagePercent: a leg can
+    //                never fill worse than that, but it may fill partly or not at all. Any
+    //                mismatch between the two legs is trimmed back at market right away, so the
+    //                level only ever holds a matched pair (see ArbitrageHandler.SettleOpenAsync).
+    // Safety closes (leg unwinds, rollbacks, trims, manual force close) are always market.
+    public string OrderMode { get; set; } = ArbitrageOrderModes.Market;
+
+    // LimitIoc only: how far past the quoted price each leg may fill, in percent of price.
+    // Buy limit = ask × (1 + x/100), sell limit = bid × (1 − x/100).
+    public decimal MaxSlippagePercent { get; set; } = 0.05m;
+}
+
+public static class ArbitrageOrderModes
+{
+    public const string Market = "Market";
+    public const string LimitIoc = "LimitIoc";
+
+    public static bool IsLimitIoc(string? mode) =>
+        string.Equals(mode, LimitIoc, StringComparison.OrdinalIgnoreCase);
 }
