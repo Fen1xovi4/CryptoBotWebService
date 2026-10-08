@@ -584,6 +584,75 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    // Instrument rules are public, identical for every account and change rarely — one
+    // process-wide cache serves every service instance (they are created per tick).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, InstrumentRulesDto Rules)>
+        _rulesCache = new();
+    private static readonly TimeSpan _rulesCacheTtl = TimeSpan.FromHours(1);
+
+    public async Task<InstrumentRulesDto?> GetInstrumentRulesAsync(string symbol)
+    {
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+        if (_rulesCache.TryGetValue(bybitSymbol, out var hit) && DateTime.UtcNow - hit.At < _rulesCacheTtl)
+            return hit.Rules;
+
+        try
+        {
+            var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(Category.Linear, bybitSymbol);
+            var info = result.Success ? result.Data?.List?.FirstOrDefault() : null;
+            if (info?.LotSizeFilter?.QuantityStep is > 0 && info.PriceFilter?.TickSize is > 0)
+            {
+                var rules = new InstrumentRulesDto(info.LotSizeFilter.QuantityStep,
+                    info.LotSizeFilter.MinOrderQuantity, info.PriceFilter.TickSize);
+                _rulesCache[bybitSymbol] = (DateTime.UtcNow, rules);
+                return rules;
+            }
+        }
+        catch (Exception)
+        {
+            // fall through to the stale entry, if any
+        }
+
+        // An expired entry beats nothing: steps and ticks almost never change.
+        return _rulesCache.TryGetValue(bybitSymbol, out var stale) ? stale.Rules : null;
+    }
+
+    public async Task<OrderResultDto> PlaceTakerOrderAsync(string symbol, string side, decimal quantity,
+        decimal? limitPrice, bool reduceOnly)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            var orderSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? OrderSide.Buy : OrderSide.Sell;
+            var rules = await GetInstrumentRulesAsync(symbol);
+            var qty = rules != null ? FloorToStep(quantity, rules.QtyStep) : quantity;
+            if (qty <= 0)
+                return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} rounds to 0 for {symbol}" };
+
+            var result = limitPrice.HasValue
+                ? await _client.V5Api.Trading.PlaceOrderAsync(
+                    Category.Linear, bybitSymbol, orderSide, NewOrderType.Limit, qty,
+                    price: limitPrice.Value, timeInForce: TimeInForce.ImmediateOrCancel,
+                    reduceOnly: reduceOnly ? true : null)
+                : await _client.V5Api.Trading.PlaceOrderAsync(
+                    Category.Linear, bybitSymbol, orderSide, NewOrderType.Market, qty,
+                    reduceOnly: reduceOnly ? true : null);
+
+            return new OrderResultDto
+            {
+                Success = result.Success,
+                OrderId = result.Data?.OrderId,
+                FilledPrice = limitPrice,
+                FilledQuantity = qty,
+                ErrorMessage = result.Error?.Message
+            };
+        }
+        catch (Exception ex)
+        {
+            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
+        }
+    }
+
     private static OrderLifecycleStatus MapOrderStatus(OrderStatus s) => s switch
     {
         OrderStatus.New or OrderStatus.Created or OrderStatus.Active or OrderStatus.Untriggered => OrderLifecycleStatus.Open,

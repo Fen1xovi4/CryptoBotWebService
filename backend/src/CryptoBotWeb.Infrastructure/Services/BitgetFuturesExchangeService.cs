@@ -690,6 +690,84 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
         }
     }
 
+    // Instrument rules are public and change rarely — one process-wide cache for all instances.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, InstrumentRulesDto Rules)>
+        _rulesCache = new();
+    private static readonly TimeSpan _rulesCacheTtl = TimeSpan.FromHours(1);
+
+    public async Task<InstrumentRulesDto?> GetInstrumentRulesAsync(string symbol)
+    {
+        var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+        if (_rulesCache.TryGetValue(bitgetSymbol, out var hit) && DateTime.UtcNow - hit.At < _rulesCacheTtl)
+            return hit.Rules;
+
+        try
+        {
+            var result = await _client.FuturesApiV2.ExchangeData.GetContractsAsync(
+                BitgetProductTypeV2.UsdtFutures, bitgetSymbol);
+            var c = result.Success
+                ? result.Data?.FirstOrDefault(x => string.Equals(x.Symbol, bitgetSymbol, StringComparison.OrdinalIgnoreCase))
+                : null;
+            if (c != null && c.QuantityStep > 0)
+            {
+                // Price tick = priceEndStep × 10^(−pricePlace), same as GetSymbolInfoWithPriceAsync.
+                var priceStep = c.PriceStep * (decimal)Math.Pow(10, -c.PriceDecimals);
+                var rules = new InstrumentRulesDto(c.QuantityStep, c.MinOrderQuantity, priceStep);
+                _rulesCache[bitgetSymbol] = (DateTime.UtcNow, rules);
+                return rules;
+            }
+        }
+        catch (Exception)
+        {
+            // fall through to the stale entry, if any
+        }
+
+        return _rulesCache.TryGetValue(bitgetSymbol, out var stale) ? stale.Rules : null;
+    }
+
+    public async Task<OrderResultDto> PlaceTakerOrderAsync(string symbol, string side, decimal quantity,
+        decimal? limitPrice, bool reduceOnly)
+    {
+        try
+        {
+            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+            var orderSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? OrderSide.Buy : OrderSide.Sell;
+            var rules = await GetInstrumentRulesAsync(symbol);
+            var qty = rules != null ? FloorToStep(quantity, rules.QtyStep) : quantity;
+            if (qty <= 0)
+                return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} rounds to 0 for {symbol}" };
+
+            // One-way mode: no tradeSide (see CLAUDE.md); reduceOnly only on closes.
+            var result = limitPrice.HasValue
+                ? await _client.FuturesApiV2.Trading.PlaceOrderAsync(
+                    BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
+                    orderSide, OrderType.Limit, MarginMode.CrossMargin, qty,
+                    price: limitPrice.Value, timeInForce: TimeInForce.ImmediateOrCancel,
+                    reduceOnly: reduceOnly ? true : null)
+                : await _client.FuturesApiV2.Trading.PlaceOrderAsync(
+                    BitgetProductTypeV2.UsdtFutures, bitgetSymbol, "USDT",
+                    orderSide, OrderType.Market, MarginMode.CrossMargin, qty,
+                    reduceOnly: reduceOnly ? true : null);
+
+            var ok = result.Success && !string.IsNullOrEmpty(result.Data?.OrderId);
+            return new OrderResultDto
+            {
+                // Success without an order id has been seen on Bitget: the order may well exist,
+                // but without an id the fill cannot be read back. Report it as success so the
+                // handler books the leg (at the estimate) instead of treating it as unfilled.
+                Success = result.Success,
+                OrderId = result.Data?.OrderId,
+                FilledPrice = limitPrice,
+                FilledQuantity = qty,
+                ErrorMessage = ok ? null : (result.Error?.ToString() ?? (result.Success ? "no order id in response" : "unknown error"))
+            };
+        }
+        catch (Exception ex)
+        {
+            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
+        }
+    }
+
     private static OrderLifecycleStatus MapOrderStatus(Bitget.Net.Enums.V2.OrderStatus s) => s switch
     {
         Bitget.Net.Enums.V2.OrderStatus.Filled => OrderLifecycleStatus.Filled,
