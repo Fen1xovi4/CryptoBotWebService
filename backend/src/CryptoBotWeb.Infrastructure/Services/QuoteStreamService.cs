@@ -119,7 +119,8 @@ public sealed class QuoteStreamService : IQuoteStreamService, IDisposable
                 result = await bybit.V5LinearApi.SubscribeToOrderbookUpdatesAsync(
                     SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.Bybit), 1,
                     update => Apply(entry, BestPrice(update.Data.Bids?.Select(b => (b.Price, b.Quantity))),
-                                           BestPrice(update.Data.Asks?.Select(a => (a.Price, a.Quantity)))),
+                                           BestPrice(update.Data.Asks?.Select(a => (a.Price, a.Quantity))),
+                                           update.DataTime),
                     ct);
                 break;
             }
@@ -131,7 +132,8 @@ public sealed class QuoteStreamService : IQuoteStreamService, IDisposable
                 // BingX streams best bid/ask directly — no book reconstruction needed.
                 result = await bingx.PerpetualFuturesApi.SubscribeToBookPriceUpdatesAsync(
                     SymbolHelper.ToExchangeSymbol(symbol, ExchangeType.BingX),
-                    update => Apply(entry, update.Data.BestBidPrice, update.Data.BestAskPrice),
+                    update => Apply(entry, update.Data.BestBidPrice, update.Data.BestAskPrice,
+                                    update.Data.UpdateTime ?? update.DataTime),
                     ct);
                 break;
             }
@@ -148,7 +150,8 @@ public sealed class QuoteStreamService : IQuoteStreamService, IDisposable
                         var book = update.Data?.FirstOrDefault();
                         if (book == null) return;
                         Apply(entry, BestPrice(book.Bids?.Select(b => (b.Price, b.Quantity))),
-                                     BestPrice(book.Asks?.Select(a => (a.Price, a.Quantity))));
+                                     BestPrice(book.Asks?.Select(a => (a.Price, a.Quantity))),
+                                     update.DataTime);
                     },
                     ct);
                 break;
@@ -234,15 +237,16 @@ public sealed class QuoteStreamService : IQuoteStreamService, IDisposable
         return null;
     }
 
-    private static void Apply(StreamEntry entry, decimal? bid, decimal? ask)
+    private static void Apply(StreamEntry entry, decimal? bid, decimal? ask, DateTime? exchangeTimeUtc)
     {
         var previous = entry.Quote;
         var newBid = bid ?? previous?.Bid ?? 0m;
         var newAsk = ask ?? previous?.Ask ?? 0m;
         if (newBid <= 0 || newAsk <= 0) return;
 
-        entry.Quote = new QuoteSnapshot(newBid, newAsk, DateTime.UtcNow);
-        Interlocked.Increment(ref entry.UpdateCount);
+        var seq = Interlocked.Increment(ref entry.UpdateCount);
+        entry.Quote = new QuoteSnapshot(newBid, newAsk, DateTime.UtcNow,
+            exchangeTimeUtc is { } t && t.Year > 2000 ? DateTime.SpecifyKind(t, DateTimeKind.Utc) : null, seq);
         entry.Connected = true;
     }
 

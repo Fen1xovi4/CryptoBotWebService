@@ -90,4 +90,18 @@ public class ArbitrageState
     // report went out — misses are summarised every few minutes instead of logged one by one.
     public long IocMissCount { get; set; }
     public DateTime? IocMissLoggedAt { get; set; }
+
+    // Entry confirmation (ArbitrageConfig.EntryConfirmSeconds): when the current spread signal
+    // appeared, for which direction, both venues' stream update counters at that moment (a venue
+    // must send something new before the signal counts), and the widest spread seen during it.
+    public DateTime? SignalSince { get; set; }
+    public ArbitrageDirection? SignalDirection { get; set; }
+    public long? SignalSeqShort { get; set; }
+    public long? SignalSeqLong { get; set; }
+    public decimal SignalPeakSpread { get; set; }
+
+    // Signals that vanished before confirmation since the last summary line, and its time.
+    public long FilteredSignals { get; set; }
+    public decimal FilteredPeakSpread { get; set; }
+    public DateTime? FilteredLoggedAt { get; set; }
 }

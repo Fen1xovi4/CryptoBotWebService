@@ -64,6 +64,13 @@ public class ArbitrageConfig
     // LimitIoc only: how far past the quoted price each leg may fill, in percent of price.
     // Buy limit = ask × (1 + x/100), sell limit = bid × (1 − x/100).
     public decimal MaxSlippagePercent { get; set; } = 0.05m;
+
+    // Entry confirmation: a level opens only after the entry spread has stayed above its
+    // threshold for this many seconds AND both venues have pushed at least one fresh quote since
+    // the spread appeared. Filters lead-lag "spreads" — one venue repricing a fraction of a
+    // second after the other during a fast move — which vanish before the orders land.
+    // 0 disables the filter (enter on the first tick, as before).
+    public decimal EntryConfirmSeconds { get; set; } = 1.5m;
 }
 
 public static class ArbitrageOrderModes
