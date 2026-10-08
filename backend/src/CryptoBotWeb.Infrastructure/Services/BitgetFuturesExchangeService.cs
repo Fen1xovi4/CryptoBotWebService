@@ -87,7 +87,7 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
     // Funding: Bitget's history-funding-rate endpoint is PAGE-numbered (pageSize + page), NOT
     // time-ranged — it returns settlements newest-first. We walk pages forward, clip each to
     // [fromUtc,toUtc), and stop once a page runs entirely older than fromUtc (or is short/empty).
-    private const int _rangeHardCap = 600_000; // > 365d of 1m bars (525_600) — SimulationEngine.MaxWindowDays
+    private const int _rangeHardCap = 600_000; // headroom above SimulationEngine.MaxPathCandles (530_000)
     private const int _rangePageDelayMs = 120;
     private static readonly TimeSpan _rangeMaxRequestSpan = TimeSpan.FromDays(89); // Bitget: startTime..endTime ≤ 90 days per request
     private const int _rangeMaxRetries = 6;
@@ -661,8 +661,33 @@ public class BitgetFuturesExchangeService : IFuturesExchangeService
             OrderId = o.OrderId ?? orderId,
             Status = MapOrderStatus(o.Status),
             FilledQuantity = o.QuantityFilled,
-            AverageFilledPrice = o.AveragePrice ?? 0m
+            AverageFilledPrice = o.AveragePrice ?? 0m,
+            // Bitget reports the fee as a negative number — normalised to positive.
+            Fee = o.Fee.HasValue ? Math.Abs(o.Fee.Value) : null
         };
+    }
+
+    public async Task<decimal?> GetTakerFeeRateAsync(string symbol)
+    {
+        try
+        {
+            // Bitget V2 has no per-account fee endpoint in the SDK; the contract listing carries
+            // the symbol's taker rate (the standard schedule, before VIP discounts), which is still
+            // closer to the truth than a single constant for every symbol.
+            var bitgetSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bitget);
+            var result = await _client.FuturesApiV2.ExchangeData.GetContractsAsync(
+                BitgetProductTypeV2.UsdtFutures, bitgetSymbol);
+            if (!result.Success || result.Data == null) return null;
+
+            var contract = result.Data.FirstOrDefault(c =>
+                string.Equals(c.Symbol, bitgetSymbol, StringComparison.OrdinalIgnoreCase));
+            var rate = contract?.TakerFeeRate;
+            return rate.HasValue && rate.Value > 0 ? rate.Value : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private static OrderLifecycleStatus MapOrderStatus(Bitget.Net.Enums.V2.OrderStatus s) => s switch

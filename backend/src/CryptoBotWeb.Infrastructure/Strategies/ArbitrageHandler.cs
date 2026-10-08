@@ -68,6 +68,17 @@ public class ArbitrageHandler : IStrategyHandler
     // purpose — see ProcessOpenAsync.
     private const int MinSecondsBetweenOpens = 5;
 
+    // Reading a market order back: how many times, and how far apart, to ask the exchange for the
+    // fill before giving up and booking the estimate. Market fills are immediate; the retries only
+    // cover the exchange's own bookkeeping lag between "accepted" and "visible as Filled".
+    private const int FillConfirmAttempts = 3;
+    private const int FillConfirmDelayMs = 200;
+
+    // Account fee rates are re-read from the exchanges this often (tiers change rarely), and a
+    // failed read is retried after this many minutes while the published constant fills in.
+    private const int FeeRateRefreshHours = 24;
+    private const int FeeRateRetryMinutes = 15;
+
     public string StrategyType => StrategyTypes.FuturesArbitrage;
 
     // A stream quote older than this is not trusted for a trading decision — we fall back to a
@@ -169,6 +180,8 @@ public class ArbitrageHandler : IStrategyHandler
                 : DateTime.UtcNow.AddMinutes(LeverageRetryMinutes);
         }
 
+        await ResolveFeeRatesAsync(strategy, state, primaryExchange, symbolA, secondExchange, symbolB);
+
         var (bookA, bookB) = await ReadBooksAsync(strategy, state,
             primaryExchange, primaryAccount, symbolA,
             secondExchange, secondAccount, symbolB, ct);
@@ -188,7 +201,9 @@ public class ArbitrageHandler : IStrategyHandler
             PrimaryAccountId = strategy.AccountId,
             SecondaryAccountId = secondAccount.Id,
             PrimaryBook = bookA,
-            SecondaryBook = bookB
+            SecondaryBook = bookB,
+            PrimaryFeeRate = state.PrimaryTakerFeeRate ?? primaryExchange.TakerFeeRate,
+            SecondaryFeeRate = state.SecondaryTakerFeeRate ?? secondExchange.TakerFeeRate
         };
 
         var primaryExpensive = BuildLegs(ctx, ArbitrageDirection.PrimaryExpensive);
@@ -296,37 +311,22 @@ public class ArbitrageHandler : IStrategyHandler
     private async Task<(bool Flat, decimal NetPnl)> CloseLevelAsync(Strategy strategy,
         ArbitrageLevelState level, LegPair legs, string status, ArbitrageState state, CancellationToken ct)
     {
-        decimal net = 0m;
+        // Both closes are sent first and only then read back: confirming the short's fill before
+        // sending the long would hold a naked long for the confirmation round-trips.
+        OrderResultDto? shortResult = null;
+        OrderResultDto? longResult = null;
 
         if (level.ShortQty > 0)
         {
-            var qty = level.ShortQty;
-            var result = await legs.ShortExchange.CloseShortAsync(legs.ShortSymbol, qty);
-            if (result.Success)
-            {
-                var exit = PositivePrice(result.FilledPrice, legs.ShortBook?.AskPrice, level.ShortEntryPrice);
-                var gross = (level.ShortEntryPrice - exit) * qty;
-                // Entry fee was already booked on the opening Trade's Commission; the closing
-                // Trade carries the exit fee only, while PnlDollar is net of BOTH (same
-                // convention as the other handlers: PnlDollar is always the net number).
-                var entryFee = level.ShortEntryPrice * qty * legs.ShortExchange.TakerFeeRate;
-                var exitFee = exit * qty * legs.ShortExchange.TakerFeeRate;
-                var legNet = gross - entryFee - exitFee;
-
-                RecordTrade(strategy, legs.ShortAccountId, legs.ShortSymbol, "Buy", qty, exit,
-                    result.OrderId, status, legNet, exitFee);
-                state.RealizedPnlUsdt += legNet;
-                net += legNet;
-                level.ShortQty = 0;
-            }
-            else
+            shortResult = await legs.ShortExchange.CloseShortAsync(legs.ShortSymbol, level.ShortQty);
+            if (!shortResult.Success)
             {
                 state.ConsecutiveFailures++;
                 Log(strategy, "Warning",
-                    $"Level #{level.Index}: short close on {legs.ShortSymbol} failed: {Trim(result.ErrorMessage)} " +
+                    $"Level #{level.Index}: short close on {legs.ShortSymbol} failed: {Trim(shortResult.ErrorMessage)} " +
                     $"— retry next tick (failures {state.ConsecutiveFailures})");
                 _logger.LogWarning("Arbitrage {Id}: short close failed for level {Lvl}: {Err}",
-                    strategy.Id, level.Index, result.ErrorMessage);
+                    strategy.Id, level.Index, shortResult.ErrorMessage);
             }
 
             await Task.Delay(InterOrderDelayMs, ct);
@@ -334,32 +334,23 @@ public class ArbitrageHandler : IStrategyHandler
 
         if (level.LongQty > 0)
         {
-            var qty = level.LongQty;
-            var result = await legs.LongExchange.CloseLongAsync(legs.LongSymbol, qty);
-            if (result.Success)
-            {
-                var exit = PositivePrice(result.FilledPrice, legs.LongBook?.BidPrice, level.LongEntryPrice);
-                var gross = (exit - level.LongEntryPrice) * qty;
-                var entryFee = level.LongEntryPrice * qty * legs.LongExchange.TakerFeeRate;
-                var exitFee = exit * qty * legs.LongExchange.TakerFeeRate;
-                var legNet = gross - entryFee - exitFee;
-
-                RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Sell", qty, exit,
-                    result.OrderId, status, legNet, exitFee);
-                state.RealizedPnlUsdt += legNet;
-                net += legNet;
-                level.LongQty = 0;
-            }
-            else
+            longResult = await legs.LongExchange.CloseLongAsync(legs.LongSymbol, level.LongQty);
+            if (!longResult.Success)
             {
                 state.ConsecutiveFailures++;
                 Log(strategy, "Warning",
-                    $"Level #{level.Index}: long close on {legs.LongSymbol} failed: {Trim(result.ErrorMessage)} " +
+                    $"Level #{level.Index}: long close on {legs.LongSymbol} failed: {Trim(longResult.ErrorMessage)} " +
                     $"— retry next tick (failures {state.ConsecutiveFailures})");
                 _logger.LogWarning("Arbitrage {Id}: long close failed for level {Lvl}: {Err}",
-                    strategy.Id, level.Index, result.ErrorMessage);
+                    strategy.Id, level.Index, longResult.ErrorMessage);
             }
         }
+
+        decimal net = 0m;
+        if (shortResult?.Success == true)
+            net += await BookClosedLegAsync(strategy, level, legs, isShort: true, shortResult, status, state, ct);
+        if (longResult?.Success == true)
+            net += await BookClosedLegAsync(strategy, level, legs, isShort: false, longResult, status, state, ct);
 
         var flat = level.ShortQty <= 0 && level.LongQty <= 0;
         if (flat)
@@ -368,6 +359,68 @@ public class ArbitrageHandler : IStrategyHandler
             level.OpenedAt = null;
         }
         return (flat, net);
+    }
+
+    /// <summary>
+    /// Books one successfully closed leg: reads the real fill back, records the closing Trade and
+    /// moves the leg's quantity (and the entry fee it carried) off the level. PnlDollar on the
+    /// closing Trade is net of BOTH fees — the entry fee was booked on the opening Trade's
+    /// Commission, the closing Trade carries the exit fee only, same convention as the other
+    /// handlers. A partial fill leaves the remainder on the level for the next unwind pass.
+    /// </summary>
+    private async Task<decimal> BookClosedLegAsync(Strategy strategy, ArbitrageLevelState level,
+        LegPair legs, bool isShort, OrderResultDto result, string status, ArbitrageState state,
+        CancellationToken ct)
+    {
+        var exchange = isShort ? legs.ShortExchange : legs.LongExchange;
+        var symbol = isShort ? legs.ShortSymbol : legs.LongSymbol;
+        var feeRate = isShort ? legs.ShortFeeRate : legs.LongFeeRate;
+        var qty = isShort ? level.ShortQty : level.LongQty;
+        var entryPrice = isShort ? level.ShortEntryPrice : level.LongEntryPrice;
+        var entryFeeCarried = isShort ? level.ShortEntryFee : level.LongEntryFee;
+
+        // Estimate = the book price the close was priced against (the side we cross).
+        var estimate = PositivePrice(result.FilledPrice,
+            isShort ? legs.ShortBook?.AskPrice : legs.LongBook?.BidPrice, entryPrice);
+
+        var fill = await ConfirmFillAsync(strategy, exchange, symbol, result.OrderId,
+            estimate, qty, feeRate, isShort ? "short close" : "long close", ct);
+
+        var closedQty = fill.Confirmed ? Math.Min(fill.Quantity, qty) : qty;
+        var gross = isShort
+            ? (entryPrice - fill.Price) * closedQty
+            : (fill.Price - entryPrice) * closedQty;
+
+        // Entry fee: what the exchange actually charged when the level opened (pro-rated if this
+        // close is partial); levels from before entry fees were recorded fall back to the rate.
+        var entryFee = entryFeeCarried > 0
+            ? entryFeeCarried * (closedQty / qty)
+            : entryPrice * closedQty * feeRate;
+        var exitFee = fill.Fee;
+        var legNet = gross - entryFee - exitFee;
+
+        RecordTrade(strategy, isShort ? legs.ShortAccountId : legs.LongAccountId, symbol,
+            isShort ? "Buy" : "Sell", closedQty, fill.Price, result.OrderId, status, legNet, exitFee);
+        state.RealizedPnlUsdt += legNet;
+
+        var remaining = qty - closedQty;
+        if (isShort)
+        {
+            level.ShortQty = remaining;
+            level.ShortEntryFee = remaining > 0 ? entryFeeCarried - entryFee : 0m;
+        }
+        else
+        {
+            level.LongQty = remaining;
+            level.LongEntryFee = remaining > 0 ? entryFeeCarried - entryFee : 0m;
+        }
+
+        if (remaining > 0)
+            Log(strategy, "Warning",
+                $"Level #{level.Index}: {(isShort ? "short" : "long")} close on {symbol} filled " +
+                $"{Fmt(closedQty, 8)} of {Fmt(qty, 8)} — the rest is unwound next tick");
+
+        return legNet;
     }
 
     // ────────────────────────── Opening ──────────────────────────
@@ -443,14 +496,12 @@ public class ArbitrageHandler : IStrategyHandler
             return;
         }
 
-        var longPrice = PositivePrice(longResult.FilledPrice, legs.LongBook?.AskPrice, 0m);
-        var longQty = longResult.FilledQuantity ?? (longPrice > 0 ? cfg.NotionalUsdt / longPrice : 0m);
-        var longFee = longPrice * longQty * legs.LongExchange.TakerFeeRate;
-
-        // Booked as soon as it fills so the ledger reflects reality even if the pair never
-        // completes (rollback path below records the matching close).
-        RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Buy", longQty, longPrice,
-            longResult.OrderId, "Filled", commission: longFee);
+        // The service's FilledPrice/FilledQuantity are the ticker price it sized against and the
+        // quantity it sent — placeholders until the fill is read back below. The read-back waits
+        // until BOTH legs are placed: confirming the long first would widen the window in which
+        // the pair is naked.
+        var longEstPrice = PositivePrice(longResult.FilledPrice, legs.LongBook?.AskPrice, 0m);
+        var longEstQty = longResult.FilledQuantity ?? (longEstPrice > 0 ? cfg.NotionalUsdt / longEstPrice : 0m);
 
         await Task.Delay(InterOrderDelayMs, ct);
 
@@ -460,36 +511,62 @@ public class ArbitrageHandler : IStrategyHandler
             state.ConsecutiveFailures++;
             Log(strategy, "Error",
                 $"Level #{level.Index}: short leg on {legs.ShortSymbol} rejected: {Trim(shortResult.ErrorMessage)} " +
-                $"— rolling back the {Fmt(longQty, 8)} long leg (failures {state.ConsecutiveFailures})");
+                $"— rolling back the {Fmt(longEstQty, 8)} long leg (failures {state.ConsecutiveFailures})");
             _logger.LogError("Arbitrage {Id}: short open failed for level {Lvl}: {Err}",
                 strategy.Id, level.Index, shortResult.ErrorMessage);
 
-            await RollbackLongAsync(strategy, level, legs, direction, longQty, longPrice, entrySpread, state);
+            // The rollback must close what was REALLY filled, so the long is read back first.
+            var nakedLong = await ConfirmFillAsync(strategy, legs.LongExchange, legs.LongSymbol,
+                longResult.OrderId, longEstPrice, longEstQty, legs.LongFeeRate, "long", ct);
+            RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Buy", nakedLong.Quantity,
+                nakedLong.Price, longResult.OrderId, "Filled", commission: nakedLong.Fee);
+
+            await RollbackLongAsync(strategy, level, legs, direction, nakedLong, entrySpread, state, ct);
             return;
         }
 
-        var shortPrice = PositivePrice(shortResult.FilledPrice, legs.ShortBook?.BidPrice, 0m);
-        var shortQty = shortResult.FilledQuantity ?? (shortPrice > 0 ? cfg.NotionalUsdt / shortPrice : 0m);
-        var shortFee = shortPrice * shortQty * legs.ShortExchange.TakerFeeRate;
+        var shortEstPrice = PositivePrice(shortResult.FilledPrice, legs.ShortBook?.BidPrice, 0m);
+        var shortEstQty = shortResult.FilledQuantity ?? (shortEstPrice > 0 ? cfg.NotionalUsdt / shortEstPrice : 0m);
 
+        var longFill = await ConfirmFillAsync(strategy, legs.LongExchange, legs.LongSymbol,
+            longResult.OrderId, longEstPrice, longEstQty, legs.LongFeeRate, "long", ct);
+        var shortFill = await ConfirmFillAsync(strategy, legs.ShortExchange, legs.ShortSymbol,
+            shortResult.OrderId, shortEstPrice, shortEstQty, legs.ShortFeeRate, "short", ct);
+
+        var longPrice = longFill.Price;
+        var longQty = longFill.Quantity;
+        var shortPrice = shortFill.Price;
+        var shortQty = shortFill.Quantity;
+
+        RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Buy", longQty, longPrice,
+            longResult.OrderId, "Filled", commission: longFill.Fee);
         RecordTrade(strategy, legs.ShortAccountId, legs.ShortSymbol, "Sell", shortQty, shortPrice,
-            shortResult.OrderId, "Filled", commission: shortFee);
+            shortResult.OrderId, "Filled", commission: shortFill.Fee);
 
         level.IsOpen = true;
         level.ShortQty = shortQty;
         level.LongQty = longQty;
         level.ShortEntryPrice = shortPrice;
         level.LongEntryPrice = longPrice;
+        level.ShortEntryFee = shortFill.Fee;
+        level.LongEntryFee = longFill.Fee;
         level.EntrySpreadPercent = entrySpread;
         level.OpenedAt = DateTime.UtcNow;
+
+        // The spread the fills actually locked in, as opposed to the one the books promised. On a
+        // thin or stale book the two drift apart — this is the number that tells the user whether
+        // the entry threshold is doing its job.
+        var filledSpread = longPrice > 0 ? (shortPrice - longPrice) / longPrice * 100m : 0m;
 
         state.Direction = direction;
         state.ConsecutiveFailures = 0;
 
         Log(strategy, "Info",
-            $"Level #{level.Index} opened @ spread {Fmt(entrySpread, 4)}% (threshold {Fmt(cfg.EntrySpreadPercent, 4)}%): " +
+            $"Level #{level.Index} opened @ spread {Fmt(entrySpread, 4)}% (threshold {Fmt(cfg.EntrySpreadPercent, 4)}%, " +
+            $"filled at {Fmt(filledSpread, 4)}%): " +
             $"SHORT {legs.ShortSymbol} {Fmt(shortQty, 8)} @ {Fmt(shortPrice, 8)} / " +
             $"LONG {legs.LongSymbol} {Fmt(longQty, 8)} @ {Fmt(longPrice, 8)}, " +
+            $"fees {Fmt(shortFill.Fee + longFill.Fee, 4)} USDT, " +
             $"notional=${Fmt(cfg.NotionalUsdt, 2)}/leg, exit at ≤{Fmt(cfg.ExitSpreadPercent, 4)}%");
         _logger.LogInformation(
             "Arbitrage {Id}: level {Lvl} opened, dir={Dir}, spread={Spread}%",
@@ -503,34 +580,39 @@ public class ArbitrageHandler : IStrategyHandler
     /// silently dropped from bookkeeping.
     /// </summary>
     private async Task RollbackLongAsync(Strategy strategy, ArbitrageLevelState level, LegPair legs,
-        ArbitrageDirection direction, decimal longQty, decimal longPrice, decimal entrySpread,
-        ArbitrageState state)
+        ArbitrageDirection direction, Fill longFill, decimal entrySpread, ArbitrageState state,
+        CancellationToken ct)
     {
+        var longQty = longFill.Quantity;
+        var longPrice = longFill.Price;
         if (longQty <= 0) return;
 
         var result = await legs.LongExchange.CloseLongAsync(legs.LongSymbol, longQty);
         if (result.Success)
         {
-            var exit = PositivePrice(result.FilledPrice, legs.LongBook?.BidPrice, longPrice);
-            var gross = (exit - longPrice) * longQty;
-            var entryFee = longPrice * longQty * legs.LongExchange.TakerFeeRate;
-            var exitFee = exit * longQty * legs.LongExchange.TakerFeeRate;
-            var net = gross - entryFee - exitFee;
+            var estimate = PositivePrice(result.FilledPrice, legs.LongBook?.BidPrice, longPrice);
+            var exitFill = await ConfirmFillAsync(strategy, legs.LongExchange, legs.LongSymbol,
+                result.OrderId, estimate, longQty, legs.LongFeeRate, "long rollback", ct);
 
-            RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Sell", longQty, exit,
-                result.OrderId, "LegRollback", net, exitFee);
+            var gross = (exitFill.Price - longPrice) * longQty;
+            var net = gross - longFill.Fee - exitFill.Fee;
+
+            RecordTrade(strategy, legs.LongAccountId, legs.LongSymbol, "Sell", longQty, exitFill.Price,
+                result.OrderId, "LegRollback", net, exitFill.Fee);
             state.RealizedPnlUsdt += net;
 
             Log(strategy, "Warning",
-                $"Level #{level.Index}: long leg rolled back at {Fmt(exit, 8)}, cost={Fmt(net)} USDT — level not opened");
+                $"Level #{level.Index}: long leg rolled back at {Fmt(exitFill.Price, 8)}, cost={Fmt(net)} USDT — level not opened");
             return;
         }
 
         level.IsOpen = true;
         level.LongQty = longQty;
         level.LongEntryPrice = longPrice;
+        level.LongEntryFee = longFill.Fee;
         level.ShortQty = 0;
         level.ShortEntryPrice = 0;
+        level.ShortEntryFee = 0;
         level.EntrySpreadPercent = entrySpread;
         level.OpenedAt = DateTime.UtcNow;
         state.Direction = direction;
@@ -633,7 +715,9 @@ public class ArbitrageHandler : IStrategyHandler
                 PrimaryAccountId = strategy.AccountId,
                 SecondaryAccountId = secondAccount.Id,
                 PrimaryBook = await SafeBookAsync(primaryExchange, symbolA),
-                SecondaryBook = await SafeBookAsync(secondExchange, symbolB)
+                SecondaryBook = await SafeBookAsync(secondExchange, symbolB),
+                PrimaryFeeRate = state.PrimaryTakerFeeRate ?? primaryExchange.TakerFeeRate,
+                SecondaryFeeRate = state.SecondaryTakerFeeRate ?? secondExchange.TakerFeeRate
             };
 
             var legs = BuildLegs(ctx, state.Direction);
@@ -845,6 +929,132 @@ public class ArbitrageHandler : IStrategyHandler
         }
     }
 
+    // ────────────────────────── Fees and fills ──────────────────────────
+
+    /// <summary>
+    /// Asks both exchanges what taker rate they really charge these accounts, once per start and
+    /// then daily. Until an exchange answers, its service's published standard rate is used — the
+    /// gap matters: a Bybit account was observed paying 0.11% where the constant says 0.055%,
+    /// which alone flipped five "profitable" cycles negative.
+    /// </summary>
+    private async Task ResolveFeeRatesAsync(Strategy strategy, ArbitrageState state,
+        IFuturesExchangeService primaryExchange, string symbolA,
+        IFuturesExchangeService secondExchange, string symbolB)
+    {
+        var now = DateTime.UtcNow;
+        var due = state.FeeRatesResolvedAt == null ||
+                  now - state.FeeRatesResolvedAt.Value > TimeSpan.FromHours(FeeRateRefreshHours);
+        if (!due) return;
+        if (state.FeeRatesRetryAt.HasValue && now < state.FeeRatesRetryAt.Value) return;
+
+        var primary = await TryGetFeeRateAsync(strategy, primaryExchange, symbolA, "primary");
+        var secondary = await TryGetFeeRateAsync(strategy, secondExchange, symbolB, "secondary");
+
+        var changed = (primary.HasValue && primary != state.PrimaryTakerFeeRate) ||
+                      (secondary.HasValue && secondary != state.SecondaryTakerFeeRate);
+        if (primary.HasValue) state.PrimaryTakerFeeRate = primary;
+        if (secondary.HasValue) state.SecondaryTakerFeeRate = secondary;
+
+        if (primary.HasValue && secondary.HasValue)
+        {
+            state.FeeRatesResolvedAt = now;
+            state.FeeRatesRetryAt = null;
+        }
+        else
+        {
+            // Keep whatever did resolve, retry the rest soon; the constant covers the gap.
+            state.FeeRatesRetryAt = now.AddMinutes(FeeRateRetryMinutes);
+        }
+
+        if (changed)
+        {
+            var a = state.PrimaryTakerFeeRate ?? primaryExchange.TakerFeeRate;
+            var b = state.SecondaryTakerFeeRate ?? secondExchange.TakerFeeRate;
+            Log(strategy, "Info",
+                $"Taker fee rates from the exchanges: primary {Fmt(a * 100m, 4)}% / secondary {Fmt(b * 100m, 4)}% " +
+                $"— a round trip costs {Fmt((a + b) * 2m * 100m, 4)}% of notional before any spread");
+        }
+    }
+
+    private async Task<decimal?> TryGetFeeRateAsync(Strategy strategy, IFuturesExchangeService exchange,
+        string symbol, string legName)
+    {
+        try
+        {
+            var rate = await exchange.GetTakerFeeRateAsync(symbol);
+            if (rate.HasValue) return rate;
+
+            _logger.LogDebug("Arbitrage {Id}: {Leg} leg ({Symbol}) did not report a taker fee rate",
+                strategy.Id, legName, symbol);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Arbitrage {Id}: fee rate lookup failed on the {Leg} leg ({Symbol})",
+                strategy.Id, legName, symbol);
+            return null;
+        }
+    }
+
+    // One leg's execution as the exchange reports it. Confirmed=false means the exchange could not
+    // be read back and the numbers are the handler's own estimate.
+    private sealed record Fill(decimal Price, decimal Quantity, decimal Fee, bool Confirmed);
+
+    /// <summary>
+    /// Reads a market order back from the exchange: average fill price, filled quantity and the
+    /// fee actually charged. The service's own FilledPrice is only the ticker price it sized
+    /// against — on a thin book the real fill differs from it by more than the spread this bot
+    /// chases, and booking the estimate produced PnL that did not exist on the exchange.
+    /// Falls back to the estimate (price × qty × rate) when the order cannot be read back, and
+    /// says so in the strategy log so the user knows that leg's PnL is approximate.
+    /// </summary>
+    private async Task<Fill> ConfirmFillAsync(Strategy strategy, IFuturesExchangeService exchange,
+        string symbol, string? orderId, decimal estPrice, decimal estQty, decimal feeRate,
+        string legName, CancellationToken ct)
+    {
+        var estimate = new Fill(estPrice, estQty, estPrice * estQty * feeRate, Confirmed: false);
+        if (string.IsNullOrEmpty(orderId)) return estimate;
+
+        string? failure = null;
+        for (var attempt = 1; attempt <= FillConfirmAttempts; attempt++)
+        {
+            try
+            {
+                var order = await exchange.GetOrderAsync(symbol, orderId);
+                var settled = order?.Status is OrderLifecycleStatus.Filled or OrderLifecycleStatus.Cancelled
+                              or OrderLifecycleStatus.Rejected;
+
+                if (order != null && order.FilledQuantity > 0 && order.AverageFilledPrice > 0 &&
+                    (settled || attempt == FillConfirmAttempts))
+                {
+                    var fee = order.Fee ?? order.AverageFilledPrice * order.FilledQuantity * feeRate;
+                    return new Fill(order.AverageFilledPrice, order.FilledQuantity, fee, Confirmed: true);
+                }
+
+                failure = order == null ? "order not found" : $"status={order.Status}, filled={order.FilledQuantity}";
+            }
+            catch (NotSupportedException)
+            {
+                failure = "exchange service has no order lookup";
+                break;
+            }
+            catch (Exception ex)
+            {
+                failure = ex.Message;
+            }
+
+            if (attempt < FillConfirmAttempts) await Task.Delay(FillConfirmDelayMs, ct);
+        }
+
+        Log(strategy, "Warning",
+            $"{legName} leg ({symbol}): could not read order {orderId} back ({Trim(failure, 80)}) — " +
+            $"this leg is booked at the ticker estimate {Fmt(estPrice, 8)} × {Fmt(estQty, 8)}, " +
+            $"fee {Fmt(estimate.Fee, 4)} USDT");
+        _logger.LogWarning("Arbitrage {Id}: fill read-back failed for {Symbol} order {OrderId}: {Reason}",
+            strategy.Id, symbol, orderId, failure);
+        return estimate;
+    }
+
     /// <summary>
     /// Both legs' top-of-book for this tick, preferring the websocket streams.
     ///
@@ -977,6 +1187,11 @@ public class ArbitrageHandler : IStrategyHandler
         public Guid SecondaryAccountId;
         public BookTickerDto? PrimaryBook;
         public BookTickerDto? SecondaryBook;
+
+        // Effective taker rates: the exchange-reported account rate when known, else the
+        // service's published constant.
+        public decimal PrimaryFeeRate;
+        public decimal SecondaryFeeRate;
     }
 
     // Direction resolved into "which venue is the short (expensive) side". Every order in the
@@ -992,6 +1207,9 @@ public class ArbitrageHandler : IStrategyHandler
         public string LongSymbol = string.Empty;
         public Guid LongAccountId;
         public BookTickerDto? LongBook;
+
+        public decimal ShortFeeRate;
+        public decimal LongFeeRate;
 
         // Executable entry: sell the expensive venue at its bid, buy the cheap one at its ask.
         public decimal EntrySpreadPercent =>
@@ -1014,10 +1232,12 @@ public class ArbitrageHandler : IStrategyHandler
                 ShortSymbol = ctx.SecondarySymbol,
                 ShortAccountId = ctx.SecondaryAccountId,
                 ShortBook = ctx.SecondaryBook,
+                ShortFeeRate = ctx.SecondaryFeeRate,
                 LongExchange = ctx.PrimaryExchange,
                 LongSymbol = ctx.PrimarySymbol,
                 LongAccountId = ctx.PrimaryAccountId,
-                LongBook = ctx.PrimaryBook
+                LongBook = ctx.PrimaryBook,
+                LongFeeRate = ctx.PrimaryFeeRate
             }
             : new LegPair
             {
@@ -1025,10 +1245,12 @@ public class ArbitrageHandler : IStrategyHandler
                 ShortSymbol = ctx.PrimarySymbol,
                 ShortAccountId = ctx.PrimaryAccountId,
                 ShortBook = ctx.PrimaryBook,
+                ShortFeeRate = ctx.PrimaryFeeRate,
                 LongExchange = ctx.SecondaryExchange,
                 LongSymbol = ctx.SecondarySymbol,
                 LongAccountId = ctx.SecondaryAccountId,
-                LongBook = ctx.SecondaryBook
+                LongBook = ctx.SecondaryBook,
+                LongFeeRate = ctx.SecondaryFeeRate
             };
 
     // ────────────────────────── State helpers ──────────────────────────

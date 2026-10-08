@@ -72,14 +72,16 @@ export interface SimulateRequest {
   fromUtc?: string | null;
   toUtc?: string | null;
   days: number;
+  /** Timeframe of the downloaded price path ("1m".."1d"); coarser = fewer bars, lower intrabar fidelity. */
+  pathTimeframe: string;
   configJson: string;
   makerFeeRate?: number | null;
   takerFeeRate?: number | null;
-  /** Re-download the whole window from the exchange instead of serving cached 1m history. */
+  /** Re-download the whole window from the exchange instead of serving cached history. */
   bypassCache?: boolean;
 }
 
-/** Where the 1m price path came from (backend kline cache vs live download). */
+/** Where the price path came from (backend kline cache vs live download). */
 export interface SimulationHistoryStats {
   cacheUsed: boolean;
   candlesFromCache: number;
@@ -138,6 +140,40 @@ export interface SimulationSummary {
   startTime: string;
   endTime: string;
   pathCandlesProcessed: number;
+}
+
+/* ── Parameter optimization (POST /tester/optimize + polling) ── */
+
+export interface OptimizationParameterSpec {
+  /** Dot/index path into configJson, e.g. "takeProfitPercent" or "levels[0].entrySpreadPercent". */
+  path: string;
+  from?: number | null;
+  to?: number | null;
+  step?: number | null;
+  values?: number[] | null;
+}
+
+export interface OptimizeRequest extends SimulateRequest {
+  parameters: OptimizationParameterSpec[];
+}
+
+export interface OptimizationComboResult {
+  parameters: Record<string, number>;
+  summary?: SimulationSummary | null;
+  error?: string | null;
+}
+
+export interface OptimizationStatus {
+  jobId: string;
+  status: 'Queued' | 'Downloading' | 'Running' | 'Done' | 'Failed' | 'Cancelled';
+  completed: number;
+  total: number;
+  elapsedSeconds: number;
+  error?: string | null;
+  warnings: string[];
+  history?: SimulationHistoryStats | null;
+  /** Present only when status === 'Done'. */
+  results?: OptimizationComboResult[] | null;
 }
 
 export interface SimulationResult {

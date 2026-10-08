@@ -28,6 +28,14 @@ public class SimulationRunRequest
     public DateTime? ToUtc { get; set; }
     public int Days { get; set; } = 30;
 
+    /// <summary>
+    /// Timeframe of the downloaded price path ("1m", "5m", "1h", …). Coarser bars mean far fewer
+    /// candles (a 1h path is 60× lighter than 1m — long windows become cheap) but only 4 intrabar
+    /// ticks per bar, so fill fidelity drops. Must not be coarser than the strategy's own
+    /// indicator timeframe. Default "1m" — the historical behavior.
+    /// </summary>
+    public string PathTimeframe { get; set; } = "1m";
+
     public string ConfigJson { get; set; } = "{}";
 
     /// <summary>Fee overrides as raw fractions (0.0006 = 0.06%). Null → exchange defaults.</summary>
@@ -63,10 +71,10 @@ public class SimulationContext
     public string ConfigJson { get; set; } = "{}";
 
     /// <summary>
-    /// 1-minute candles over the whole simulation window, ascending by OpenTime.
-    /// This is the price path: simulators walk it candle-by-candle (see CandlePathHelper
-    /// for the intrabar tick convention) and aggregate to their strategy timeframe via
-    /// CandleAggregator when they need indicator candles.
+    /// Candles at the requested path timeframe (1m by default) over the whole simulation window,
+    /// ascending by OpenTime. This is the price path: simulators walk it candle-by-candle (see
+    /// CandlePathHelper for the intrabar tick convention) and aggregate to their strategy
+    /// timeframe via CandleAggregator when they need indicator candles.
     /// </summary>
     public List<CandleDto> PathCandles { get; set; } = new();
 
