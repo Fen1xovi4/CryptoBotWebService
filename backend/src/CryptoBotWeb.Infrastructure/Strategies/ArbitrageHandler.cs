@@ -219,6 +219,12 @@ public class ArbitrageHandler : IStrategyHandler
             SecondaryAccountId = secondAccount.Id,
             PrimaryBook = bookA,
             SecondaryBook = bookB,
+            // Stream snapshots (null for a leg served by REST this tick): the entry filter reads
+            // their update counters, the open log their age and feed lag.
+            PrimaryQuote = _quotes.TryGetQuote(primaryAccount.ExchangeType, symbolA),
+            SecondaryQuote = _quotes.TryGetQuote(secondAccount.ExchangeType, symbolB),
+            PrimaryExchangeName = primaryAccount.ExchangeType.ToString(),
+            SecondaryExchangeName = secondAccount.ExchangeType.ToString(),
             PrimaryFeeRate = state.PrimaryTakerFeeRate ?? primaryExchange.TakerFeeRate,
             SecondaryFeeRate = state.SecondaryTakerFeeRate ?? secondExchange.TakerFeeRate
         };
@@ -590,26 +596,103 @@ public class ArbitrageHandler : IStrategyHandler
 
         var legs = BuildLegs(ctx, direction);
         var entrySpread = legs.EntrySpreadPercent;
-        if (entrySpread <= 0) return;
 
         // Shallowest qualifying level first, and AT MOST ONE per tick — a spread that blows
         // through several thresholds at once still gets filled one level at a time, which both
         // rate-limits the venues and gives the operator a chance to react.
-        //
+        var next = entrySpread <= 0 ? null : state.Levels
+            .Where(l => !l.IsOpen && l.Index < levels.Count)
+            .OrderBy(l => l.Index)
+            .FirstOrDefault(l => entrySpread >= levels[l.Index].EntrySpreadPercent);
+
+        // ── Entry confirmation. A spread that exists only because one venue has not repriced
+        // yet (lead-lag during a fast move) is gone by the time the orders land; on 2026-10-08
+        // two such "1–2%" spreads filled at −0.13% and as a lone leg. A real dislocation
+        // persists. So the signal must hold for EntryConfirmSeconds AND both venues must have
+        // sent at least one fresh quote since it appeared — proof the lagging side had its
+        // chance to catch up and the spread survived it.
+        var now = DateTime.UtcNow;
+        if (next == null)
+        {
+            EndSignal(strategy, config, state, now);
+            return;
+        }
+        if (state.SignalSince == null || state.SignalDirection != direction)
+        {
+            EndSignal(strategy, config, state, now);
+            state.SignalSince = now;
+            state.SignalDirection = direction;
+            state.SignalSeqShort = legs.ShortQuote?.Seq;
+            state.SignalSeqLong = legs.LongQuote?.Seq;
+            state.SignalPeakSpread = entrySpread;
+        }
+        state.SignalPeakSpread = Math.Max(state.SignalPeakSpread, entrySpread);
+
+        var held = now - state.SignalSince.Value;
+        if (config.EntryConfirmSeconds > 0)
+        {
+            if (held.TotalSeconds < (double)config.EntryConfirmSeconds) return;
+            if (!QuoteAdvanced(legs.ShortQuote, state.SignalSeqShort) ||
+                !QuoteAdvanced(legs.LongQuote, state.SignalSeqLong)) return;
+        }
+
         // The pace is enforced in seconds, not in ticks: the loop moved from 5s to 1s, and without
         // this the same divergence would fire the whole ladder five times faster than the design
         // this cap came from.
         if (state.LastLevelOpenedAt.HasValue &&
-            (DateTime.UtcNow - state.LastLevelOpenedAt.Value).TotalSeconds < MinSecondsBetweenOpens)
+            (now - state.LastLevelOpenedAt.Value).TotalSeconds < MinSecondsBetweenOpens)
             return;
 
-        var next = state.Levels
-            .Where(l => !l.IsOpen && l.Index < levels.Count)
-            .OrderBy(l => l.Index)
-            .FirstOrDefault(l => entrySpread >= levels[l.Index].EntrySpreadPercent);
-        if (next == null) return;
+        var quoteInfo = $"signal held {held.TotalSeconds:F1}s; {DescribeQuote(legs.ShortExchangeName, legs.ShortQuote, now)}, " +
+                        $"{DescribeQuote(legs.LongExchangeName, legs.LongQuote, now)}";
 
-        await TryOpenLevelAsync(strategy, config, next, levels[next.Index], legs, direction, entrySpread, state, ct);
+        // The signal is spent on this attempt — the next level has to confirm on its own.
+        state.SignalSince = null;
+        state.SignalDirection = null;
+        state.SignalPeakSpread = 0m;
+
+        await TryOpenLevelAsync(strategy, config, next, levels[next.Index], legs, direction, entrySpread,
+            quoteInfo, state, ct);
+    }
+
+    // A REST-served leg has no stream counter; time alone then has to do.
+    private static bool QuoteAdvanced(QuoteSnapshot? quote, long? seqAtSignal) =>
+        quote == null || seqAtSignal == null || quote.Seq > seqAtSignal.Value;
+
+    private static string DescribeQuote(string exchange, QuoteSnapshot? q, DateTime nowUtc) =>
+        q == null
+            ? $"{exchange} quote via REST"
+            : $"{exchange} quote age {q.AgeMs(nowUtc):F0}ms" +
+              (q.FeedLagMs is { } lag ? $" (feed lag {lag:F0}ms)" : "");
+
+    /// <summary>
+    /// Closes the current spread signal. One that vanished before it was confirmed is counted as
+    /// filtered, and filtered signals are summarised every few minutes — that line is the evidence
+    /// the filter is earning its keep (or, if it never fires, that it is not needed).
+    /// </summary>
+    private void EndSignal(Strategy strategy, ArbitrageConfig config, ArbitrageState state, DateTime nowUtc)
+    {
+        if (state.SignalSince != null && config.EntryConfirmSeconds > 0)
+        {
+            state.FilteredSignals++;
+            state.FilteredPeakSpread = Math.Max(state.FilteredPeakSpread, state.SignalPeakSpread);
+        }
+        state.SignalSince = null;
+        state.SignalDirection = null;
+        state.SignalPeakSpread = 0m;
+
+        if (state.FilteredSignals > 0 &&
+            (state.FilteredLoggedAt == null ||
+             nowUtc - state.FilteredLoggedAt.Value >= TimeSpan.FromMinutes(QuoteFallbackWarnMinutes)))
+        {
+            Log(strategy, "Info",
+                $"Entry filter: {state.FilteredSignals} spread signal(s) vanished within " +
+                $"{Fmt(config.EntryConfirmSeconds, 1)}s and were not traded (largest {Fmt(state.FilteredPeakSpread, 4)}%) " +
+                $"— lead-lag between the venues, not a tradable spread");
+            state.FilteredLoggedAt = nowUtc;
+            state.FilteredSignals = 0;
+            state.FilteredPeakSpread = 0m;
+        }
     }
 
     /// <summary>
@@ -631,7 +714,7 @@ public class ArbitrageHandler : IStrategyHandler
     /// </summary>
     private async Task TryOpenLevelAsync(Strategy strategy, ArbitrageConfig config, ArbitrageLevelState level,
         ArbitrageLevelConfig cfg, LegPair legs, ArbitrageDirection direction, decimal entrySpread,
-        ArbitrageState state, CancellationToken ct)
+        string quoteInfo, ArbitrageState state, CancellationToken ct)
     {
         // Stamped before the orders go out, not after they succeed: a level that keeps getting
         // rejected (or keeps missing in IOC mode) must back off too.
@@ -729,7 +812,8 @@ public class ArbitrageHandler : IStrategyHandler
         {
             Log(strategy, "Warning",
                 $"Level #{level.Index}: legs filled unevenly — LONG {Fmt(longFill.Quantity, 8)} / SHORT " +
-                $"{Fmt(shortFill.Quantity, 8)} of {Fmt(qty, 8)}{(limitIoc ? " (IOC)" : "")} — squaring the pair at market");
+                $"{Fmt(shortFill.Quantity, 8)} of {Fmt(qty, 8)}{(limitIoc ? " (IOC)" : "")} at quoted {Fmt(entrySpread, 4)}% " +
+                $"— squaring the pair at market; {quoteInfo}");
 
             // A single filled leg is always trimmed (it IS the whole exposure); a small mismatch
             // between two filled legs only if it is material.
@@ -762,7 +846,7 @@ public class ArbitrageHandler : IStrategyHandler
             $"SHORT {legs.ShortSymbol} {Fmt(level.ShortQty, 8)} @ {Fmt(level.ShortEntryPrice, 8)} / " +
             $"LONG {legs.LongSymbol} {Fmt(level.LongQty, 8)} @ {Fmt(level.LongEntryPrice, 8)}, " +
             $"fees {Fmt(shortFill.Fee + longFill.Fee, 4)} USDT, " +
-            $"notional=${Fmt(cfg.NotionalUsdt, 2)}/leg, exit at ≤{Fmt(cfg.ExitSpreadPercent, 4)}%");
+            $"notional=${Fmt(cfg.NotionalUsdt, 2)}/leg, exit at ≤{Fmt(cfg.ExitSpreadPercent, 4)}%; {quoteInfo}");
         _logger.LogInformation(
             "Arbitrage {Id}: level {Lvl} opened, dir={Dir}, spread={Spread}%, filled={Filled}%",
             strategy.Id, level.Index, direction, Math.Round(entrySpread, 4), Math.Round(filledSpread, 4));
@@ -1413,6 +1497,10 @@ public class ArbitrageHandler : IStrategyHandler
         public Guid SecondaryAccountId;
         public BookTickerDto? PrimaryBook;
         public BookTickerDto? SecondaryBook;
+        public QuoteSnapshot? PrimaryQuote;
+        public QuoteSnapshot? SecondaryQuote;
+        public string PrimaryExchangeName = "A";
+        public string SecondaryExchangeName = "B";
 
         // Effective taker rates: the exchange-reported account rate when known, else the
         // service's published constant.
@@ -1433,6 +1521,10 @@ public class ArbitrageHandler : IStrategyHandler
         public string LongSymbol = string.Empty;
         public Guid LongAccountId;
         public BookTickerDto? LongBook;
+        public QuoteSnapshot? ShortQuote;
+        public QuoteSnapshot? LongQuote;
+        public string ShortExchangeName = "";
+        public string LongExchangeName = "";
 
         public decimal ShortFeeRate;
         public decimal LongFeeRate;
@@ -1458,11 +1550,15 @@ public class ArbitrageHandler : IStrategyHandler
                 ShortSymbol = ctx.SecondarySymbol,
                 ShortAccountId = ctx.SecondaryAccountId,
                 ShortBook = ctx.SecondaryBook,
+                ShortQuote = ctx.SecondaryQuote,
+                ShortExchangeName = ctx.SecondaryExchangeName,
                 ShortFeeRate = ctx.SecondaryFeeRate,
                 LongExchange = ctx.PrimaryExchange,
                 LongSymbol = ctx.PrimarySymbol,
                 LongAccountId = ctx.PrimaryAccountId,
                 LongBook = ctx.PrimaryBook,
+                LongQuote = ctx.PrimaryQuote,
+                LongExchangeName = ctx.PrimaryExchangeName,
                 LongFeeRate = ctx.PrimaryFeeRate
             }
             : new LegPair
@@ -1471,11 +1567,15 @@ public class ArbitrageHandler : IStrategyHandler
                 ShortSymbol = ctx.PrimarySymbol,
                 ShortAccountId = ctx.PrimaryAccountId,
                 ShortBook = ctx.PrimaryBook,
+                ShortQuote = ctx.PrimaryQuote,
+                ShortExchangeName = ctx.PrimaryExchangeName,
                 ShortFeeRate = ctx.PrimaryFeeRate,
                 LongExchange = ctx.SecondaryExchange,
                 LongSymbol = ctx.SecondarySymbol,
                 LongAccountId = ctx.SecondaryAccountId,
                 LongBook = ctx.SecondaryBook,
+                LongQuote = ctx.SecondaryQuote,
+                LongExchangeName = ctx.SecondaryExchangeName,
                 LongFeeRate = ctx.SecondaryFeeRate
             };
 

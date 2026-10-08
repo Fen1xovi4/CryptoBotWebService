@@ -4415,6 +4415,7 @@ interface ArbitrageCfg {
   maxConsecutiveFailures: number;
   orderMode?: 'Market' | 'LimitIoc';
   maxSlippagePercent?: number;
+  entryConfirmSeconds?: number;
 }
 
 interface ArbitrageLevelState {
@@ -5105,6 +5106,7 @@ function AddStrategyModal({
     maxConsecutiveFailures: '3',
     orderMode: 'Market' as 'Market' | 'LimitIoc',
     maxSlippagePercent: '0.05',
+    entryConfirmSeconds: '1.5',
   });
   const [arbLevels, setArbLevels] = useState<Array<{ entrySpreadPercent: string; exitSpreadPercent: string; notionalUsdt: string }>>(
     [{ entrySpreadPercent: '1', exitSpreadPercent: '0', notionalUsdt: '100' }],
@@ -5455,6 +5457,11 @@ function AddStrategyModal({
         setError('Допуск проскальзывания: от 0 до 2%');
         return;
       }
+      const entryConfirm = Number(arbForm.entryConfirmSeconds);
+      if (!(entryConfirm >= 0 && entryConfirm <= 30)) {
+        setError('Подтверждение спреда: от 0 до 30 секунд');
+        return;
+      }
       const parsedLevels = arbLevels.map((l) => ({
         entrySpreadPercent: Number(l.entrySpreadPercent),
         exitSpreadPercent: Number(l.exitSpreadPercent),
@@ -5490,6 +5497,7 @@ function AddStrategyModal({
         maxConsecutiveFailures: maxFailures,
         orderMode: arbForm.orderMode,
         maxSlippagePercent: maxSlippage,
+        entryConfirmSeconds: entryConfirm,
       });
     } else {
       configJson = JSON.stringify({
@@ -6731,6 +6739,23 @@ function AddStrategyModal({
                   : 'Обе ноги — маркет: исполнятся всегда, по той цене, что даст стакан.'}
               </p>
 
+              <div>
+                <label className={labelCls}>Подтверждение спреда, сек</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  min="0"
+                  max="30"
+                  value={arbForm.entryConfirmSeconds}
+                  onChange={(e) => setArbForm({ ...arbForm, entryConfirmSeconds: e.target.value })}
+                  className={inputCls}
+                />
+                <p className="text-xs text-text-secondary mt-1">
+                  Вход только если спред держится столько секунд и обе биржи за это время прислали свежие котировки.
+                  Отсекает «спред» на резком движении, когда одна биржа просто не успела переоценить цену. 0 — без фильтра.
+                </p>
+              </div>
+
               {/* Levels table */}
               <div>
                 <label className={labelCls}>Уровни сетки спреда</label>
@@ -7270,6 +7295,7 @@ function EditStrategyModal({
     maxConsecutiveFailures: String(cfg.maxConsecutiveFailures ?? 3),
     orderMode: (cfg.orderMode === 'LimitIoc' ? 'LimitIoc' : 'Market') as 'Market' | 'LimitIoc',
     maxSlippagePercent: String(cfg.maxSlippagePercent ?? 0.05),
+    entryConfirmSeconds: String(cfg.entryConfirmSeconds ?? 1.5),
   });
   const [arbLevels, setArbLevels] = useState<Array<{ entrySpreadPercent: string; exitSpreadPercent: string; notionalUsdt: string }>>(
     Array.isArray(cfg.levels) && cfg.levels.length > 0
@@ -7616,6 +7642,11 @@ function EditStrategyModal({
         setError('Допуск проскальзывания: от 0 до 2%');
         return;
       }
+      const entryConfirm = Number(arbForm.entryConfirmSeconds);
+      if (!(entryConfirm >= 0 && entryConfirm <= 30)) {
+        setError('Подтверждение спреда: от 0 до 30 секунд');
+        return;
+      }
       const parsedLevels = arbLevels.map((l) => ({
         entrySpreadPercent: Number(l.entrySpreadPercent),
         exitSpreadPercent: Number(l.exitSpreadPercent),
@@ -7651,6 +7682,7 @@ function EditStrategyModal({
         maxConsecutiveFailures: maxFailures,
         orderMode: arbForm.orderMode,
         maxSlippagePercent: maxSlippage,
+        entryConfirmSeconds: entryConfirm,
       });
     } else {
       configJson = JSON.stringify({
@@ -8795,6 +8827,23 @@ function EditStrategyModal({
                   ? 'Обе ноги — лимит «исполнить сразу или отменить» по котировке ± допуск: хуже допуска не исполнится, но может исполниться частично или никак. Разницу между ногами бот сразу закрывает маркетом, уровень всегда держит равные объёмы.'
                   : 'Обе ноги — маркет: исполнятся всегда, по той цене, что даст стакан.'}
               </p>
+
+              <div>
+                <label className={labelCls}>Подтверждение спреда, сек</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  min="0"
+                  max="30"
+                  value={arbForm.entryConfirmSeconds}
+                  onChange={(e) => setArbForm({ ...arbForm, entryConfirmSeconds: e.target.value })}
+                  className={inputCls}
+                />
+                <p className="text-xs text-text-secondary mt-1">
+                  Вход только если спред держится столько секунд и обе биржи за это время прислали свежие котировки.
+                  Отсекает «спред» на резком движении, когда одна биржа просто не успела переоценить цену. 0 — без фильтра.
+                </p>
+              </div>
 
               {/* Levels table */}
               <div>
