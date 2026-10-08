@@ -121,7 +121,7 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
     // toUtc to the oldest bar of each page (minus one tick) until the window is covered, the page
     // comes back empty, or the cursor stops advancing. Results are deduped by OpenTime/Timestamp
     // and returned ascending. A hard cap guards against a runaway loop on a mis-sized window.
-    private const int _rangeHardCap = 600_000; // > 365d of 1m bars (525_600) — SimulationEngine.MaxWindowDays
+    private const int _rangeHardCap = 600_000; // headroom above SimulationEngine.MaxPathCandles (530_000)
     private const int _rangePageDelayMs = 120;
     private const int _rangeMaxRetries = 6;
     private const int _rangeRetryBaseDelayMs = 500;
@@ -559,8 +559,29 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
             OrderId = order.OrderId ?? orderId,
             Status = MapOrderStatus(order.Status),
             FilledQuantity = order.QuantityFilled ?? 0m,
-            AverageFilledPrice = order.AveragePrice ?? 0m
+            AverageFilledPrice = order.AveragePrice ?? 0m,
+            // cumExecFee — positive on Bybit, in the settle coin (USDT for linear).
+            Fee = order.ExecutedFee.HasValue ? Math.Abs(order.ExecutedFee.Value) : null
         };
+    }
+
+    public async Task<decimal?> GetTakerFeeRateAsync(string symbol)
+    {
+        try
+        {
+            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+            // /v5/account/fee-rate — the account's own schedule for this contract (tier, broker
+            // and per-symbol overrides already applied), as a fraction.
+            var result = await _client.V5Api.Account.GetFeeRateAsync(Category.Linear, bybitSymbol);
+            if (!result.Success) return null;
+
+            var rate = result.Data?.List?.FirstOrDefault()?.TakerFeeRate;
+            return rate.HasValue && rate.Value > 0 ? rate.Value : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private static OrderLifecycleStatus MapOrderStatus(OrderStatus s) => s switch

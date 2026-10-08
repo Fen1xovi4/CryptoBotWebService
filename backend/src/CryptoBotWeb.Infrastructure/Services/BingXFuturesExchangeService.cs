@@ -76,7 +76,7 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
     // recent bars within the window when it holds more than `limit`. Same backward-paging shape as
     // Bybit: fix startTime=fromUtc, walk endTime down from toUtc to each page's oldest bar (minus a
     // tick) until covered / empty / no progress. Deduped by OpenTime/Timestamp, returned ascending.
-    private const int _rangeHardCap = 600_000; // > 365d of 1m bars (525_600) — SimulationEngine.MaxWindowDays
+    private const int _rangeHardCap = 600_000; // headroom above SimulationEngine.MaxPathCandles (530_000)
     private const int _rangePageDelayMs = 120;
 
     public async Task<List<CandleDto>> GetKlinesRangeAsync(
@@ -489,8 +489,27 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
             OrderId = order.OrderId.ToString(),
             Status = lifecycleStatus,
             FilledQuantity = order.QuantityFilled ?? 0m,
-            AverageFilledPrice = order.AveragePrice ?? 0m
+            AverageFilledPrice = order.AveragePrice ?? 0m,
+            // BingX reports the commission as a negative number (-0.005028) — normalised to positive.
+            Fee = order.Fee.HasValue ? Math.Abs(order.Fee.Value) : null
         };
+    }
+
+    public async Task<decimal?> GetTakerFeeRateAsync(string symbol)
+    {
+        try
+        {
+            // /openApi/swap/v2/user/commissionRate — account-wide for USDT perpetuals, as a fraction.
+            var result = await _client.PerpetualFuturesApi.Account.GetTradingFeesAsync();
+            if (!result.Success || result.Data == null) return null;
+
+            var rate = result.Data.TakerFeeRate;
+            return rate > 0 ? rate : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     public async Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol)

@@ -4435,6 +4435,14 @@ interface ArbitrageStateData {
   completedCycles: number;
   lastSpreadPercent: number | null;
   lastCheckAt: string | null;
+  // Taker rates the exchanges reported for the two accounts (fractions), null until resolved.
+  primaryTakerFeeRate?: number | null;
+  secondaryTakerFeeRate?: number | null;
+}
+
+/** "0.05%" from a fraction like 0.0005. */
+function formatFeeRate(rate: number): string {
+  return `${(rate * 100).toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}%`;
 }
 
 const ARB_DIRECTION_LABELS: Record<number, string> = {
@@ -4764,6 +4772,17 @@ function ArbitrageCard({
                     выход: {formatArbExitSpread(live, liveSpread)}
                   </span>
                 )}
+              </div>
+            )}
+
+            {/* Fee rates the exchanges actually charge these accounts — what the PnL is computed with */}
+            {state.primaryTakerFeeRate != null && state.secondaryTakerFeeRate != null && (
+              <div
+                className="font-mono text-[10px] text-text-secondary/70"
+                title="Тейкер-комиссии аккаунтов по данным бирж. Круг = вход и выход на обеих ногах"
+              >
+                комиссии: A {formatFeeRate(state.primaryTakerFeeRate)} · B {formatFeeRate(state.secondaryTakerFeeRate)}
+                {' · '}круг {formatFeeRate((state.primaryTakerFeeRate + state.secondaryTakerFeeRate) * 2)}
               </div>
             )}
 

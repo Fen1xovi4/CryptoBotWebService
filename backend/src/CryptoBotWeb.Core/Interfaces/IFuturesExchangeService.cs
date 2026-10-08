@@ -20,6 +20,17 @@ public interface IFuturesExchangeService : IDisposable
     /// </summary>
     decimal MakerFeeRate => 0.0002m;
 
+    /// <summary>
+    /// The taker fee rate the exchange actually applies to THIS account on <paramref name="symbol"/>,
+    /// as a fraction (0.00055 = 0.055%). <see cref="TakerFeeRate"/> is the published standard
+    /// tier, which is only a guess: accounts sit on different tiers, referral programs and
+    /// per-symbol schedules (a Bybit account was observed paying 0.11% where the constant says
+    /// 0.055%). Null when the exchange cannot tell us — the caller keeps using the constant.
+    /// Must not throw on transport failures; return null instead.
+    /// </summary>
+    Task<decimal?> GetTakerFeeRateAsync(string symbol) =>
+        Task.FromResult<decimal?>(null);
+
     Task<List<SymbolDto>> GetSymbolsAsync();
     Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit);
 

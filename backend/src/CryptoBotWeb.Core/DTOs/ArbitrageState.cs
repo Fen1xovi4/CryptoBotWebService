@@ -20,6 +20,13 @@ public class ArbitrageLevelState
     public decimal ShortEntryPrice { get; set; }
     public decimal LongEntryPrice { get; set; }
 
+    // Fees the exchanges actually charged on the entry orders (USDT), read back from the filled
+    // orders. Carried until the level closes so the closing PnL subtracts what was really paid,
+    // not a rate × notional guess. Zero on levels opened before this field existed — the close
+    // then falls back to the estimate.
+    public decimal ShortEntryFee { get; set; }
+    public decimal LongEntryFee { get; set; }
+
     // Actual entry spread at the moment the level opened.
     public decimal EntrySpreadPercent { get; set; }
     public DateTime? OpenedAt { get; set; }
@@ -34,6 +41,16 @@ public class ArbitrageState
     public bool LeveragePrimarySet { get; set; }
     public bool LeverageSecondarySet { get; set; }
     public DateTime? LeverageRetryAt { get; set; }
+
+    // Taker fee rates the exchanges report for these two accounts (fractions, 0.0011 = 0.11%).
+    // Resolved at start and refreshed daily; null until the exchange has answered, in which
+    // case the service's published standard rate is used. Kept in state so the card can show
+    // what the PnL was computed with, and so a restart does not re-query on every tick.
+    public decimal? PrimaryTakerFeeRate { get; set; }
+    public decimal? SecondaryTakerFeeRate { get; set; }
+    public DateTime? FeeRatesResolvedAt { get; set; }
+    public DateTime? FeeRatesRetryAt { get; set; }
+
     public ArbitrageDirection Direction { get; set; } = ArbitrageDirection.None;
     public List<ArbitrageLevelState> Levels { get; set; } = new();
 
