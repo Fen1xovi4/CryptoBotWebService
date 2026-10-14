@@ -1288,7 +1288,7 @@ export default function ActiveBotsPage() {
                 <div className="border-t border-border/50" />
 
                 {/* Actions */}
-                <div className="px-3 py-2 flex items-center gap-1">
+                <div className="px-3 py-2 flex flex-wrap items-center gap-1">
                   <button
                     onClick={() => setChartStrategy(s)}
                     title="График"
@@ -1330,7 +1330,7 @@ export default function ActiveBotsPage() {
                       </button>
                       {!s.telegramBotId && telegramBots.filter(b => b.isActive).length > 1 && (
                         <select
-                          className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                          className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                           value=""
                           onChange={(e) => {
                             if (e.target.value) {
@@ -1346,7 +1346,7 @@ export default function ActiveBotsPage() {
                       )}
                       {s.telegramBotId && (
                         <select
-                          className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                          className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                           value={s.telegramBotId}
                           onChange={(e) => {
                             setTelegramBotMutation.mutate({
@@ -1842,7 +1842,7 @@ function HuntingFundingCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -1884,7 +1884,7 @@ function HuntingFundingCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -1896,7 +1896,7 @@ function HuntingFundingCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -2148,7 +2148,7 @@ function FundingClaimCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -2190,7 +2190,7 @@ function FundingClaimCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -2202,7 +2202,7 @@ function FundingClaimCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -2537,7 +2537,7 @@ function SmaDcaCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -2578,7 +2578,7 @@ function SmaDcaCard({
             </button>
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -3225,7 +3225,7 @@ function GridFloatCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -3266,7 +3266,7 @@ function GridFloatCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -3278,7 +3278,7 @@ function GridFloatCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -3702,7 +3702,7 @@ function GridHedgeCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -3743,7 +3743,7 @@ function GridHedgeCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -3755,7 +3755,7 @@ function GridHedgeCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -4339,7 +4339,7 @@ function SmartGridHedgeCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -4380,7 +4380,7 @@ function SmartGridHedgeCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -4392,7 +4392,7 @@ function SmartGridHedgeCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -4903,7 +4903,7 @@ function ArbitrageCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onLogs}
           title="Логи"
@@ -4935,7 +4935,7 @@ function ArbitrageCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -4947,7 +4947,7 @@ function ArbitrageCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
