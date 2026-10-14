@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api/client';
+import { fetchTopBots, type TopBot } from '../api/topBots';
+import { formatPercent, formatUsd, getKeySettings, pnlColor, strategyLabel } from '../components/topBots/format';
 import { useAuthStore } from '../stores/authStore';
 
 // ---------------------------------------------------------------------------
@@ -16,33 +18,6 @@ interface Plan {
   maxExchangeAccounts: number;
   maxActiveBots: number;
   supportLevel: string;
-}
-
-interface TopBotConfig {
-  indicatorType: string;
-  indicatorLength: number;
-  takeProfitPercent: number;
-  stopLossPercent: number;
-  orderSize: number;
-  useMartingale: boolean;
-  martingaleCoeff: number;
-  onlyLong: boolean;
-  onlyShort: boolean;
-}
-
-interface TopBot {
-  id: string;
-  name: string;
-  symbol: string;
-  exchange: string;
-  strategyType: string;
-  timeframe: string;
-  realizedPnlPercent: number;
-  runningDays: number;
-  totalTrades: number;
-  winningTrades: number;
-  winRate: number;
-  config: TopBotConfig | null;
 }
 
 interface ApiPlan {
@@ -79,24 +54,17 @@ const t = {
     feature3Desc: 'PnL в реальном времени, история сделок и живые графики по каждому воркспейсу.',
 
     topBotsHeading: 'Лучшие боты',
-    topBotsProfit: 'Прибыль',
-    topBotsRunning: 'Работает',
-    topBotsDays: 'дн.',
+    topBotsReturn: 'Доходность',
+    topBotsPnl: 'Прибыль',
+    topBotsPeak: 'Макс. капитал',
     topBotsTrades: 'Сделок',
     topBotsWinRate: 'Винрейт',
+    topBotsActive: 'Работает',
+    topBotsDays: 'дн.',
     topBotsSettings: 'Настройки',
-    topBotsStatistics: 'Статистика',
-    topBotsIndicator: 'Индикатор',
-    topBotsTakeProfit: 'Тейк-профит',
-    topBotsStopLoss: 'Стоп-лосс',
-    topBotsOrderSize: 'Размер ордера',
-    topBotsMartingale: 'Мартингейл',
-    topBotsDirection: 'Направление',
-    topBotsMartingaleYes: 'Да',
-    topBotsMartingaleNo: 'Нет',
-    topBotsDirectionLong: 'Только лонг',
-    topBotsDirectionShort: 'Только шорт',
-    topBotsDirectionBoth: 'Оба направления',
+    topBotsCaption:
+      'Доходность = реализованная прибыль за 30 дней / максимальный капитал, вложенный за этот период',
+    topBotsViewAll: 'Смотреть все',
 
     pricingHeading: 'Выберите тариф',
     pricingPopular: 'Популярный',
@@ -130,24 +98,17 @@ const t = {
     feature3Desc: 'Live PnL tracking, trade history and real-time charts per workspace.',
 
     topBotsHeading: 'Top Bots',
-    topBotsProfit: 'Profit',
-    topBotsRunning: 'Running',
-    topBotsDays: 'd',
+    topBotsReturn: 'Return',
+    topBotsPnl: 'Profit',
+    topBotsPeak: 'Peak capital',
     topBotsTrades: 'Trades',
     topBotsWinRate: 'Win Rate',
+    topBotsActive: 'Active',
+    topBotsDays: 'd',
     topBotsSettings: 'Settings',
-    topBotsStatistics: 'Statistics',
-    topBotsIndicator: 'Indicator',
-    topBotsTakeProfit: 'Take Profit',
-    topBotsStopLoss: 'Stop Loss',
-    topBotsOrderSize: 'Order Size',
-    topBotsMartingale: 'Martingale',
-    topBotsDirection: 'Direction',
-    topBotsMartingaleYes: 'Yes',
-    topBotsMartingaleNo: 'No',
-    topBotsDirectionLong: 'Long only',
-    topBotsDirectionShort: 'Short only',
-    topBotsDirectionBoth: 'Both',
+    topBotsCaption:
+      'Return = realized profit over 30 days / peak capital invested during that period',
+    topBotsViewAll: 'View all',
 
     pricingHeading: 'Choose Your Plan',
     pricingPopular: 'Popular',
@@ -386,156 +347,77 @@ function RankBadge({ rank }: { rank: number }) {
 interface TopBotCardProps {
   bot: TopBot;
   rank: number;
+  lang: Lang;
   tr: (typeof t)['ru'] | (typeof t)['en'];
 }
 
-function TopBotCard({ bot, rank, tr }: TopBotCardProps) {
-  const [expanded, setExpanded] = useState(false);
-
+function TopBotCard({ bot, rank, lang, tr }: TopBotCardProps) {
   const gradientClass =
     rank <= 3
       ? `bg-gradient-to-b ${RANK_COLORS[rank - 1]}`
       : 'bg-bg-secondary border-border';
-
-  const pnlFormatted =
-    bot.realizedPnlPercent >= 0
-      ? `+${bot.realizedPnlPercent.toFixed(2)}%`
-      : `${bot.realizedPnlPercent.toFixed(2)}%`;
-
-  const winRateFormatted = `${bot.winRate.toFixed(1)}%`;
-
-  function directionLabel(cfg: TopBotConfig): string {
-    if (cfg.onlyLong) return tr.topBotsDirectionLong;
-    if (cfg.onlyShort) return tr.topBotsDirectionShort;
-    return tr.topBotsDirectionBoth;
-  }
+  const settings = getKeySettings(bot, lang);
 
   return (
     <article
       className={`relative flex flex-col rounded-2xl border p-5 transition-colors hover:border-accent-blue/40 ${gradientClass}`}
     >
-      {/* Header row */}
       <div className="flex items-start justify-between gap-2 mb-3">
         <div className="flex items-center gap-2 min-w-0">
           <RankBadge rank={rank} />
-          <span className="text-sm font-semibold text-text-primary truncate">{bot.name}</span>
+          <span className="text-sm font-semibold text-text-primary truncate">{strategyLabel(bot.strategyType)}</span>
         </div>
         <span className="shrink-0 text-[11px] font-medium bg-accent-blue/10 text-accent-blue px-2 py-0.5 rounded-full">
           {bot.exchange}
         </span>
       </div>
 
-      {/* Symbol + timeframe */}
       <div className="flex items-center gap-2 mb-4">
         <span className="text-xs text-text-secondary font-mono bg-bg-tertiary px-2 py-0.5 rounded">
           {bot.symbol}
         </span>
-        <span className="text-xs text-text-secondary">{bot.timeframe}</span>
+        {bot.timeframe && <span className="text-xs text-text-secondary">{bot.timeframe}</span>}
       </div>
 
-      {/* Stats row */}
-      <div className="grid grid-cols-4 gap-2 mb-4">
-        {/* PnL */}
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[10px] uppercase tracking-wider text-text-secondary font-medium">
-            {tr.topBotsProfit}
-          </span>
-          <span
-            className={`text-base font-bold leading-tight ${
-              bot.realizedPnlPercent >= 0 ? 'text-accent-green' : 'text-accent-red'
-            }`}
-          >
-            {pnlFormatted}
-          </span>
-        </div>
-
-        {/* Running time */}
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[10px] uppercase tracking-wider text-text-secondary font-medium">
-            {tr.topBotsRunning}
-          </span>
-          <span className="text-base font-bold text-text-primary leading-tight">
-            {bot.runningDays}{tr.topBotsDays}
-          </span>
-        </div>
-
-        {/* Trades */}
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[10px] uppercase tracking-wider text-text-secondary font-medium">
-            {tr.topBotsTrades}
-          </span>
-          <span className="text-base font-bold text-text-primary leading-tight">
-            {bot.totalTrades}
-          </span>
-        </div>
-
-        {/* Win rate */}
-        <div className="flex flex-col gap-0.5">
-          <span className="text-[10px] uppercase tracking-wider text-text-secondary font-medium">
-            {tr.topBotsWinRate}
-          </span>
-          <span className="text-base font-bold text-accent-blue leading-tight">
-            {winRateFormatted}
-          </span>
+      <div className="mb-4">
+        <span className="text-[10px] uppercase tracking-wider text-text-secondary font-medium">
+          {tr.topBotsReturn}
+        </span>
+        <div className={`text-3xl font-extrabold leading-tight ${pnlColor(bot.returnPercent)}`}>
+          {formatPercent(bot.returnPercent)}
         </div>
       </div>
 
-      {/* Expandable config */}
-      {bot.config && (
-        <div>
-          <button
-            type="button"
-            onClick={() => setExpanded((v) => !v)}
-            aria-expanded={expanded}
-            className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors w-full"
-          >
-            <svg
-              className={`w-3.5 h-3.5 shrink-0 transition-transform duration-200 ${expanded ? 'rotate-90' : ''}`}
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2.5}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-            </svg>
-            <span>{tr.topBotsSettings}</span>
-          </button>
+      <div className="grid grid-cols-3 gap-2 mb-4">
+        <Stat label={tr.topBotsPnl} value={formatUsd(bot.pnlUsd, true)} valueClass={pnlColor(bot.pnlUsd)} />
+        <Stat label={tr.topBotsPeak} value={formatUsd(bot.peakCapitalUsd)} />
+        <Stat label={tr.topBotsActive} value={`${bot.activeDays}${tr.topBotsDays}`} />
+        <Stat label={tr.topBotsTrades} value={String(bot.periodClosedTrades)} />
+        <Stat label={tr.topBotsWinRate} value={`${bot.periodWinRate.toFixed(1)}%`} valueClass="text-accent-blue" />
+      </div>
 
-          {expanded && (
-            <div className="mt-3 pt-3 border-t border-border grid grid-cols-2 gap-x-4 gap-y-2">
-              <ConfigRow
-                label={tr.topBotsIndicator}
-                value={`${bot.config.indicatorType} ${bot.config.indicatorLength}`}
-              />
-              <ConfigRow
-                label={tr.topBotsTakeProfit}
-                value={`${bot.config.takeProfitPercent}%`}
-              />
-              <ConfigRow
-                label={tr.topBotsStopLoss}
-                value={`${bot.config.stopLossPercent}%`}
-              />
-              <ConfigRow
-                label={tr.topBotsOrderSize}
-                value={`$${bot.config.orderSize}`}
-              />
-              <ConfigRow
-                label={tr.topBotsMartingale}
-                value={
-                  bot.config.useMartingale
-                    ? `${tr.topBotsMartingaleYes} ×${bot.config.martingaleCoeff}`
-                    : tr.topBotsMartingaleNo
-                }
-              />
-              <ConfigRow
-                label={tr.topBotsDirection}
-                value={directionLabel(bot.config)}
-              />
-            </div>
-          )}
+      {settings.length > 0 && (
+        <div className="pt-3 border-t border-border">
+          <p className="text-[10px] uppercase tracking-wider text-text-secondary font-medium mb-2">
+            {tr.topBotsSettings}
+          </p>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+            {settings.map((s) => (
+              <ConfigRow key={s.label} label={s.label} value={s.value} />
+            ))}
+          </div>
         </div>
       )}
     </article>
+  );
+}
+
+function Stat({ label, value, valueClass = 'text-text-primary' }: { label: string; value: string; valueClass?: string }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="text-[10px] uppercase tracking-wider text-text-secondary font-medium">{label}</span>
+      <span className={`text-sm font-bold leading-tight ${valueClass}`}>{value}</span>
+    </div>
   );
 }
 
@@ -543,7 +425,7 @@ function ConfigRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex flex-col gap-0.5">
       <span className="text-[10px] uppercase tracking-wider text-text-secondary">{label}</span>
-      <span className="text-xs font-medium text-text-primary">{value}</span>
+      <span className="text-xs font-medium text-text-primary break-words">{value}</span>
     </div>
   );
 }
@@ -569,13 +451,12 @@ export default function LandingPage() {
     localStorage.setItem('landing-lang', lang);
   }, [lang]);
 
-  // Fetch top bots
+  // Fetch top bots (30 days, top 5)
   useEffect(() => {
-    api
-      .get<TopBot[]>('/strategies/top')
+    fetchTopBots(30, 5)
       .then((res) => {
-        if (Array.isArray(res.data) && res.data.length > 0) {
-          setTopBots(res.data.slice(0, 6));
+        if (Array.isArray(res.bots) && res.bots.length > 0) {
+          setTopBots(res.bots.slice(0, 5));
         }
       })
       .catch(() => {
@@ -785,7 +666,7 @@ export default function LandingPage() {
       {topBots.length > 0 && (
         <section className="py-20 px-4 sm:px-6">
           <div className="max-w-6xl mx-auto">
-            <div className="flex items-center justify-center gap-3 mb-12">
+            <div className="flex items-center justify-center gap-3 mb-4">
               {/* Trophy icon */}
               <svg
                 className="w-7 h-7 text-yellow-400 shrink-0"
@@ -799,11 +680,23 @@ export default function LandingPage() {
                 {tr.topBotsHeading}
               </h2>
             </div>
+            <p className="text-center text-xs sm:text-sm text-text-secondary max-w-2xl mx-auto mb-10">
+              {tr.topBotsCaption}
+            </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
               {topBots.map((bot, index) => (
-                <TopBotCard key={bot.id} bot={bot} rank={index + 1} tr={tr} />
+                <TopBotCard key={bot.id} bot={bot} rank={index + 1} lang={lang} tr={tr} />
               ))}
+            </div>
+
+            <div className="mt-8 flex justify-center">
+              <Link
+                to={isAuthenticated ? '/top-bots' : '/register'}
+                className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-semibold border border-accent-blue/40 text-accent-blue hover:bg-accent-blue/10 transition-colors"
+              >
+                {tr.topBotsViewAll}
+              </Link>
             </div>
           </div>
         </section>

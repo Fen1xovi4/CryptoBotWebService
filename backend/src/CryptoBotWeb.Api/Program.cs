@@ -46,6 +46,10 @@ builder.Services.AddSingleton<IProxyHealthTracker, ProxyHealthTracker>();
 // Exchange factory
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
 
+// Public "top bots" leaderboard (landing page + Top bots tab); cached in memory per period.
+builder.Services.AddMemoryCache();
+builder.Services.AddScoped<TopBotsService>();
+
 // GridHedge handler — used by the manual "Close" endpoint to invoke the same exit logic the
 // worker runs on a natural exit trigger. Scoped because it relies on the scoped AppDbContext.
 builder.Services.AddScoped<GridHedgeHandler>();
