@@ -11,7 +11,7 @@ namespace CryptoBotWeb.Core.Interfaces;
 /// the opposite of what a websocket needs. Streams live here instead: subscribed on demand,
 /// kept warm while someone keeps asking for them, dropped when nobody has for a while.
 ///
-/// V1 consumer is FuturesArbitrage only — the other strategies keep polling REST.
+/// Consumers: FuturesArbitrage (trading quotes) and GridFloat (take-profit mark); the rest poll REST.
 /// </summary>
 public interface IQuoteStreamService
 {

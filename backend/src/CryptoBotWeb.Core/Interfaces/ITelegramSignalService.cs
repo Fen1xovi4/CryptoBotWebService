@@ -15,4 +15,8 @@ public interface ITelegramSignalService
     Task SendPositionClosedSignalAsync(Strategy strategy, string symbol, string direction,
         decimal pnlDollar, decimal pnlPercent,
         CancellationToken ct = default);
+
+    /// <summary>Free-form operational alert (e.g. a bot stopped itself) to the strategy's Telegram bot.</summary>
+    Task SendStrategyAlertAsync(Strategy strategy, string title, string details,
+        CancellationToken ct = default);
 }

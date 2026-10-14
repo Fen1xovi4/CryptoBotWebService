@@ -171,4 +171,13 @@ public class SimulationRunSummary
     public DateTime StartTime { get; set; }
     public DateTime EndTime { get; set; }
     public int PathCandlesProcessed { get; set; }
+
+    /// <summary>Strategy-specific figures the common fields can't express, shown as extra stat cards.</summary>
+    public List<SimSummaryExtra> Extras { get; set; } = new();
+}
+
+public class SimSummaryExtra
+{
+    public string Label { get; set; } = string.Empty;
+    public string Value { get; set; } = string.Empty;
 }

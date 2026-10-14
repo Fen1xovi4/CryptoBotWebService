@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using CryptoBotWeb.Core.Entities;
@@ -75,6 +76,17 @@ public class TelegramSignalService : ITelegramSignalService
         message.AppendLine(profit ? "Полностью закрыта ✅" : "Полностью закрыта ❗");
         message.AppendLine(
             $"PnL: <b>{sign}{FormatUsd(pnlDollar)} USDT</b> ({sign}{pnlPercent.ToString("0.##", CultureInfo.InvariantCulture)}%)");
+
+        await BroadcastAsync(strategy, message.ToString(), ct);
+    }
+
+    public async Task SendStrategyAlertAsync(Strategy strategy, string title, string details,
+        CancellationToken ct = default)
+    {
+        var message = new StringBuilder();
+        message.AppendLine($"⚠️ <b>{WebUtility.HtmlEncode(title)}</b>");
+        message.AppendLine($"Бот: <code>{WebUtility.HtmlEncode(strategy.Name)}</code>");
+        message.AppendLine(WebUtility.HtmlEncode(details));
 
         await BroadcastAsync(strategy, message.ToString(), ct);
     }

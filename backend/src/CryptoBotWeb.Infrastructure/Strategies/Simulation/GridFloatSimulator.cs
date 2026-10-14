@@ -103,6 +103,29 @@ public class GridFloatSimulator : IStrategySimulator
         DateTime? lastProcessedTfClose = null;
         DateTime? stopTime = null;
 
+        // Restart-on-range-exit (stake ladder) bookkeeping. `cfg` is the config the grid is built
+        // from at the current stage — the config itself outside the mode.
+        var restartMode = config.RestartOnRangeExit;
+        int stage = 0;
+        var cfg = GridFloatStakeLadder.ForStage(config, stage);
+        decimal seriesBase = 0m;   // RealizedCash() when the current series started
+        int rangeExits = 0, stakeResets = 0, maxStage = 0;
+        decimal worstSeries = 0m;  // deepest series PnL (realized + unrealized) seen
+
+        void SetStage(int s)
+        {
+            stage = s;
+            cfg = GridFloatStakeLadder.ForStage(config, s);
+            if (s > maxStage) maxStage = s;
+        }
+        void ResetSeries()
+        {
+            if (stage > 0) stakeResets++;
+            SetStage(0);
+            seriesBase = RealizedCash();
+        }
+        decimal SeriesPnl(decimal price) => RealizedCash() - seriesBase + Unrealized(price);
+
         decimal RealizedCash() => grossRealized - feesTotal;
         decimal Unrealized(decimal price) => state.Batches.Sum(b =>
             isLong ? b.Qty * (price - b.FillPrice) : b.Qty * (b.FillPrice - price));
@@ -115,7 +138,7 @@ public class GridFloatSimulator : IStrategySimulator
         // ── Anchor open (market at the closed timeframe bar's close) ──────────────
         void OpenAnchor(decimal closePrice, DateTime when)
         {
-            var anchorSize = config.Tiers[0].SizeUsdt;
+            var anchorSize = cfg.Tiers[0].SizeUsdt;
             var fillPrice = closePrice;
             if (fillPrice <= 0) return;
             var fillQty = anchorSize / fillPrice;
@@ -123,15 +146,15 @@ public class GridFloatSimulator : IStrategySimulator
 
             state.AnchorPrice = fillPrice;
 
-            if (config.UseStaticRange && !state.StaticBoundsInitialized)
+            if (cfg.UseStaticRange && !state.StaticBoundsInitialized)
             {
-                var maxRangePct = config.Tiers[^1].UpToPercent;
+                var maxRangePct = cfg.Tiers[^1].UpToPercent;
                 if (isLong) state.StaticLowerBound = fillPrice * (1m - maxRangePct / 100m);
                 else state.StaticUpperBound = fillPrice * (1m + maxRangePct / 100m);
                 state.StaticBoundsInitialized = true;
             }
 
-            var tpStep = EffectiveTpStep(config, fillPrice, fillPrice);
+            var tpStep = EffectiveTpStep(cfg, fillPrice, fillPrice);
             var tpPrice = ComputeTp(fillPrice, tpStep, isLong);
             state.Batches.Add(new GridFloatBatch
             {
@@ -166,7 +189,7 @@ public class GridFloatSimulator : IStrategySimulator
         void HealMissingDcas()
         {
             if (state.AnchorPrice <= 0) return;
-            var levels = ComputeDcaLevels(config, state);
+            var levels = ComputeDcaLevels(cfg, state);
             if (levels.Count == 0) return;
             var occupied = new HashSet<int>();
             foreach (var b in state.Batches) occupied.Add(b.LevelIdx);
@@ -189,6 +212,11 @@ public class GridFloatSimulator : IStrategySimulator
             state.AnchorPrice = 0;
             state.OpenAfterTime = when; // wait one bar of config.Timeframe before re-anchoring
             completedCycles++;
+
+            // Stake ladder: a grid that closed by its own TPs resets the stake once the series is
+            // back to ≥ 0 — unless a take-profit is set, in which case only the target resets it.
+            if (restartMode && !config.TakeProfitEnabled && RealizedCash() - seriesBase >= 0m)
+                ResetSeries();
         }
 
         // ── Anchor gate run at each closed timeframe bar ──
@@ -205,12 +233,13 @@ public class GridFloatSimulator : IStrategySimulator
                 state.OpenAfterTime = null;
             }
 
-            if (state.Batches.Count == 0 && state.DcaOrders.Count == 0 && !state.OpenAfterTime.HasValue)
+            if (state.Batches.Count == 0 && state.DcaOrders.Count == 0 && !state.OpenAfterTime.HasValue
+                && !GridFloatStakeLadder.IsAnchorBlocked(config, closePrice, isLong))
                 OpenAnchor(closePrice, tfClose);
         }
 
-        // ── Force close everything at market, then stop the sim ──
-        void ForceCloseAll(decimal price, DateTime when)
+        // ── Force close everything at market (take-profit target or stake-ladder range exit) ──
+        void ForceCloseAll(decimal price, DateTime when, string reason = "TakeProfitClose")
         {
             foreach (var b in state.Batches.ToList())
             {
@@ -237,7 +266,7 @@ public class GridFloatSimulator : IStrategySimulator
                     FeeUsd = fee,
                     PnlUsd = net,
                     PnlPercent = pnlPct,
-                    Reason = $"TakeProfitClose#{b.LevelIdx}",
+                    Reason = $"{reason}#{b.LevelIdx}",
                 });
             }
             state.Batches.Clear();
@@ -261,7 +290,7 @@ public class GridFloatSimulator : IStrategySimulator
                 var fee = notional * makerFee; // resting limit → maker
                 feesTotal += fee;
 
-                var tpStep = EffectiveTpStep(config, state.AnchorPrice, fillPrice);
+                var tpStep = EffectiveTpStep(cfg, state.AnchorPrice, fillPrice);
                 var tpPrice = ComputeTp(fillPrice, tpStep, isLong);
                 state.Batches.Add(new GridFloatBatch
                 {
@@ -332,6 +361,49 @@ public class GridFloatSimulator : IStrategySimulator
 
             // 3. Re-arm any freed slot inside the grid (classic-grid oscillation capture).
             HealMissingDcas();
+
+            if (restartMode)
+            {
+                var series = SeriesPnl(price);
+                if (series < worstSeries) worstSeries = series;
+
+                // 4a. Series take-profit: close everything and start over at the base stake.
+                if (config.TakeProfitEnabled && config.TakeProfitTargetUsd > 0m
+                    && series >= config.TakeProfitTargetUsd)
+                {
+                    if (state.Batches.Count > 0)
+                    {
+                        ForceCloseAll(price, when, "SeriesTakeProfit");
+                        state.OpenAfterTime = when;
+                        completedCycles++;
+                    }
+                    ResetSeries();
+                    return false;
+                }
+
+                // 4b. Range exit on the losing side: close everything, next stake, or stop when
+                //     the stake list is exhausted.
+                if (state.Batches.Count > 0
+                    && GridFloatStakeLadder.IsOutsideRange(config, state.AnchorPrice, price, isLong))
+                {
+                    ForceCloseAll(price, when, "RangeExit");
+                    rangeExits++;
+                    completedCycles++;
+                    state.OpenAfterTime = when;
+
+                    if (stage + 1 >= config.Tiers.Count)
+                    {
+                        stopTime = when;
+                        result.Warnings.Add(
+                            $"GridFloat: выход из диапазона на последней ступени ({config.Tiers[stage].SizeUsdt}$) — " +
+                            $"позиции закрыты, бот остановлен в {when:yyyy-MM-dd HH:mm:ss} UTC " +
+                            $"(результат серии {Math.Round(RealizedCash() - seriesBase, 2)}$).");
+                        return true;
+                    }
+                    SetStage(stage + 1);
+                }
+                return false;
+            }
 
             // 4. Take-profit target: aggregate realised (net, close-fee basis to mirror handler)
             //    plus mark-to-market unrealised. Fires a market close and stops the sim.
@@ -449,6 +521,20 @@ public class GridFloatSimulator : IStrategySimulator
             EndTime = stopTime ?? candles[^1].CloseTime,
             PathCandlesProcessed = processed,
         };
+
+        if (restartMode)
+        {
+            var leverage = Math.Max(1, config.Leverage);
+            result.Summary.Extras.AddRange(new[]
+            {
+                new SimSummaryExtra { Label = "Выходов из диапазона", Value = rangeExits.ToString() },
+                new SimSummaryExtra { Label = "Макс. ступень", Value = $"{maxStage + 1} из {config.Tiers.Count} ({config.Tiers[maxStage].SizeUsdt}$)" },
+                new SimSummaryExtra { Label = "Сбросов на базу", Value = stakeResets.ToString() },
+                new SimSummaryExtra { Label = "Худшая серия", Value = $"{Math.Round(worstSeries, 2)}$" },
+                new SimSummaryExtra { Label = "Ступень в конце", Value = $"{stage + 1} (серия {Math.Round(SeriesPnl(lastTickPrice), 2)}$)" },
+                new SimSummaryExtra { Label = $"Маржа на пике (x{leverage})", Value = $"{Math.Round(maxNotional / leverage, 2)}$" },
+            });
+        }
 
         return result;
     }

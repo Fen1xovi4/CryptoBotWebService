@@ -653,7 +653,7 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         }
     }
 
-    private static OrderLifecycleStatus MapOrderStatus(OrderStatus s) => s switch
+    internal static OrderLifecycleStatus MapOrderStatus(OrderStatus s) => s switch
     {
         OrderStatus.New or OrderStatus.Created or OrderStatus.Active or OrderStatus.Untriggered => OrderLifecycleStatus.Open,
         OrderStatus.PartiallyFilled => OrderLifecycleStatus.PartiallyFilled,
@@ -728,13 +728,26 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         _ => TimeSpan.FromHours(1)
     };
 
+    // Lot rules change rarely and were fetched on every grid tick (reconcile) and every order —
+    // same process-wide cache idea as _rulesCache. Only real answers are cached; the 0.001
+    // fallback is not, so a failed lookup is retried next time.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, decimal QtyStep, decimal MinQty)>
+        _symbolInfoCache = new();
+
     private async Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string bybitSymbol)
     {
+        if (_symbolInfoCache.TryGetValue(bybitSymbol, out var hit) && DateTime.UtcNow - hit.At < _rulesCacheTtl)
+            return (hit.QtyStep, hit.MinQty);
+
         var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(Category.Linear, bybitSymbol);
         if (result.Success && result.Data?.List?.Any() == true)
         {
             var info = result.Data.List.First();
-            return (info.LotSizeFilter?.QuantityStep ?? 0.001m, info.LotSizeFilter?.MinOrderQuantity ?? 0m);
+            var step = info.LotSizeFilter?.QuantityStep ?? 0.001m;
+            var min = info.LotSizeFilter?.MinOrderQuantity ?? 0m;
+            if (info.LotSizeFilter?.QuantityStep is > 0)
+                _symbolInfoCache[bybitSymbol] = (DateTime.UtcNow, step, min);
+            return (step, min);
         }
         return (0.001m, 0m);
     }

@@ -2656,6 +2656,9 @@ interface GridFloatCfg {
   useStaticRange: boolean;
   takeProfitEnabled?: boolean;
   takeProfitTargetUsd?: number;
+  // Stake-ladder mode: grid from T1 only, tiers become stake steps on range exit.
+  restartOnRangeExit?: boolean;
+  anchorPriceLimit?: number | null;
   // Legacy fields (read-only, kept for back-compat when reading old strategies from API).
   baseSizeUsdt?: number;
   rangePercent?: number;
@@ -2719,6 +2722,10 @@ interface GridFloatStateData {
   openAfterTime: string | null;
   lastPrice: number | null;
   realizedPnlDollar: number;
+  stakeStage?: number;
+  seriesRealizedPnl?: number;
+  rangeExitCount?: number;
+  anchorBlockedSince?: string | null;
 }
 
 function GridFloatCard({
@@ -2855,14 +2862,19 @@ function GridFloatCard({
     }
     return total;
   };
+  // Restart-on-range-exit mode: the grid is built from T1's geometry only; the current stage
+  // only changes the per-order stake (tiers[stakeStage].sizeUsdt).
+  const restartMode = normalizedCfg?.restartOnRangeExit === true;
+  const stakeStage = Math.min(Math.max(state?.stakeStage ?? 0, 0), Math.max(tiers.length - 1, 0));
+  const currentStake = tiers.length > 0 ? tiers[stakeStage].sizeUsdt : 0;
   const previewSlots = draftValid && normalizedCfg
-    ? countSlots(parsedDraft, normalizedCfg.dcaStepPercent)
+    ? countSlots(restartMode ? parsedDraft.slice(0, 1) : parsedDraft, normalizedCfg.dcaStepPercent)
     : 0;
   const currentSlots = normalizedCfg
     ? countSlots(
-        tiers.map((t) => ({
+        (restartMode ? tiers.slice(0, 1) : tiers).map((t) => ({
           upToPercent: t.upToPercent,
-          sizeUsdt: t.sizeUsdt,
+          sizeUsdt: restartMode ? currentStake : t.sizeUsdt,
           dcaStepPercent: t.dcaStepPercent ?? null,
           tpStepPercent: t.tpStepPercent ?? null,
         })),
@@ -2967,6 +2979,36 @@ function GridFloatCard({
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
             {normalizedCfg.timeframe}
           </span>
+        </div>
+      )}
+
+      {/* Stake ladder / anchor limit info */}
+      {normalizedCfg && (restartMode || normalizedCfg.anchorPriceLimit != null) && (
+        <div className="px-4 pb-2 space-y-0.5 text-[11px] text-text-secondary">
+          {restartMode && (
+            <>
+              <div>
+                Ступень {stakeStage + 1} из {tiers.length} · ставка{' '}
+                <span className="font-mono text-text-primary">${currentStake}</span>
+              </div>
+              <div>
+                Серия:{' '}
+                <span className={`font-mono ${(state?.seriesRealizedPnl ?? 0) >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
+                  {(state?.seriesRealizedPnl ?? 0) >= 0 ? '+' : '-'}${Math.abs(state?.seriesRealizedPnl ?? 0).toFixed(2)}
+                </span>
+              </div>
+              <div>Выходов из диапазона: {state?.rangeExitCount ?? 0}</div>
+            </>
+          )}
+          {normalizedCfg.anchorPriceLimit != null && (
+            <div>
+              Лимит якоря: {normalizedCfg.direction === 'Short' ? '≥' : '≤'}{' '}
+              <span className="font-mono text-text-primary">{normalizedCfg.anchorPriceLimit}</span>
+            </div>
+          )}
+          {state?.anchorBlockedSince && (
+            <div className="text-accent-yellow">Якорь на паузе: цена за лимитом</div>
+          )}
         </div>
       )}
 
@@ -5077,6 +5119,8 @@ function AddStrategyModal({
     useStaticRange: false,
     takeProfitEnabled: false,
     takeProfitTargetUsd: '100',
+    restartOnRangeExit: false,
+    anchorPriceLimit: '',
   });
   const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(
     [{ upTo: '10', size: '100', dca: '', tp: '' }],
@@ -5326,6 +5370,12 @@ function AddStrategyModal({
         setError('Цель Take-Profit должна быть > 0 USDT');
         return;
       }
+      const gfAnchorLimitRaw = gfForm.anchorPriceLimit.trim();
+      const gfAnchorLimit = gfAnchorLimitRaw === '' ? null : Number(gfAnchorLimitRaw);
+      if (gfAnchorLimit !== null && !(gfAnchorLimit > 0)) {
+        setError('Лимит цены якоря должен быть > 0 (или оставьте пустым)');
+        return;
+      }
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: gfForm.timeframe,
@@ -5334,9 +5384,11 @@ function AddStrategyModal({
         dcaStepPercent: Number(gfForm.dcaStepPercent),
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
-        useStaticRange: gfForm.useStaticRange,
+        useStaticRange: gfForm.restartOnRangeExit ? false : gfForm.useStaticRange,
         takeProfitEnabled: gfForm.takeProfitEnabled,
         takeProfitTargetUsd: gfTpTarget,
+        restartOnRangeExit: gfForm.restartOnRangeExit,
+        anchorPriceLimit: gfAnchorLimit,
       });
     } else if (strategyType === 'GridHedge') {
       if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
@@ -6042,7 +6094,11 @@ function AddStrategyModal({
 
               {/* Tiers — expanding zones, each can override DCA/TP step */}
               <div>
-                <label className={labelCls}>Ярусы сетки</label>
+                <label className={labelCls}>
+                  {gfForm.restartOnRangeExit
+                    ? 'Ступени ставки (от T2 используется только $, ярусы держите по возрастанию До %)'
+                    : 'Ярусы сетки'}
+                </label>
                 <div className="rounded-lg border border-border overflow-hidden">
                   <table className="w-full text-xs">
                     <thead>
@@ -6146,23 +6202,63 @@ function AddStrategyModal({
                 </p>
               </div>
 
-              {/* Static range toggle */}
+              {/* Restart on range exit (stake ladder) */}
               <label className="flex items-start gap-2 cursor-pointer select-none">
                 <input
                   type="checkbox"
-                  checked={gfForm.useStaticRange}
-                  onChange={(e) => setGfForm({ ...gfForm, useStaticRange: e.target.checked })}
+                  checked={gfForm.restartOnRangeExit}
+                  onChange={(e) => setGfForm({ ...gfForm, restartOnRangeExit: e.target.checked })}
                   className="w-4 h-4 mt-0.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
                 />
                 <div>
-                  <span className="text-sm font-medium text-text-primary">Статический диапазон</span>
+                  <span className="text-sm font-medium text-text-primary">Перезапуск при выходе из диапазона</span>
                   <p className="text-xs text-text-secondary mt-0.5">
-                    Граница фиксируется на первом якоре. На новых якорях число DCA-уровней
-                    меняется (например 9, 10, 11) — сетка не "плавает" вместе с ценой. По
-                    умолчанию (выключено) — динамический диапазон: каждый новый якорь пересчитывает сетку.
+                    Сетка строится только по T1 (ширина, шаги DCA/TP). Ярусы становятся ступенями ставки: при выходе цены
+                    за нижнюю границу (Long) всё закрывается по рынку и диапазон переоткрывается со ставкой следующего яруса.
+                    Сброс на ставку T1 — когда серия вышла в ≥ 0 (без тейка) или достигла цели тейка. Выход на последней
+                    ступени — остановка бота.
                   </p>
                 </div>
               </label>
+
+              {/* Static range toggle */}
+              {!gfForm.restartOnRangeExit && (
+                <label className="flex items-start gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={gfForm.useStaticRange}
+                    onChange={(e) => setGfForm({ ...gfForm, useStaticRange: e.target.checked })}
+                    className="w-4 h-4 mt-0.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                  />
+                  <div>
+                    <span className="text-sm font-medium text-text-primary">Статический диапазон</span>
+                    <p className="text-xs text-text-secondary mt-0.5">
+                      Граница фиксируется на первом якоре. На новых якорях число DCA-уровней
+                      меняется (например 9, 10, 11) — сетка не "плавает" вместе с ценой. По
+                      умолчанию (выключено) — динамический диапазон: каждый новый якорь пересчитывает сетку.
+                    </p>
+                  </div>
+                </label>
+              )}
+
+              {/* Anchor price limit */}
+              <div>
+                <label className={labelCls}>
+                  {gfForm.direction === 'Short' ? 'Не открывать якорь ниже цены' : 'Не открывать якорь выше цены'}
+                </label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={gfForm.anchorPriceLimit}
+                  placeholder="не задано"
+                  onChange={(e) => setGfForm({ ...gfForm, anchorPriceLimit: e.target.value })}
+                  className={inputCls + ' max-w-[180px]'}
+                />
+                <p className="text-xs text-text-secondary mt-0.5">
+                  Защита от набора сетки на вершине резкого роста. Пусто — без ограничения.
+                </p>
+              </div>
 
               {/* Take-profit */}
               <div>
@@ -6185,7 +6281,11 @@ function AddStrategyModal({
                       onChange={(e) => setGfForm({ ...gfForm, takeProfitTargetUsd: e.target.value })}
                       className={inputCls + ' max-w-[140px]'}
                     />
-                    <span className="text-xs text-text-secondary">USDT (realized + unrealized, останавливает бота)</span>
+                    <span className="text-xs text-text-secondary">
+                      {gfForm.restartOnRangeExit
+                        ? 'USDT за серию (realized + unrealized) — закрыть всё и вернуться на ставку T1'
+                        : 'USDT (realized + unrealized, останавливает бота)'}
+                    </span>
                   </div>
                 )}
               </div>
@@ -7226,6 +7326,8 @@ function EditStrategyModal({
     useStaticRange: cfg.useStaticRange ?? false,
     takeProfitEnabled: cfg.takeProfitEnabled === true,
     takeProfitTargetUsd: String(cfg.takeProfitTargetUsd ?? 100),
+    restartOnRangeExit: cfg.restartOnRangeExit ?? false,
+    anchorPriceLimit: typeof cfg.anchorPriceLimit === 'number' ? String(cfg.anchorPriceLimit) : '',
   });
   const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(() => {
     if (Array.isArray(cfg.tiers) && cfg.tiers.length > 0) {
@@ -7511,6 +7613,12 @@ function EditStrategyModal({
         setError('Цель Take-Profit должна быть > 0 USDT');
         return;
       }
+      const gfAnchorLimitRaw = gfForm.anchorPriceLimit.trim();
+      const gfAnchorLimit = gfAnchorLimitRaw === '' ? null : Number(gfAnchorLimitRaw);
+      if (gfAnchorLimit !== null && !(gfAnchorLimit > 0)) {
+        setError('Лимит цены якоря должен быть > 0 (или оставьте пустым)');
+        return;
+      }
       configJson = JSON.stringify({
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: gfForm.timeframe,
@@ -7519,9 +7627,11 @@ function EditStrategyModal({
         dcaStepPercent: Number(gfForm.dcaStepPercent),
         tpStepPercent: Number(gfForm.tpStepPercent),
         leverage: Number(gfForm.leverage),
-        useStaticRange: gfForm.useStaticRange,
+        useStaticRange: gfForm.restartOnRangeExit ? false : gfForm.useStaticRange,
         takeProfitEnabled: gfForm.takeProfitEnabled,
         takeProfitTargetUsd: gfTpTarget,
+        restartOnRangeExit: gfForm.restartOnRangeExit,
+        anchorPriceLimit: gfAnchorLimit,
       });
     } else if (isGH) {
       if (Number(ghForm.rangePercent) <= 0 || Number(ghForm.upperExitPercent) <= 0) {
@@ -8154,7 +8264,11 @@ function EditStrategyModal({
 
               {/* Tiers — expanding zones, each can override DCA/TP step */}
               <div>
-                <label className={labelCls}>Ярусы сетки</label>
+                <label className={labelCls}>
+                  {gfForm.restartOnRangeExit
+                    ? 'Ступени ставки (от T2 используется только $, ярусы держите по возрастанию До %)'
+                    : 'Ярусы сетки'}
+                </label>
                 <div className="rounded-lg border border-border overflow-hidden">
                   <table className="w-full text-xs">
                     <thead>
@@ -8258,21 +8372,61 @@ function EditStrategyModal({
                 </p>
               </div>
 
+              {/* Restart on range exit (stake ladder) */}
               <label className="flex items-start gap-2 cursor-pointer select-none">
                 <input
                   type="checkbox"
-                  checked={gfForm.useStaticRange}
-                  onChange={(e) => setGfForm({ ...gfForm, useStaticRange: e.target.checked })}
+                  checked={gfForm.restartOnRangeExit}
+                  onChange={(e) => setGfForm({ ...gfForm, restartOnRangeExit: e.target.checked })}
                   className="w-4 h-4 mt-0.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
                 />
                 <div>
-                  <span className="text-sm font-medium text-text-primary">Статический диапазон</span>
+                  <span className="text-sm font-medium text-text-primary">Перезапуск при выходе из диапазона</span>
                   <p className="text-xs text-text-secondary mt-0.5">
-                    Граница фиксируется на первом якоре после старта (число DCA-уровней дрейфует на новых якорях).
-                    По умолчанию (выключено) — динамический диапазон: каждый новый якорь пересчитывает сетку.
+                    Сетка строится только по T1 (ширина, шаги DCA/TP). Ярусы становятся ступенями ставки: при выходе цены
+                    за нижнюю границу (Long) всё закрывается по рынку и диапазон переоткрывается со ставкой следующего яруса.
+                    Сброс на ставку T1 — когда серия вышла в ≥ 0 (без тейка) или достигла цели тейка. Выход на последней
+                    ступени — остановка бота.
                   </p>
                 </div>
               </label>
+
+              {!gfForm.restartOnRangeExit && (
+                <label className="flex items-start gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={gfForm.useStaticRange}
+                    onChange={(e) => setGfForm({ ...gfForm, useStaticRange: e.target.checked })}
+                    className="w-4 h-4 mt-0.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                  />
+                  <div>
+                    <span className="text-sm font-medium text-text-primary">Статический диапазон</span>
+                    <p className="text-xs text-text-secondary mt-0.5">
+                      Граница фиксируется на первом якоре после старта (число DCA-уровней дрейфует на новых якорях).
+                      По умолчанию (выключено) — динамический диапазон: каждый новый якорь пересчитывает сетку.
+                    </p>
+                  </div>
+                </label>
+              )}
+
+              {/* Anchor price limit */}
+              <div>
+                <label className={labelCls}>
+                  {gfForm.direction === 'Short' ? 'Не открывать якорь ниже цены' : 'Не открывать якорь выше цены'}
+                </label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={gfForm.anchorPriceLimit}
+                  placeholder="не задано"
+                  onChange={(e) => setGfForm({ ...gfForm, anchorPriceLimit: e.target.value })}
+                  className={inputCls + ' max-w-[180px]'}
+                />
+                <p className="text-xs text-text-secondary mt-0.5">
+                  Защита от набора сетки на вершине резкого роста. Пусто — без ограничения.
+                </p>
+              </div>
 
               {/* Take-profit */}
               <div>
@@ -8295,7 +8449,11 @@ function EditStrategyModal({
                       onChange={(e) => setGfForm({ ...gfForm, takeProfitTargetUsd: e.target.value })}
                       className={inputCls + ' max-w-[140px]'}
                     />
-                    <span className="text-xs text-text-secondary">USDT (realized + unrealized, останавливает бота)</span>
+                    <span className="text-xs text-text-secondary">
+                      {gfForm.restartOnRangeExit
+                        ? 'USDT за серию (realized + unrealized) — закрыть всё и вернуться на ставку T1'
+                        : 'USDT (realized + unrealized, останавливает бота)'}
+                    </span>
                   </div>
                 )}
               </div>
