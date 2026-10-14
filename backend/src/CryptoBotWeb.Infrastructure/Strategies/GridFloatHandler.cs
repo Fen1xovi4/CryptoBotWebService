@@ -69,6 +69,11 @@ public class GridFloatHandler : IStrategyHandler
     // A websocket quote older than this is not used as the live price — REST ticker instead.
     private const double MaxQuoteAgeMs = 5000;
 
+    // Market orders (anchor, forced close) are read back from the exchange for the real average
+    // price and fee; a just-sent order may not be settled on the first read.
+    private const int FillReadBackAttempts = 3;
+    private const int FillReadBackDelayMs = 400;
+
     public string StrategyType => StrategyTypes.GridFloat;
 
     private readonly AppDbContext _db;
@@ -361,8 +366,12 @@ public class GridFloatHandler : IStrategyHandler
             return;
         }
 
-        var fillQty = result.FilledQuantity.Value;
-        var fillPrice = result.FilledPrice ?? candle.Close;
+        // The service's FilledPrice is only the ticker it sized against — read the order back
+        // for the real average price and the fee actually charged (taker).
+        var fill = await ReadBackMarketFillAsync(strategy, config.Symbol, exchange, result.OrderId, "ANCHOR", ct);
+        var fillQty = fill?.Qty ?? result.FilledQuantity.Value;
+        var fillPrice = fill?.Price ?? result.FilledPrice ?? candle.Close;
+        var entryFee = fill?.Fee ?? fillPrice * fillQty * exchange.TakerFeeRate;
 
         state.IsLong = isLong;
         state.AnchorPrice = fillPrice;
@@ -391,13 +400,14 @@ public class GridFloatHandler : IStrategyHandler
             Qty = fillQty,
             TpPrice = tpPrice,
             FilledAt = DateTime.UtcNow,
+            EntryFee = entryFee,
         };
         state.Batches.Add(batch);
 
         RecordTrade(strategy, config.Symbol, isLong ? "Buy" : "Sell", fillQty, fillPrice, result.OrderId, "Entry");
 
         Log(strategy, "Info",
-            $"✅ ANCHOR open: qty={fillQty} @ {fillPrice}, batch TP={Math.Round(tpPrice, 8)}");
+            $"✅ ANCHOR open: qty={fillQty} @ {fillPrice}, комиссия {Math.Round(entryFee, 6)}, batch TP={Math.Round(tpPrice, 8)}");
 
         await PlaceBatchTpLimit(strategy, config, state, exchange, batch);
 
@@ -622,6 +632,61 @@ public class GridFloatHandler : IStrategyHandler
         return status;
     }
 
+    /// <summary>
+    /// Reads a just-sent market order back: average fill price, filled quantity and the fee the
+    /// exchange charged (null when it doesn't report one). The service's own FilledPrice is only
+    /// the ticker it sized against, and booking it with a fee-rate estimate made the recorded
+    /// PnL differ from the exchange's. Null when the order can't be read back — the caller then
+    /// falls back to the estimate and the strategy log says so.
+    /// </summary>
+    private async Task<(decimal Price, decimal Qty, decimal? Fee)?> ReadBackMarketFillAsync(Strategy strategy,
+        string symbol, IFuturesExchangeService exchange, string? orderId, string what, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(orderId)) return null;
+
+        string? failure = null;
+        for (var attempt = 1; attempt <= FillReadBackAttempts; attempt++)
+        {
+            try
+            {
+                var order = await GetOrderStatusAsync(strategy, symbol, exchange, orderId);
+                // A market order that stopped part-way ends Cancelled with what it filled.
+                var settled = order?.Status is OrderLifecycleStatus.Filled or OrderLifecycleStatus.Cancelled
+                    or OrderLifecycleStatus.Rejected;
+                if (order != null && order.FilledQuantity > 0 && order.AverageFilledPrice > 0 &&
+                    (settled || attempt == FillReadBackAttempts))
+                    return (order.AverageFilledPrice, order.FilledQuantity, order.Fee);
+
+                failure = order == null ? "order not found" : $"status={order.Status}, filled={order.FilledQuantity}";
+            }
+            catch (NotSupportedException)
+            {
+                failure = "exchange service has no order lookup";
+                break;
+            }
+            catch (Exception ex)
+            {
+                failure = ex.Message;
+            }
+
+            if (attempt < FillReadBackAttempts) await Task.Delay(FillReadBackDelayMs, ct);
+        }
+
+        Log(strategy, "Warning",
+            $"{what}: не удалось прочитать ордер {orderId} с биржи ({failure}) — цена и комиссия взяты по оценке.");
+        _logger.LogWarning("GridFloat {Id}: fill read-back failed for {Symbol} order {OrderId}: {Reason}",
+            strategy.Id, symbol, orderId, failure);
+        return null;
+    }
+
+    /// <summary>
+    /// The batch's unbooked entry fee: what the exchange reported, else an estimate — taker for
+    /// the market anchor (level 0), maker for DCA limits and other adopted fills.
+    /// </summary>
+    private static decimal BatchEntryFee(GridFloatBatch batch, IFuturesExchangeService exchange)
+        => batch.EntryFee
+           ?? batch.FillPrice * batch.Qty * (batch.LevelIdx == 0 ? exchange.TakerFeeRate : exchange.MakerFeeRate);
+
     /// <summary>A just-placed order is Open as of the moment we sent it; the stream takes it from there.</summary>
     private void SeedPlaced(Strategy strategy, string orderId, DateTime placedAtUtc)
         => _orderStream.Seed(strategy.AccountId,
@@ -685,7 +750,7 @@ public class GridFloatHandler : IStrategyHandler
 
                     var fillPrice = status.AverageFilledPrice > 0 ? status.AverageFilledPrice : dca.Price;
                     var fillQty = status.FilledQuantity > 0 ? status.FilledQuantity : dca.Qty;
-                    await AdoptDcaFill(strategy, config, state, exchange, dca, fillQty, fillPrice, ct);
+                    await AdoptDcaFill(strategy, config, state, exchange, dca, fillQty, fillPrice, status.Fee, ct);
                     state.DcaOrders.Remove(dca);
                     break;
                 }
@@ -708,7 +773,7 @@ public class GridFloatHandler : IStrategyHandler
                     {
                         // Partial fill before cancellation — adopt the partial as a batch.
                         var fillPrice = status.AverageFilledPrice > 0 ? status.AverageFilledPrice : dca.Price;
-                        await AdoptDcaFill(strategy, config, state, exchange, dca, status.FilledQuantity, fillPrice, ct);
+                        await AdoptDcaFill(strategy, config, state, exchange, dca, status.FilledQuantity, fillPrice, status.Fee, ct);
                     }
                     else
                     {
@@ -726,7 +791,7 @@ public class GridFloatHandler : IStrategyHandler
 
     private async Task AdoptDcaFill(Strategy strategy, GridFloatConfig config, GridFloatState state,
         IFuturesExchangeService exchange, GridFloatDcaOrder dca, decimal fillQty, decimal fillPrice,
-        CancellationToken ct)
+        decimal? entryFee, CancellationToken ct)
     {
         // TP step uses the tier in which this fill's offset% (from anchor) lies. Falls back
         // to config.TpStepPercent if the tier doesn't define its own override.
@@ -739,6 +804,8 @@ public class GridFloatHandler : IStrategyHandler
             Qty = fillQty,
             TpPrice = tpPrice,
             FilledAt = DateTime.UtcNow,
+            // Reported by the order (REST/stream); null → maker estimate when the batch closes.
+            EntryFee = entryFee,
         };
         state.Batches.Add(batch);
 
@@ -780,7 +847,7 @@ public class GridFloatHandler : IStrategyHandler
                 case OrderLifecycleStatus.Filled when status.FilledQuantity > 0:
                     await RecordTpFill(strategy, config, state, exchange, batch,
                         status.AverageFilledPrice > 0 ? status.AverageFilledPrice : batch.TpPrice,
-                        status.FilledQuantity, ct);
+                        status.FilledQuantity, status.Fee, ct);
                     break;
                 case OrderLifecycleStatus.Filled:
                     // Filled but FilledQuantity == 0. Observed on Bybit V5: after worker restart,
@@ -804,7 +871,7 @@ public class GridFloatHandler : IStrategyHandler
                             $"TP батча #{batch.LevelIdx} отменён с частичным филлом {status.FilledQuantity} — фиксирую как закрытие");
                         await RecordTpFill(strategy, config, state, exchange, batch,
                             status.AverageFilledPrice > 0 ? status.AverageFilledPrice : batch.TpPrice,
-                            status.FilledQuantity, ct);
+                            status.FilledQuantity, status.Fee, ct);
                     }
                     else
                     {
@@ -823,17 +890,18 @@ public class GridFloatHandler : IStrategyHandler
 
     private async Task RecordTpFill(Strategy strategy, GridFloatConfig config, GridFloatState state,
         IFuturesExchangeService exchange, GridFloatBatch batch, decimal closePrice, decimal closeQty,
-        CancellationToken ct)
+        decimal? exitFee, CancellationToken ct)
     {
         var notional = batch.FillPrice * closeQty;
         var pnlPct = state.IsLong
             ? (closePrice - batch.FillPrice) / batch.FillPrice * 100m
             : (batch.FillPrice - closePrice) / batch.FillPrice * 100m;
         var grossPnl = notional * pnlPct / 100m;
-        // Open was market (taker) on anchor; DCA was a maker limit; close was a maker limit.
-        // For anchor batches a taker+maker model is more accurate; for DCA batches it's
-        // maker+maker. Approximate uniformly with (maker+maker) since most batches will be DCAs.
-        var commission = notional * (exchange.MakerFeeRate * 2m);
+        // Both legs at what the exchange charged: the batch's own entry fee (pro rata to the
+        // closed qty) plus the TP order's fee; maker estimate on exit when the order didn't report.
+        var batchEntryFee = BatchEntryFee(batch, exchange);
+        var entryFeeShare = batch.Qty > 0m ? batchEntryFee * Math.Min(1m, closeQty / batch.Qty) : batchEntryFee;
+        var commission = entryFeeShare + (exitFee ?? closePrice * closeQty * exchange.MakerFeeRate);
         var netPnl = grossPnl - commission;
 
         RecordTrade(strategy, config.Symbol, state.IsLong ? "Sell" : "Buy", closeQty, closePrice,
@@ -876,6 +944,7 @@ public class GridFloatHandler : IStrategyHandler
 
             if (partialMinQty > 0 && residual >= partialMinQty)
             {
+                batch.EntryFee = batchEntryFee - entryFeeShare;
                 batch.Qty = residual;
                 batch.TpOrderId = null;
                 Log(strategy, "Warning",
@@ -1081,7 +1150,7 @@ public class GridFloatHandler : IStrategyHandler
                 }
             }
 
-            await RecordTpFill(strategy, config, state, exchange, batch, batch.TpPrice, batch.Qty, ct);
+            await RecordTpFill(strategy, config, state, exchange, batch, batch.TpPrice, batch.Qty, exitFee: null, ct);
             qtyDelta -= batch.Qty;
         }
 
@@ -1237,7 +1306,7 @@ public class GridFloatHandler : IStrategyHandler
             // would create a state qty > exchange qty, triggering a phantom TP reconcile
             // every tick after this one.
             var adoptQty = Math.Min(dca.Qty, qtyExcess);
-            await AdoptDcaFill(strategy, config, state, exchange, dca, adoptQty, dca.Price, ct);
+            await AdoptDcaFill(strategy, config, state, exchange, dca, adoptQty, dca.Price, entryFee: null, ct);
             state.DcaOrders.Remove(dca);
             qtyExcess -= adoptQty;
         }
@@ -1463,24 +1532,37 @@ public class GridFloatHandler : IStrategyHandler
         try { await exchange.CancelAllOrdersAsync(config.Symbol); }
         catch { /* best-effort; orphan-cancel flag below will keep sweeping */ }
 
-        // PnL bookkeeping for the trade row + realized counter. Uses markAtTrigger as fallback
-        // when the close result doesn't include a fill price (some exchanges).
-        var closePrice = closeResult?.FilledPrice ?? markAtTrigger;
-        var totalCost = avgEntry * totalQty;
+        var closedOk = totalQty <= 0m || closeResult is { Success: true };
+
+        // PnL bookkeeping for the trade row + realized counter, at the close order's real average
+        // price, quantity and fee read back from the exchange; markAtTrigger / taker-rate estimate
+        // only when the read-back fails.
+        var closeFill = totalQty > 0m && closedOk
+            ? await ReadBackMarketFillAsync(strategy, config.Symbol, exchange, closeResult?.OrderId, tradeReason, CancellationToken.None)
+            : null;
+        var closePrice = closeFill?.Price ?? closeResult?.FilledPrice ?? markAtTrigger;
+        var closedQty = closeFill?.Qty ?? totalQty;
         var closePnlPct = avgEntry > 0
             ? (isLong
                 ? (closePrice - avgEntry) / avgEntry * 100m
                 : (avgEntry - closePrice) / avgEntry * 100m)
             : 0m;
-        var grossClosePnl = totalCost * closePnlPct / 100m;
-        var closeCommission = totalCost * exchange.TakerFeeRate;
+        var grossClosePnl = avgEntry * closedQty * closePnlPct / 100m;
+        // The batches' entry fees are still unbooked — they close here too. Qty the state never
+        // tracked (live > state) gets a maker estimate; less live than tracked scales them down.
+        var openFees = stateQty > 0m
+            ? state.Batches.Sum(b => BatchEntryFee(b, exchange)) * Math.Min(1m, totalQty / stateQty)
+            : 0m;
+        openFees += Math.Max(0m, totalQty - stateQty) * avgEntry * exchange.MakerFeeRate;
+        var entryFeeShare = totalQty > 0m ? openFees * Math.Min(1m, closedQty / totalQty) : 0m;
+        var exitFee = closeFill?.Fee ?? closePrice * closedQty * exchange.TakerFeeRate;
+        var closeCommission = entryFeeShare + exitFee;
         var netClosePnl = grossClosePnl - closeCommission;
 
-        var closedOk = totalQty <= 0m || closeResult is { Success: true };
         if (totalQty > 0m && closedOk)
         {
             RecordTrade(strategy, config.Symbol, isLong ? "Sell" : "Buy",
-                totalQty, closePrice, closeResult?.OrderId, tradeReason,
+                closedQty, closePrice, closeResult?.OrderId, tradeReason,
                 pnlDollar: netClosePnl, commission: closeCommission);
             state.RealizedPnlDollar += netClosePnl;
             state.SeriesRealizedPnl += netClosePnl;
@@ -1503,8 +1585,9 @@ public class GridFloatHandler : IStrategyHandler
 
         if (closedOk)
             Log(strategy, "Info",
-                $"Закрыто по рынку ({tradeReason}): qty={Math.Round(totalQty, 8)} @ {Math.Round(closePrice, 8)}, " +
-                $"PnL закрытия = ${Math.Round(netClosePnl, 2)} (commission ≈ ${Math.Round(closeCommission, 4)}).");
+                $"Закрыто по рынку ({tradeReason}): qty={Math.Round(closedQty, 8)} @ {Math.Round(closePrice, 8)}, " +
+                $"PnL закрытия = ${Math.Round(netClosePnl, 2)} (комиссии: вход ${Math.Round(entryFeeShare, 4)} + " +
+                $"выход ${Math.Round(exitFee, 4)}).");
         return closedOk;
     }
 
