@@ -140,6 +140,15 @@ public class StrategiesController : ControllerBase
                                 unrealizedPnl += fcState.EntrySizeUsdt.Value * pnlPct / 100m;
                             }
                         }
+                        else if (s.Type == StrategyTypes.GridFloat)
+                        {
+                            // Every open batch marked to the last price the handler saw.
+                            var gfState = JsonSerializer.Deserialize<GridFloatState>(s.StateJson, jsonOpts);
+                            if (gfState?.LastPrice is not > 0m || gfState.Batches == null) continue;
+                            var mark = gfState.LastPrice.Value;
+                            foreach (var b in gfState.Batches)
+                                unrealizedPnl += gfState.IsLong ? b.Qty * (mark - b.FillPrice) : b.Qty * (b.FillPrice - mark);
+                        }
                         else
                         {
                             var state = JsonSerializer.Deserialize<EmaBounceState>(s.StateJson, jsonOpts);
@@ -167,7 +176,9 @@ public class StrategiesController : ControllerBase
                     ActiveBots = g.Count(s => s.Status == StrategyStatus.Running),
                     TotalTrades = g.Sum(s => s.Trades.Count),
                     Pnl = realizedPnl,
-                    UnrealizedPnl = unrealizedPnl
+                    UnrealizedPnl = unrealizedPnl,
+                    // Traded volume: notional of every recorded fill, opens and closes alike.
+                    Volume = g.Sum(s => s.Trades.Sum(t => t.Quantity * t.Price))
                 };
             })
             .ToList();
