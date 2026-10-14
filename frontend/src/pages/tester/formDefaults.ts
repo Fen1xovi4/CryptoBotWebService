@@ -79,6 +79,8 @@ export interface GfForm {
   takeProfitEnabled: boolean;
   takeProfitTargetUsd: string;
   restartOnRangeExit: boolean;
+  stakeMultiplier: string;
+  maxStakeStages: string;
   takeProfitContinue: boolean;
   anchorPriceLimit: string;
 }
@@ -211,6 +213,8 @@ export const defaultGfForm: GfForm = {
   takeProfitEnabled: false,
   takeProfitTargetUsd: '100',
   restartOnRangeExit: false,
+  stakeMultiplier: '2',
+  maxStakeStages: '5',
   takeProfitContinue: true,
   anchorPriceLimit: '',
 };
@@ -273,4 +277,14 @@ export function makeDefaultForms(): AllForms {
     arb: { ...defaultArbForm },
     arbLevels: defaultArbLevels.map((l) => ({ ...l })),
   };
+}
+
+/** GridFloat restart-mode stake ladder preview: "10 → 20 → 40 $" (base × multiplier^k, k = 0..max-1). */
+export function formatStakeSequence(base: number, multiplier: number, maxStages: number): string | null {
+  if (!(base > 0) || !(multiplier >= 1) || !Number.isInteger(maxStages) || maxStages < 1 || maxStages > 20) return null;
+  const parts: string[] = [];
+  for (let k = 0; k < maxStages; k++) {
+    parts.push(String(Math.round(base * Math.pow(multiplier, k) * 100) / 100));
+  }
+  return `${parts.join(' → ')} $`;
 }

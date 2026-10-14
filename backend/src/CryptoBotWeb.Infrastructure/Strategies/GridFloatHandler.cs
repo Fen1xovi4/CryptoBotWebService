@@ -1529,7 +1529,7 @@ public class GridFloatHandler : IStrategyHandler
 
         var unrealized = state.Batches.Sum(b => isLong ? b.Qty * (price - b.FillPrice) : b.Qty * (b.FillPrice - price));
         var series = state.SeriesRealizedPnl + unrealized;
-        var stake = fullConfig.Tiers[Math.Clamp(state.StakeStage, 0, fullConfig.Tiers.Count - 1)].SizeUsdt;
+        var stake = GridFloatStakeLadder.StakeAt(fullConfig, state.StakeStage);
 
         // ── Series take-profit → close everything, back to the base stake, keep trading ──
         if (fullConfig.TakeProfitEnabled && fullConfig.TakeProfitTargetUsd > 0m
@@ -1581,7 +1581,7 @@ public class GridFloatHandler : IStrategyHandler
             return true;
         }
 
-        if (state.StakeStage + 1 >= fullConfig.Tiers.Count)
+        if (GridFloatStakeLadder.IsLastStage(fullConfig, state.StakeStage))
         {
             await StopWithAlertAsync(strategy, "GridFloat: ступени ставки исчерпаны",
                 $"{config.Symbol}: выход из диапазона на последней ступени (${stake}). Позиции закрыты, бот остановлен. " +
@@ -1592,7 +1592,7 @@ public class GridFloatHandler : IStrategyHandler
         state.StakeStage++;
         state.OpenAfterTime = DateTime.UtcNow;
         Log(strategy, "Info",
-            $"➡️ Ступень {state.StakeStage + 1}: ставка ${fullConfig.Tiers[state.StakeStage].SizeUsdt}, " +
+            $"➡️ Ступень {state.StakeStage + 1}: ставка ${GridFloatStakeLadder.StakeAt(fullConfig, state.StakeStage)}, " +
             $"серия ${Math.Round(state.SeriesRealizedPnl, 2)}. Новый диапазон — на следующей закрытой свече.");
         return true;
     }
@@ -1621,7 +1621,7 @@ public class GridFloatHandler : IStrategyHandler
         {
             Log(strategy, "Info",
                 $"Сетка закрылась по TP, серия ${Math.Round(state.SeriesRealizedPnl, 2)} < ${threshold} — " +
-                $"остаюсь на ступени {state.StakeStage + 1} (${full.Tiers[Math.Min(state.StakeStage, full.Tiers.Count - 1)].SizeUsdt}).");
+                $"остаюсь на ступени {state.StakeStage + 1} (${GridFloatStakeLadder.StakeAt(full, state.StakeStage)}).");
         }
     }
 
@@ -2289,9 +2289,12 @@ public class GridFloatHandler : IStrategyHandler
             tier.SizeUsdt = Math.Ceiling(minNotional);
             if (_fullConfig is { RestartOnRangeExit: true } full && full.Tiers.Count > 0)
             {
-                // `config` is the stage view (a copy) — mirror the bump onto the real stake step
-                // and persist the full ladder, never the one-tier view.
-                full.Tiers[Math.Clamp(_stakeStage, 0, full.Tiers.Count - 1)].SizeUsdt = tier.SizeUsdt;
+                // `config` is the stage view (a copy). Stakes derive from the T1 base, so raise
+                // the base just enough that this stage's stake reaches the bumped size, and
+                // persist the real config — never the one-tier view.
+                var factor = GridFloatStakeLadder.StakeAt(full, _stakeStage) / Math.Max(full.Tiers[0].SizeUsdt, 0.01m);
+                var neededBase = Math.Ceiling(tier.SizeUsdt / Math.Max(factor, 1m) * 100m) / 100m;
+                if (neededBase > full.Tiers[0].SizeUsdt) full.Tiers[0].SizeUsdt = neededBase;
                 PersistConfigJson(strategy, full);
             }
             else
