@@ -15,7 +15,7 @@ public interface IExchangeServiceFactory
 
     /// <summary>
     /// The proxy this account's clients would use right now (failover order + health checks
-    /// applied), or null for a direct connection. Lets non-REST clients — the FuturesArbitrage
+    /// applied), or null for a direct connection. Lets non-REST clients — the
     /// websocket quote streams — share the account's egress IP instead of connecting directly.
     /// </summary>
     ProxyServer? SelectProxyFor(ExchangeAccount account);

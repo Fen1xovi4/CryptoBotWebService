@@ -18,7 +18,7 @@ namespace CryptoBotWeb.Infrastructure.Services;
 /// <summary>
 /// Singleton holding one websocket top-of-book stream per (exchange, symbol).
 ///
-/// Streams are opened on demand by <see cref="EnsureSubscribedAsync"/> and shared: two arbitrage
+/// Streams are opened on demand by <see cref="EnsureSubscribedAsync"/> and shared: two bots
 /// bots watching ADAUSDT on Bybit use the same connection. An entry whose consumers stopped
 /// asking for it is dropped by the janitor after <see cref="IdleDropMinutes"/>, so stopping a bot
 /// eventually closes its sockets without anyone having to track subscriptions explicitly.
@@ -158,8 +158,7 @@ public sealed class QuoteStreamService : IQuoteStreamService, IDisposable
             }
 
             default:
-                // Dzengi (and anything new) has no stream here; FuturesArbitrage already refuses
-                // Dzengi accounts, so this only means "keep using REST".
+                // Dzengi (and anything new) has no stream here, so this only means "keep using REST".
                 entry.NextAttemptUtc = DateTime.MaxValue;
                 entry.LastError = $"{account.ExchangeType} has no quote stream implementation";
                 return;

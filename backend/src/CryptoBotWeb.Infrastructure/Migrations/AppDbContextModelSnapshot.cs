@@ -438,9 +438,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
-                    b.Property<Guid?>("SecondAccountId")
-                        .HasColumnType("uuid");
-
                     b.Property<DateTime?>("StartedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -465,8 +462,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("AccountId");
-
-                    b.HasIndex("SecondAccountId");
 
                     b.HasIndex("TelegramBotId");
 
@@ -996,11 +991,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
-                    b.HasOne("CryptoBotWeb.Core.Entities.ExchangeAccount", "SecondAccount")
-                        .WithMany()
-                        .HasForeignKey("SecondAccountId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("CryptoBotWeb.Core.Entities.TelegramBot", "TelegramBot")
                         .WithMany("Strategies")
                         .HasForeignKey("TelegramBotId")
@@ -1012,8 +1002,6 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.SetNull);
 
                     b.Navigation("Account");
-
-                    b.Navigation("SecondAccount");
 
                     b.Navigation("TelegramBot");
 

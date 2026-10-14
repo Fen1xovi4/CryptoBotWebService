@@ -52,12 +52,9 @@ public class TradingHostedService : BackgroundService
                 var factory = scope.ServiceProvider.GetRequiredService<IExchangeServiceFactory>();
                 var handlers = scope.ServiceProvider.GetServices<IStrategyHandler>();
 
-                // FuturesArbitrage is deliberately absent: it runs in ArbitrageFastLoopService on a
-                // 1s tick, because its signal lives and dies inside seconds. Every other strategy
-                // keeps this 5s cadence.
                 var runningStrategies = await db.Strategies
                     .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
-                    .Where(s => s.Status == StrategyStatus.Running && s.Type != StrategyTypes.FuturesArbitrage)
+                    .Where(s => s.Status == StrategyStatus.Running)
                     .ToListAsync(stoppingToken);
 
                 await Parallel.ForEachAsync(runningStrategies,

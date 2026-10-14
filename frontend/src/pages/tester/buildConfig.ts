@@ -73,25 +73,6 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
       return { ok: true, configJson };
     }
 
-    case 'FundingClaim': {
-      const configJson = JSON.stringify({
-        symbol: sym,
-        maxCycles: Number(forms.fc.maxCycles),
-        // autoRotateTicker is meaningless in a fixed-window simulation — always off.
-        autoRotateTicker: false,
-        checkBeforeFundingMinutes: Number(forms.fc.checkBeforeFundingMinutes),
-        // Workspace-level fields, flattened for the simulator.
-        fcSizeUsdt: Number(forms.fc.fcSizeUsdt),
-        fcMinFundingRatePercent: Number(forms.fc.fcMinFundingRatePercent),
-        fcMaxFundingRatePercent: Number(forms.fc.fcMaxFundingRatePercent),
-        fcStopLossPercent: Number(forms.fc.fcStopLossPercent),
-        fcLeverage: Number(forms.fc.fcLeverage),
-        fcSlGraceMinutes: Number(forms.fc.fcSlGraceMinutes),
-        fcSlCooldownHours: Number(forms.fc.fcSlCooldownHours),
-      });
-      return { ok: true, configJson };
-    }
-
     case 'GridFloat': {
       const gfRestart = forms.gf.restartOnRangeExit;
       const gfMultiplier = Number(forms.gf.stakeMultiplier);
@@ -238,44 +219,6 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
         takeProfitTargetUsd: tpTarget,
       });
       return { ok: true, configJson };
-    }
-
-    case 'FuturesArbitrage': {
-      const arb = forms.arb;
-      const levels = forms.arbLevels
-        .map((l) => ({
-          entrySpreadPercent: Number(l.entrySpreadPercent),
-          exitSpreadPercent: Number(l.exitSpreadPercent),
-          notionalUsdt: Number(l.notionalUsdt),
-        }))
-        .sort((a, b) => a.entrySpreadPercent - b.entrySpreadPercent);
-      if (levels.length === 0) {
-        return { ok: false, error: 'Добавьте хотя бы один уровень арбитража' };
-      }
-      for (const l of levels) {
-        if (!(l.exitSpreadPercent >= 0) || !(l.entrySpreadPercent > l.exitSpreadPercent)) {
-          return { ok: false, error: 'Вход % должен быть больше выхода %, а выход % ≥ 0' };
-        }
-        if (!(l.notionalUsdt > 0)) {
-          return { ok: false, error: 'Объём USDT на уровень должен быть > 0' };
-        }
-      }
-      if (!(Number(arb.leverage) >= 1)) {
-        return { ok: false, error: 'Плечо должно быть ≥ 1' };
-      }
-      if (!(Number(arb.maxConsecutiveFailures) >= 1)) {
-        return { ok: false, error: 'Макс. подряд ошибок должно быть ≥ 1' };
-      }
-      const secondSym = arb.secondSymbol.trim() === '' ? '' : clean(arb.secondSymbol);
-      const configJson = JSON.stringify({
-        symbol: sym,
-        secondSymbol: secondSym,
-        leverage: Number(arb.leverage),
-        allowBothDirections: arb.allowBothDirections,
-        levels,
-        maxConsecutiveFailures: Number(arb.maxConsecutiveFailures),
-      });
-      return { ok: true, configJson, secondSymbol: secondSym || undefined };
     }
 
     case 'MaratG':

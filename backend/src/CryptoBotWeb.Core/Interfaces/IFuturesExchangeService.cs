@@ -20,17 +20,6 @@ public interface IFuturesExchangeService : IDisposable
     /// </summary>
     decimal MakerFeeRate => 0.0002m;
 
-    /// <summary>
-    /// The taker fee rate the exchange actually applies to THIS account on <paramref name="symbol"/>,
-    /// as a fraction (0.00055 = 0.055%). <see cref="TakerFeeRate"/> is the published standard
-    /// tier, which is only a guess: accounts sit on different tiers, referral programs and
-    /// per-symbol schedules (a Bybit account was observed paying 0.11% where the constant says
-    /// 0.055%). Null when the exchange cannot tell us — the caller keeps using the constant.
-    /// Must not throw on transport failures; return null instead.
-    /// </summary>
-    Task<decimal?> GetTakerFeeRateAsync(string symbol) =>
-        Task.FromResult<decimal?>(null);
-
     Task<List<SymbolDto>> GetSymbolsAsync();
     Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit);
 
@@ -49,38 +38,6 @@ public interface IFuturesExchangeService : IDisposable
     Task<List<FundingEventDto>> GetFundingHistoryAsync(string symbol, DateTime fromUtc, DateTime toUtc, CancellationToken ct = default) =>
         throw new NotSupportedException("GetFundingHistoryAsync not implemented");
     Task<decimal?> GetTickerPriceAsync(string symbol);
-
-    /// <summary>
-    /// Best bid/ask (top of book) for a futures symbol. Used by FuturesArbitrage, where the
-    /// executable spread must be computed from bid/ask, not last price. Returns null on a
-    /// transient fetch failure — caller should skip the tick, not treat it as price 0.
-    /// </summary>
-    Task<BookTickerDto?> GetBookTickerAsync(string symbol) =>
-        throw new NotSupportedException("GetBookTickerAsync not implemented");
-
-    /// <summary>
-    /// Quantity step, minimum quantity and price tick for <paramref name="symbol"/>, from a
-    /// process-wide cache (refreshed hourly). Null when the exchange could not be reached and
-    /// nothing is cached yet.
-    /// </summary>
-    Task<InstrumentRulesDto?> GetInstrumentRulesAsync(string symbol) =>
-        Task.FromResult<InstrumentRulesDto?>(null);
-
-    /// <summary>
-    /// Places one taker order for an exact base quantity — no ticker lookup, no sizing, nothing
-    /// but the order request itself (instrument rules come from the cache). Built for
-    /// FuturesArbitrage, where both legs go out concurrently and every extra round-trip before
-    /// the order widens the gap between them.
-    ///
-    /// <paramref name="limitPrice"/> null → market order. Otherwise a limit order with
-    /// ImmediateOrCancel: whatever is fillable at that price or better fills at once, the rest is
-    /// cancelled by the exchange, nothing rests on the book. Quantity is floored to the step,
-    /// the price is passed as given (caller rounds it to the tick in the safe direction).
-    /// One-way mode; <paramref name="reduceOnly"/> for closes.
-    /// </summary>
-    Task<OrderResultDto> PlaceTakerOrderAsync(string symbol, string side, decimal quantity,
-        decimal? limitPrice, bool reduceOnly) =>
-        throw new NotSupportedException("PlaceTakerOrderAsync not implemented");
 
     Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount);
     Task<OrderResultDto> OpenShortAsync(string symbol, decimal quoteAmount);
@@ -114,9 +71,6 @@ public interface IFuturesExchangeService : IDisposable
 
     Task<List<FundingRateDto>> GetAllFundingRatesAsync() =>
         throw new NotSupportedException("GetAllFundingRatesAsync not implemented");
-
-    Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null) =>
-        throw new NotSupportedException("GetFundingPaymentsAsync not implemented");
 
     Task<bool> SetLeverageAsync(string symbol, int leverage) =>
         throw new NotSupportedException("SetLeverageAsync not implemented");
