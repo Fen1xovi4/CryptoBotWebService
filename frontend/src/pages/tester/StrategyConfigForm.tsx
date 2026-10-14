@@ -458,9 +458,18 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
               <span className="text-xs text-text-secondary">
                 {gf.restartOnRangeExit
                   ? 'USDT за серию (realized + unrealized) — закрыть всё и вернуться на ставку T1'
-                  : 'USDT (realized + unrealized, останавливает бота)'}
+                  : gf.takeProfitContinue
+                    ? 'USDT за серию (realized + unrealized) — закрыть всё и продолжить торговлю'
+                    : 'USDT (realized + unrealized, останавливает бота)'}
               </span>
             </div>
+          )}
+          {gf.takeProfitEnabled && !gf.restartOnRangeExit && (
+            <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
+              <input type="checkbox" checked={gf.takeProfitContinue} onChange={(e) => patch('gf', { takeProfitContinue: e.target.checked })}
+                className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+              <span className="text-sm text-text-primary">Не останавливать бота после тейка</span>
+            </label>
           )}
         </div>
       </>

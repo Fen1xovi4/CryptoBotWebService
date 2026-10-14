@@ -146,6 +146,7 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
         takeProfitEnabled: forms.gf.takeProfitEnabled,
         takeProfitTargetUsd: gfTpTarget,
         restartOnRangeExit: forms.gf.restartOnRangeExit,
+        takeProfitContinue: forms.gf.takeProfitContinue,
         anchorPriceLimit: gfAnchorLimit,
       });
       return { ok: true, configJson };

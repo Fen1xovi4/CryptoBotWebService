@@ -197,9 +197,10 @@ public class GridFloatHandler : IStrategyHandler
             await _db.SaveChangesAsync(ct);
         }
 
-        // 3c'. Stake ladder: series take-profit and losing-side range exit. Both close everything
-        // at market; the tick ends there and the next anchor waits for a closed bar.
-        if (fullConfig.RestartOnRangeExit)
+        // 3c'. Series take-profit that keeps trading (stake ladder, or TakeProfitContinue) and the
+        // stake ladder's losing-side range exit. Both close everything at market; the tick ends
+        // there and the next anchor waits for a closed bar.
+        if (fullConfig.RestartOnRangeExit || fullConfig.TakeProfitContinue)
         {
             if (state.AnchorPrice > 0 && state.Batches.Count > 0
                 && await HandleStakeLadderAsync(strategy, fullConfig, config, state, exchange, isLongConfig, ct))
@@ -1599,6 +1600,16 @@ public class GridFloatHandler : IStrategyHandler
     /// <summary>After a grid closed by its own TPs: reset to the base stake once the series hits its threshold.</summary>
     private void OnStakeLadderFullClose(Strategy strategy, GridFloatState state)
     {
+        // TakeProfitContinue without the ladder: a grid that closed by its own TPs may already
+        // have carried the series past the target — start a new series now, otherwise the next
+        // anchor would be closed by the take-profit on its very first tick.
+        if (_fullConfig is { RestartOnRangeExit: false, TakeProfitContinue: true, TakeProfitEnabled: true } cont)
+        {
+            if (cont.TakeProfitTargetUsd > 0m && state.SeriesRealizedPnl >= cont.TakeProfitTargetUsd)
+                ResetSeries(strategy, state, "серия достигла цели тейка");
+            return;
+        }
+
         if (_fullConfig is not { RestartOnRangeExit: true } full) return;
 
         var threshold = full.TakeProfitEnabled && full.TakeProfitTargetUsd > 0m ? full.TakeProfitTargetUsd : 0m;
@@ -1616,7 +1627,10 @@ public class GridFloatHandler : IStrategyHandler
 
     private void ResetSeries(Strategy strategy, GridFloatState state, string why)
     {
-        if (state.StakeStage > 0 || state.SeriesRealizedPnl != 0m)
+        if (_fullConfig is { RestartOnRangeExit: false })
+            Log(strategy, "Info",
+                $"🔄 Новая серия ({why}): прошлая закрыта с ${Math.Round(state.SeriesRealizedPnl, 2)}, бот продолжает торговлю.");
+        else if (state.StakeStage > 0 || state.SeriesRealizedPnl != 0m)
             Log(strategy, "Info",
                 $"🔄 Сброс на базовую ставку ({why}): серия закрыта с ${Math.Round(state.SeriesRealizedPnl, 2)}, " +
                 $"была ступень {state.StakeStage + 1}.");

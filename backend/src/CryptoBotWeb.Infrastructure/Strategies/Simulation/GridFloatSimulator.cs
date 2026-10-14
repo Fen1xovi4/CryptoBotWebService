@@ -106,6 +106,9 @@ public class GridFloatSimulator : IStrategySimulator
         // Restart-on-range-exit (stake ladder) bookkeeping. `cfg` is the config the grid is built
         // from at the current stage — the config itself outside the mode.
         var restartMode = config.RestartOnRangeExit;
+        // Series take-profit that closes and keeps trading: always in restart mode, or on request.
+        var seriesTpMode = restartMode || config.TakeProfitContinue;
+        int seriesTpHits = 0;
         int stage = 0;
         var cfg = GridFloatStakeLadder.ForStage(config, stage);
         decimal seriesBase = 0m;   // RealizedCash() when the current series started
@@ -362,12 +365,12 @@ public class GridFloatSimulator : IStrategySimulator
             // 3. Re-arm any freed slot inside the grid (classic-grid oscillation capture).
             HealMissingDcas();
 
-            if (restartMode)
+            if (seriesTpMode)
             {
                 var series = SeriesPnl(price);
                 if (series < worstSeries) worstSeries = series;
 
-                // 4a. Series take-profit: close everything and start over at the base stake.
+                // 4a. Series take-profit: close everything and start over (base stake), keep trading.
                 if (config.TakeProfitEnabled && config.TakeProfitTargetUsd > 0m
                     && series >= config.TakeProfitTargetUsd)
                 {
@@ -377,13 +380,14 @@ public class GridFloatSimulator : IStrategySimulator
                         state.OpenAfterTime = when;
                         completedCycles++;
                     }
+                    seriesTpHits++;
                     ResetSeries();
                     return false;
                 }
 
                 // 4b. Range exit on the losing side: close everything, next stake, or stop when
                 //     the stake list is exhausted.
-                if (state.Batches.Count > 0
+                if (restartMode && state.Batches.Count > 0
                     && GridFloatStakeLadder.IsOutsideRange(config, state.AnchorPrice, price, isLong))
                 {
                     ForceCloseAll(price, when, "RangeExit");
@@ -535,6 +539,8 @@ public class GridFloatSimulator : IStrategySimulator
                 new SimSummaryExtra { Label = $"Маржа на пике (x{leverage})", Value = $"{Math.Round(maxNotional / leverage, 2)}$" },
             });
         }
+        if (seriesTpMode && config.TakeProfitEnabled)
+            result.Summary.Extras.Add(new SimSummaryExtra { Label = "Тейков серии", Value = seriesTpHits.ToString() });
 
         return result;
     }
