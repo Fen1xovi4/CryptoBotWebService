@@ -12,6 +12,12 @@ public class GridFloatBatch
     public string? TpOrderId { get; set; }
     public DateTime FilledAt { get; set; }
 
+    // Fee the exchange charged for opening this batch (quote asset, positive), still unbooked —
+    // it is charged against PnL when the batch closes, pro rata on a partial close. Null on
+    // batches from before this field existed, or when the exchange did not report it; the
+    // handler then estimates it (taker for the market anchor, maker for DCA limits).
+    public decimal? EntryFee { get; set; }
+
     // Fix #10: per-batch TP placement backoff. On any PlaceBatchTpLimit failure the count is
     // incremented and TpRetryAfter is pushed to UtcNow + exponential backoff (capped 30 min);
     // HealMissingTps skips a batch whose TpRetryAfter is still in the future. On a successful
