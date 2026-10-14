@@ -4,6 +4,7 @@ export type TopLang = 'ru' | 'en';
 
 export const STRATEGY_LABELS: Record<string, string> = {
   MaratG: 'MaratG (EMA Bounce)',
+  MaratGGrid: 'MaratG+Grid',
   HuntingFunding: 'HuntingFunding',
   SmaDca: 'SMA DCA',
   GridFloat: 'GridFloat',
@@ -50,6 +51,7 @@ const L = {
     tpStep: 'Шаг TP', leverage: 'Плечо', levels: 'Уровни', maxCycles: 'Макс. циклов', lot: 'Лот', step: 'Шаг',
     nUp: 'Ячеек вверх', nDown: 'Ячеек вниз', range: 'Диапазон', hedge: 'Хедж', bet: 'Ставка',
     restart: 'Лестница ставок', autoRestart: 'Авто-рестарт', secondsBefore: 'Сек. до фандинга',
+    gridStep: 'Шаг сетки', gridMaxLots: 'Макс. докупок',
   },
   en: {
     indicator: 'Indicator', timeframe: 'Timeframe', tp: 'Take profit', sl: 'Stop loss', orderSize: 'Order size',
@@ -58,6 +60,7 @@ const L = {
     tpStep: 'TP step', leverage: 'Leverage', levels: 'Levels', maxCycles: 'Max cycles', lot: 'Lot', step: 'Step',
     nUp: 'Cells up', nDown: 'Cells down', range: 'Range', hedge: 'Hedge', bet: 'Bet',
     restart: 'Stake ladder', autoRestart: 'Auto-restart', secondsBefore: 'Sec. before funding',
+    gridStep: 'Grid step', gridMaxLots: 'Max add-ons',
   },
 } as const;
 
@@ -95,7 +98,8 @@ export function getKeySettings(bot: TopBot, lang: TopLang = 'ru'): SettingItem[]
   const tf = bot.timeframe ?? (typeof c.timeframe === 'string' ? c.timeframe : null);
 
   switch (bot.strategyType) {
-    case 'MaratG': {
+    case 'MaratG':
+    case 'MaratGGrid': {
       if (c.indicatorType || c.indicatorLength) {
         add(l.indicator, `${String(c.indicatorType ?? 'EMA')} ${String(c.indicatorLength ?? '')}`.trim());
       }
@@ -107,6 +111,10 @@ export function getKeySettings(bot: TopBot, lang: TopLang = 'ru'): SettingItem[]
         add(l.martingale, c.useMartingale ? `${l.yes} ×${num(c.martingaleCoeff) ?? ''}` : l.no);
       }
       add(l.direction, c.onlyLong ? l.long : c.onlyShort ? l.short : l.both);
+      if (bot.strategyType === 'MaratGGrid') {
+        add(l.gridStep, pct(c.gridStepPercent));
+        if ((num(c.gridMaxLots) ?? 0) > 0) add(l.gridMaxLots, plain(c.gridMaxLots));
+      }
       break;
     }
     case 'SmaDca': {

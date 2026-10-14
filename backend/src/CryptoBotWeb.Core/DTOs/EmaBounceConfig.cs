@@ -27,4 +27,11 @@ public class EmaBounceConfig
     public decimal DrawdownBalance { get; set; }
     public decimal DrawdownPercent { get; set; } = 10;
     public decimal DrawdownTarget { get; set; } = 5;
+
+    // Grid (MaratGGrid only; ignored by plain MaratG).
+    // GridLotSize comes from the workspace (gridLotSize) and is scaled by the martingale multiplier
+    // like OrderSize. Levels sit at entry ∓ k·GridStepPercent up to (not including) the stop loss.
+    public decimal GridLotSize { get; set; }
+    public decimal GridStepPercent { get; set; } = 1;
+    public int GridMaxLots { get; set; } // 0 = every level up to the stop loss
 }

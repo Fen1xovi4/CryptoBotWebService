@@ -63,6 +63,8 @@ interface WorkspaceConfig {
   // HuntingFunding workspace settings
   fundingRateMin: number;
   fundingRateMax: number;
+  // MaratGGrid workspace settings
+  gridLotSize: number;
   // SmaDca workspace settings
   timerEnabled: boolean;
   timerExpiresAt: string | null; // ISO UTC
@@ -93,9 +95,88 @@ const defaultConfig: WorkspaceConfig = {
   drawdownTarget: 5,
   fundingRateMin: 1.0,
   fundingRateMax: 2.0,
+  gridLotSize: 0,
   timerEnabled: false,
   timerExpiresAt: null,
 };
+
+interface GridLotData {
+  level: number;
+  entryPrice: number;
+  quantity: number;
+  orderSize: number;
+  takeProfit: number;
+  openedAt: string;
+}
+
+/** Compact grid summary for MaratGGrid bot cards (state.gridLots & friends). */
+function MaratGGridBlock({ state, coinName }: { state: Record<string, unknown> | null; coinName: string }) {
+  if (!state) return null;
+  const lots: GridLotData[] = Array.isArray(state.gridLots) ? (state.gridLots as GridLotData[]) : [];
+  const lastPrice = typeof state.lastPrice === 'number' ? state.lastPrice : 0;
+  const isLong = !!state.openLong;
+  const hasPos = !!(state.openLong || state.openShort);
+  const realized = typeof state.gridRealizedPnl === 'number' ? state.gridRealizedPnl : 0;
+  const closed = typeof state.gridLotsClosed === 'number' ? state.gridLotsClosed : 0;
+  const nextLot = typeof state.nextGridLotSize === 'number' ? state.nextGridLotSize : 0;
+  const reopenAt = typeof state.gridStarterReopenAt === 'string' ? state.gridStarterReopenAt : null;
+
+  const lotUnrealized = (l: GridLotData): number | null => {
+    if (!lastPrice || !l.entryPrice) return null;
+    const pct = isLong ? (lastPrice - l.entryPrice) / l.entryPrice : (l.entryPrice - lastPrice) / l.entryPrice;
+    return pct * l.orderSize;
+  };
+  const totalUnrealized = lots.reduce((sum, l) => sum + (lotUnrealized(l) ?? 0), 0);
+  const signed = (v: number) => `${v >= 0 ? '+' : ''}$${v.toFixed(2)}`;
+  const color = (v: number) => (v > 0 ? 'text-accent-green' : v < 0 ? 'text-accent-red' : 'text-text-secondary');
+
+  if (!hasPos && lots.length === 0 && closed === 0 && realized === 0) return null;
+
+  return (
+    <>
+      <div className="border-t border-border/50" />
+      <div className="px-4 py-2 space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-text-secondary">
+            Сетка · лотов {lots.length}
+          </span>
+          {lots.length > 0 && lastPrice > 0 && (
+            <span className={`text-[10px] font-semibold ${color(totalUnrealized)}`} title="Незафикс. PNL лотов сетки">
+              {signed(totalUnrealized)}
+            </span>
+          )}
+        </div>
+        {lots.length > 0 && (
+          <div className="space-y-0.5">
+            {lots.map((l, i) => {
+              const u = lotUnrealized(l);
+              return (
+                <div key={`${l.level}-${l.openedAt}-${i}`} className="flex items-center gap-2 text-[10px] font-mono text-text-secondary">
+                  <span className="w-6 text-text-primary">{l.level === 0 ? 'S' : `#${l.level}`}</span>
+                  <span className="text-text-primary">{l.entryPrice}</span>
+                  <span>${l.orderSize?.toFixed(2)}</span>
+                  <span className="hidden sm:inline">{l.quantity} {coinName}</span>
+                  <span className="ml-auto">TP {l.takeProfit}</span>
+                  {u !== null && <span className={`w-14 text-right ${color(u)}`}>{signed(u)}</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-text-secondary">
+          <span>
+            Реализ.: <span className={`font-semibold ${color(realized)}`}>{signed(realized)}</span>
+          </span>
+          <span>Закрыто: <span className="font-semibold text-text-primary">{closed}</span></span>
+          {nextLot > 0 && <span>След. лот: <span className="font-semibold text-text-primary">${nextLot.toFixed(2)}</span></span>}
+          {reopenAt && (
+            <span>Старт. лот откроется: <span className="font-semibold text-text-primary">{new Date(reopenAt).toLocaleTimeString('ru-RU')}</span></span>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
 
 const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX', 4: 'Dzengi' };
 
@@ -440,6 +521,7 @@ export default function ActiveBotsPage() {
             className="bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
           >
             <option value="MaratG">MaratG</option>
+            <option value="MaratGGrid">MaratG+Grid</option>
             <option value="HuntingFunding">HuntingFunding</option>
             <option value="SmaDca">SMA DCA</option>
             <option value="GridFloat">Grid Float</option>
@@ -578,6 +660,19 @@ export default function ActiveBotsPage() {
             className="w-32 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
           />
         </div>
+
+        {activeWorkspace?.strategyType === 'MaratGGrid' && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-text-secondary">Сумма лота сетки, USDT:</span>
+            <input
+              type="number"
+              value={localConfig.gridLotSize || ''}
+              onChange={(e) => updateConfig({ gridLotSize: Number(e.target.value) })}
+              placeholder="50"
+              className="w-32 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
+            />
+          </div>
+        )}
 
         <div className="h-6 w-px bg-border" />
 
@@ -1115,6 +1210,8 @@ export default function ActiveBotsPage() {
                     <span className="text-text-secondary text-xs">—</span>
                   )}
                 </div>
+
+                {s.type === 'MaratGGrid' && <MaratGGridBlock state={state} coinName={coinName} />}
 
                 {/* Divider */}
                 <div className="border-t border-border/50" />
@@ -4030,6 +4127,16 @@ function StatCard({
 
 /* ── Hunting Funding Level row type ───────────────────── */
 
+/** Grid levels below the base entry: ceil(SL / step) - 1, capped by maxLots (0 = no cap). */
+function gridLevelsCount(stopLoss: string, step: string, maxLots: string): number {
+  const sl = Number(stopLoss);
+  const st = Number(step);
+  if (!(sl > 0) || !(st > 0)) return 0;
+  const levels = Math.max(0, Math.ceil(sl / st) - 1);
+  const cap = Number(maxLots);
+  return cap > 0 ? Math.min(cap, levels) : levels;
+}
+
 interface HFLevel {
   offsetPercent: number;
   sizeUsdt: number;
@@ -4067,6 +4174,8 @@ function AddStrategyModal({
     offsetPercent: '0',
     takeProfitPercent: '3',
     stopLossPercent: '3',
+    gridStepPercent: '1',
+    gridMaxLots: '0',
   });
 
   // HuntingFunding fields
@@ -4480,6 +4589,9 @@ function AddStrategyModal({
         stopLossPercent: Number(mgForm.stopLossPercent),
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         timeframe: mgForm.timeframe,
+        ...(strategyType === 'MaratGGrid'
+          ? { gridStepPercent: Number(mgForm.gridStepPercent), gridMaxLots: Number(mgForm.gridMaxLots) }
+          : {}),
       });
     }
 
@@ -5898,6 +6010,37 @@ function AddStrategyModal({
                   />
                 </div>
               </div>
+
+              {/* Grid (MaratGGrid) */}
+              {strategyType === 'MaratGGrid' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelCls}>Шаг сетки, %</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      value={mgForm.gridStepPercent}
+                      onChange={(e) => setMgForm({ ...mgForm, gridStepPercent: e.target.value })}
+                      className={inputCls}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Макс. докупок (0 = до стопа)</label>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={mgForm.gridMaxLots}
+                      onChange={(e) => setMgForm({ ...mgForm, gridMaxLots: e.target.value })}
+                      className={inputCls}
+                    />
+                    <p className="text-[11px] text-text-secondary mt-1">
+                      Уровней сетки: {gridLevelsCount(mgForm.stopLossPercent, mgForm.gridStepPercent, mgForm.gridMaxLots)}
+                    </p>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -5953,6 +6096,8 @@ function EditStrategyModal({
     stopLossPercent: String(cfg.stopLossPercent ?? 3),
     onlyLong: cfg.onlyLong ?? false,
     onlyShort: cfg.onlyShort ?? false,
+    gridStepPercent: String(cfg.gridStepPercent ?? 1),
+    gridMaxLots: String(cfg.gridMaxLots ?? 0),
   });
 
   // SMA DCA form state
@@ -6402,6 +6547,9 @@ function EditStrategyModal({
         timeframe: mgForm.timeframe,
         onlyLong: mgForm.onlyLong,
         onlyShort: mgForm.onlyShort,
+        ...(strategy.type === 'MaratGGrid'
+          ? { gridStepPercent: Number(mgForm.gridStepPercent), gridMaxLots: Number(mgForm.gridMaxLots) }
+          : {}),
       });
     }
 
@@ -7741,6 +7889,37 @@ function EditStrategyModal({
                 </div>
               </div>
 
+              {/* Grid (MaratGGrid) */}
+              {strategy.type === 'MaratGGrid' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className={labelCls}>Шаг сетки, %</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      value={mgForm.gridStepPercent}
+                      onChange={(e) => setMgForm({ ...mgForm, gridStepPercent: e.target.value })}
+                      className={inputCls}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>Макс. докупок (0 = до стопа)</label>
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      value={mgForm.gridMaxLots}
+                      onChange={(e) => setMgForm({ ...mgForm, gridMaxLots: e.target.value })}
+                      className={inputCls}
+                    />
+                    <p className="text-[11px] text-text-secondary mt-1">
+                      Уровней сетки: {gridLevelsCount(mgForm.stopLossPercent, mgForm.gridStepPercent, mgForm.gridMaxLots)}
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Direction filter */}
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -7822,7 +8001,7 @@ function ChartModal({
               {cfg.symbol || cfg.gridSymbol || strategy.name}
               <span className="ml-2 text-xs text-text-secondary font-normal">
                 {tf}
-                {strategy.type === 'MaratG' && ` · ${cfg.indicatorType || 'EMA'}${cfg.indicatorLength || 50}`}
+                {(strategy.type === 'MaratG' || strategy.type === 'MaratGGrid') && ` · ${cfg.indicatorType || 'EMA'}${cfg.indicatorLength || 50}`}
               </span>
             </h2>
             <p className="text-xs text-text-secondary mt-0.5">

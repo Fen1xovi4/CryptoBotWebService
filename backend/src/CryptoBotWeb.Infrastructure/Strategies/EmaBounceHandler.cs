@@ -10,7 +10,12 @@ using Microsoft.Extensions.Logging;
 
 namespace CryptoBotWeb.Infrastructure.Strategies;
 
-public class EmaBounceHandler : IStrategyHandler
+/// <summary>
+/// MaratG / EMA Bounce. Also drives MaratGGrid (see <see cref="MaratGGridHandler"/>): the same
+/// strategy plus a grid of extra lots on top of the base position — the grid half lives in
+/// EmaBounceHandler.Grid.cs and is only reached when strategy.Type is MaratGGrid.
+/// </summary>
+public partial class EmaBounceHandler : IStrategyHandler
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -18,18 +23,23 @@ public class EmaBounceHandler : IStrategyHandler
         PropertyNameCaseInsensitive = true
     };
 
-    public string StrategyType => StrategyTypes.MaratG;
+    public virtual string StrategyType => StrategyTypes.MaratG;
 
     private readonly AppDbContext _db;
     private readonly ILogger<EmaBounceHandler> _logger;
     private readonly ITelegramSignalService _telegramSignalService;
+    private readonly IQuoteStreamService _quotes;
+    private readonly IOrderStreamService _orderStream;
 
     public EmaBounceHandler(AppDbContext db, ILogger<EmaBounceHandler> logger,
-        ITelegramSignalService telegramSignalService)
+        ITelegramSignalService telegramSignalService, IQuoteStreamService quotes,
+        IOrderStreamService orderStream)
     {
         _db = db;
         _logger = logger;
         _telegramSignalService = telegramSignalService;
+        _quotes = quotes;
+        _orderStream = orderStream;
     }
 
     public async Task ProcessAsync(Strategy strategy, IFuturesExchangeService exchange, CancellationToken ct)
@@ -48,16 +58,26 @@ public class EmaBounceHandler : IStrategyHandler
         var state = JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, JsonOptions)
                     ?? new EmaBounceState();
 
+        var isGrid = IsGrid(strategy);
+        if (isGrid)
+            await EnsureGridStreamsAsync(strategy, config, ct);
+
         // 1. Check TP/SL for open positions (runs every poll)
         var posLongBefore = state.OpenLong;
         var posShortBefore = state.OpenShort;
-        await CheckTpSl(strategy, config, state, exchange, ct);
+        var tickPrice = await CheckTpSl(strategy, config, state, exchange, ct);
 
         // If a position was just closed, persist martingale state immediately
         // to prevent data loss on early returns or exceptions below
         var positionJustClosed = (posLongBefore != null && state.OpenLong == null)
                               || (posShortBefore != null && state.OpenShort == null);
-        if (positionJustClosed)
+
+        // 1b. MaratGGrid: lot take-profits, starter reopen, level buys — every poll while the base lives.
+        var gridChanged = false;
+        if (isGrid && tickPrice.HasValue && (state.OpenLong != null || state.OpenShort != null))
+            gridChanged = await ProcessGridAsync(strategy, config, state, exchange, tickPrice.Value, ct);
+
+        if (positionJustClosed || gridChanged)
         {
             SaveState(strategy, config, state);
             await _db.SaveChangesAsync(ct);
@@ -339,16 +359,22 @@ public class EmaBounceHandler : IStrategyHandler
         }
 
         var entryPrice = result.FilledPrice ?? candle.Close;
+        var entryQty = result.FilledQuantity ?? 0;
+        decimal? entryFee = null;
+        if (IsGrid(strategy))
+            (entryPrice, entryQty, entryFee) = await ReadBackBaseFillAsync(strategy, config, exchange,
+                result.OrderId, entryPrice, entryQty, "LONG", ct);
         state.OpenLong = new OpenPositionInfo
         {
             Direction = "Long",
             EntryPrice = entryPrice,
-            Quantity = result.FilledQuantity ?? 0,
+            Quantity = entryQty,
             OpenedAt = DateTime.UtcNow,
             TakeProfit = entryPrice * (1 + config.TakeProfitPercent / 100m),
             StopLoss = entryPrice * (1 - config.StopLossPercent / 100m),
             ExchangeOrderId = result.OrderId,
-            OrderSize = orderSize
+            OrderSize = orderSize,
+            EntryFee = entryFee
         };
         state.LongCounter = 0;
 
@@ -361,6 +387,9 @@ public class EmaBounceHandler : IStrategyHandler
 
         await _telegramSignalService.SendOpenPositionSignalAsync(strategy, config.Symbol, "Long",
             orderSize, entryPrice, state.OpenLong.TakeProfit, state.OpenLong.StopLoss, ct);
+
+        if (IsGrid(strategy))
+            await StartGridCycleAsync(strategy, config, state, exchange, entryPrice, ct);
     }
 
     private async Task OpenShort(Strategy strategy, EmaBounceConfig config, EmaBounceState state,
@@ -381,16 +410,22 @@ public class EmaBounceHandler : IStrategyHandler
         }
 
         var entryPrice = result.FilledPrice ?? candle.Close;
+        var entryQty = result.FilledQuantity ?? 0;
+        decimal? entryFee = null;
+        if (IsGrid(strategy))
+            (entryPrice, entryQty, entryFee) = await ReadBackBaseFillAsync(strategy, config, exchange,
+                result.OrderId, entryPrice, entryQty, "SHORT", ct);
         state.OpenShort = new OpenPositionInfo
         {
             Direction = "Short",
             EntryPrice = entryPrice,
-            Quantity = result.FilledQuantity ?? 0,
+            Quantity = entryQty,
             OpenedAt = DateTime.UtcNow,
             TakeProfit = entryPrice * (1 - config.TakeProfitPercent / 100m),
             StopLoss = entryPrice * (1 + config.StopLossPercent / 100m),
             ExchangeOrderId = result.OrderId,
-            OrderSize = orderSize
+            OrderSize = orderSize,
+            EntryFee = entryFee
         };
         state.ShortCounter = 0;
 
@@ -403,16 +438,20 @@ public class EmaBounceHandler : IStrategyHandler
 
         await _telegramSignalService.SendOpenPositionSignalAsync(strategy, config.Symbol, "Short",
             orderSize, entryPrice, state.OpenShort.TakeProfit, state.OpenShort.StopLoss, ct);
+
+        if (IsGrid(strategy))
+            await StartGridCycleAsync(strategy, config, state, exchange, entryPrice, ct);
     }
 
-    private async Task CheckTpSl(Strategy strategy, EmaBounceConfig config, EmaBounceState state,
+    /// <summary>Returns the price this poll acted on (null when nothing is open or no price was available).</summary>
+    private async Task<decimal?> CheckTpSl(Strategy strategy, EmaBounceConfig config, EmaBounceState state,
         IFuturesExchangeService exchange, CancellationToken ct)
     {
         if (state.OpenLong == null && state.OpenShort == null)
-            return;
+            return null;
 
-        var currentPrice = await exchange.GetTickerPriceAsync(config.Symbol);
-        if (currentPrice == null) return;
+        var currentPrice = await GetTickPriceAsync(strategy, config.Symbol, exchange);
+        if (currentPrice == null) return null;
 
         state.LastPrice = currentPrice;
 
@@ -449,11 +488,19 @@ public class EmaBounceHandler : IStrategyHandler
                 await CloseShortPosition(strategy, config, state, exchange, currentPrice.Value, "StopLoss", ct);
             }
         }
+
+        return currentPrice;
     }
 
     private async Task CloseLongPosition(Strategy strategy, EmaBounceConfig config, EmaBounceState state,
         IFuturesExchangeService exchange, decimal closePrice, string reason, CancellationToken ct)
     {
+        if (IsGrid(strategy))
+        {
+            await CloseBaseWithGridAsync(strategy, config, state, exchange, closePrice, reason, ct);
+            return;
+        }
+
         var position = state.OpenLong!;
         var result = await exchange.CloseLongAsync(config.Symbol, position.Quantity);
         if (!result.Success)
@@ -529,6 +576,12 @@ public class EmaBounceHandler : IStrategyHandler
     private async Task CloseShortPosition(Strategy strategy, EmaBounceConfig config, EmaBounceState state,
         IFuturesExchangeService exchange, decimal closePrice, string reason, CancellationToken ct)
     {
+        if (IsGrid(strategy))
+        {
+            await CloseBaseWithGridAsync(strategy, config, state, exchange, closePrice, reason, ct);
+            return;
+        }
+
         var position = state.OpenShort!;
         var result = await exchange.CloseShortAsync(config.Symbol, position.Quantity);
         if (!result.Success)
@@ -834,6 +887,7 @@ public class EmaBounceHandler : IStrategyHandler
     private static void SaveState(Strategy strategy, EmaBounceConfig config, EmaBounceState state)
     {
         state.NextOrderSize = GetCurrentOrderSize(config, state).orderSize;
+        state.NextGridLotSize = GetCurrentGridLotSize(config, state);
         strategy.StateJson = JsonSerializer.Serialize(state, new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase

@@ -221,8 +221,10 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
       return { ok: true, configJson };
     }
 
+    case 'MaratGGrid':
     case 'MaratG':
     default: {
+      const isGrid = strategyType === 'MaratGGrid';
       const orderSize = Number(forms.mg.orderSize);
       if (!(orderSize > 0)) return { ok: false, error: 'MaratG: сумма ставки (USDT) должна быть больше 0' };
       if (forms.mg.useMartingale && !(Number(forms.mg.martingaleCoeff) > 0))
@@ -231,6 +233,15 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
         return { ok: false, error: 'MaratG: шаг ступенчатого мартингейла должен быть ≥ 1' };
       if (forms.mg.useDrawdownScale && !(Number(forms.mg.drawdownBalance) > 0))
         return { ok: false, error: 'MaratG: баланс для масштабирования по просадке должен быть больше 0' };
+      if (isGrid) {
+        if (!(Number(forms.mg.gridLotSize) > 0))
+          return { ok: false, error: 'MaratG+Grid: сумма лота сетки (USDT) должна быть больше 0' };
+        if (!(Number(forms.mg.gridStepPercent) > 0))
+          return { ok: false, error: 'MaratG+Grid: шаг сетки должен быть больше 0' };
+        const maxLots = Number(forms.mg.gridMaxLots);
+        if (!Number.isInteger(maxLots) || maxLots < 0)
+          return { ok: false, error: 'MaratG+Grid: макс. докупок — целое число ≥ 0' };
+      }
       const configJson = JSON.stringify({
         indicatorType: forms.mg.indicatorType,
         indicatorLength: Number(forms.mg.indicatorLength),
@@ -252,6 +263,13 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
         drawdownBalance: Number(forms.mg.drawdownBalance),
         drawdownPercent: Number(forms.mg.drawdownPercent),
         drawdownTarget: Number(forms.mg.drawdownTarget),
+        ...(isGrid
+          ? {
+              gridLotSize: Number(forms.mg.gridLotSize),
+              gridStepPercent: Number(forms.mg.gridStepPercent),
+              gridMaxLots: Number(forms.mg.gridMaxLots),
+            }
+          : {}),
       });
       return { ok: true, configJson };
     }

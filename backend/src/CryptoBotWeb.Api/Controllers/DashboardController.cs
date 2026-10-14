@@ -239,6 +239,7 @@ public class DashboardController : ControllerBase
                     var pct = (state.OpenShort.EntryPrice - state.LastPrice.Value) / state.OpenShort.EntryPrice * 100m;
                     unrealizedPnl += state.OpenShort.OrderSize * pct / 100m;
                 }
+                unrealizedPnl += state.GridUnrealizedPnl();
             }
         }
 

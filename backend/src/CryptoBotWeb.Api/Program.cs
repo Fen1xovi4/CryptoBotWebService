@@ -58,6 +58,7 @@ builder.Services.AddScoped<SmartGridHedgeHandler>();
 // Simulator (backtesting) — admin-only Tester module. One IStrategySimulator per strategy
 // type, resolved by SimulationEngine the same way the Worker resolves live handlers.
 builder.Services.AddScoped<IStrategySimulator, MaratGSimulator>();
+builder.Services.AddScoped<IStrategySimulator, MaratGGridSimulator>();
 builder.Services.AddScoped<IStrategySimulator, SmaDcaSimulator>();
 builder.Services.AddScoped<IStrategySimulator, GridFloatSimulator>();
 builder.Services.AddScoped<IStrategySimulator, GridHedgeSimulator>();

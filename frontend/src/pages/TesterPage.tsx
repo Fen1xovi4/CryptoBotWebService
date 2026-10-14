@@ -82,7 +82,7 @@ export default function TesterPage() {
   // timeframe (downloading finer bars would be wasted), everything else (grids/funding)
   // is tick-driven and defaults to 1m. The user can still override until the strategy TF changes.
   const strategyDefaultPathTf = useMemo(() => {
-    if (strategyType === 'MaratG') return forms.mg.timeframe;
+    if (strategyType === 'MaratG' || strategyType === 'MaratGGrid') return forms.mg.timeframe;
     if (strategyType === 'SmaDca') return forms.sd.timeframe;
     if (strategyType === 'GridFloat') return forms.gf.timeframe;
     return '1m';
