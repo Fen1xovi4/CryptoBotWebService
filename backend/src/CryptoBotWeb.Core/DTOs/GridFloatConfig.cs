@@ -78,7 +78,8 @@ public class GridFloatConfig
     // target is then measured per series (state.SeriesRealizedPnl + unrealized, zeroed at each
     // take-profit) instead of against lifetime realized PnL, and the next anchor opens one
     // closed bar later. RestartOnRangeExit always behaves this way regardless of this flag.
-    public bool TakeProfitContinue { get; set; } = false;
+    // Default ON (user's choice, 2026-10-14): set false explicitly to get the old stop-the-bot TP.
+    public bool TakeProfitContinue { get; set; } = true;
 
     // Restart-on-range-exit ("stake ladder") mode. Tiers stop being an expanding grid and
     // become STAKE STEPS: the grid only ever spans Tiers[0]'s geometry (UpToPercent width,

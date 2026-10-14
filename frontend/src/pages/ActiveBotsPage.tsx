@@ -3202,7 +3202,7 @@ function GridFloatCard({
         <span className="text-[10px] text-text-secondary">
           {restartMode
             ? 'USDT за серию (realized + unrealized) — закрыть всё и вернуться на ставку T1'
-            : normalizedCfg?.takeProfitContinue
+            : normalizedCfg?.takeProfitContinue !== false
               ? 'USDT за серию (realized + unrealized) — закрыть всё и продолжить торговлю'
               : 'USDT (realized + unrealized, останавливает бота)'}
         </span>
@@ -5137,7 +5137,7 @@ function AddStrategyModal({
     takeProfitEnabled: false,
     takeProfitTargetUsd: '100',
     restartOnRangeExit: false,
-    takeProfitContinue: false,
+    takeProfitContinue: true,
     anchorPriceLimit: '',
   });
   const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(
@@ -7359,7 +7359,7 @@ function EditStrategyModal({
     takeProfitEnabled: cfg.takeProfitEnabled === true,
     takeProfitTargetUsd: String(cfg.takeProfitTargetUsd ?? 100),
     restartOnRangeExit: cfg.restartOnRangeExit ?? false,
-    takeProfitContinue: cfg.takeProfitContinue ?? false,
+    takeProfitContinue: cfg.takeProfitContinue ?? true,
     anchorPriceLimit: typeof cfg.anchorPriceLimit === 'number' ? String(cfg.anchorPriceLimit) : '',
   });
   const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(() => {

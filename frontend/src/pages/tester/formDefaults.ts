@@ -211,7 +211,7 @@ export const defaultGfForm: GfForm = {
   takeProfitEnabled: false,
   takeProfitTargetUsd: '100',
   restartOnRangeExit: false,
-  takeProfitContinue: false,
+  takeProfitContinue: true,
   anchorPriceLimit: '',
 };
 
