@@ -274,45 +274,6 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         return ticker?.LastPrice;
     }
 
-    public async Task<BookTickerDto?> GetBookTickerAsync(string symbol)
-    {
-        try
-        {
-            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
-            // Bybit V5 has no separate book-ticker endpoint: the /v5/market/tickers payload already
-            // carries top-of-book (bid1Price/bid1Size/ask1Price/ask1Size), surfaced by Bybit.Net as
-            // BestBid*/BestAsk*. Same call as GetTickerPriceAsync, so no extra rate-limit class.
-            var result = await _client.V5Api.ExchangeData.GetLinearInverseTickersAsync(Category.Linear, bybitSymbol);
-            if (!result.Success || result.Data?.List == null)
-                return null;
-
-            var ticker = result.Data.List.FirstOrDefault();
-            if (ticker == null)
-                return null;
-
-            // Nullable on the SDK model — a symbol with an empty side (halted/pre-listing) yields
-            // no executable spread, so treat it as a failed fetch rather than price 0.
-            var bid = ticker.BestBidPrice;
-            var ask = ticker.BestAskPrice;
-            if (bid == null || ask == null || bid.Value <= 0 || ask.Value <= 0)
-                return null;
-
-            return new BookTickerDto
-            {
-                Symbol = symbol,
-                BidPrice = bid.Value,
-                BidQuantity = ticker.BestBidQuantity ?? 0m,
-                AskPrice = ask.Value,
-                AskQuantity = ticker.BestAskQuantity ?? 0m,
-                Timestamp = DateTime.UtcNow
-            };
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-    }
-
     public async Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount)
     {
         var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
@@ -565,94 +526,6 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         };
     }
 
-    public async Task<decimal?> GetTakerFeeRateAsync(string symbol)
-    {
-        try
-        {
-            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
-            // /v5/account/fee-rate — the account's own schedule for this contract (tier, broker
-            // and per-symbol overrides already applied), as a fraction.
-            var result = await _client.V5Api.Account.GetFeeRateAsync(Category.Linear, bybitSymbol);
-            if (!result.Success) return null;
-
-            var rate = result.Data?.List?.FirstOrDefault()?.TakerFeeRate;
-            return rate.HasValue && rate.Value > 0 ? rate.Value : null;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-    }
-
-    // Instrument rules are public, identical for every account and change rarely — one
-    // process-wide cache serves every service instance (they are created per tick).
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, InstrumentRulesDto Rules)>
-        _rulesCache = new();
-    private static readonly TimeSpan _rulesCacheTtl = TimeSpan.FromHours(1);
-
-    public async Task<InstrumentRulesDto?> GetInstrumentRulesAsync(string symbol)
-    {
-        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
-        if (_rulesCache.TryGetValue(bybitSymbol, out var hit) && DateTime.UtcNow - hit.At < _rulesCacheTtl)
-            return hit.Rules;
-
-        try
-        {
-            var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(Category.Linear, bybitSymbol);
-            var info = result.Success ? result.Data?.List?.FirstOrDefault() : null;
-            if (info?.LotSizeFilter?.QuantityStep is > 0 && info.PriceFilter?.TickSize is > 0)
-            {
-                var rules = new InstrumentRulesDto(info.LotSizeFilter.QuantityStep,
-                    info.LotSizeFilter.MinOrderQuantity, info.PriceFilter.TickSize);
-                _rulesCache[bybitSymbol] = (DateTime.UtcNow, rules);
-                return rules;
-            }
-        }
-        catch (Exception)
-        {
-            // fall through to the stale entry, if any
-        }
-
-        // An expired entry beats nothing: steps and ticks almost never change.
-        return _rulesCache.TryGetValue(bybitSymbol, out var stale) ? stale.Rules : null;
-    }
-
-    public async Task<OrderResultDto> PlaceTakerOrderAsync(string symbol, string side, decimal quantity,
-        decimal? limitPrice, bool reduceOnly)
-    {
-        try
-        {
-            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
-            var orderSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? OrderSide.Buy : OrderSide.Sell;
-            var rules = await GetInstrumentRulesAsync(symbol);
-            var qty = rules != null ? FloorToStep(quantity, rules.QtyStep) : quantity;
-            if (qty <= 0)
-                return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} rounds to 0 for {symbol}" };
-
-            var result = limitPrice.HasValue
-                ? await _client.V5Api.Trading.PlaceOrderAsync(
-                    Category.Linear, bybitSymbol, orderSide, NewOrderType.Limit, qty,
-                    price: limitPrice.Value, timeInForce: TimeInForce.ImmediateOrCancel,
-                    reduceOnly: reduceOnly ? true : null)
-                : await _client.V5Api.Trading.PlaceOrderAsync(
-                    Category.Linear, bybitSymbol, orderSide, NewOrderType.Market, qty,
-                    reduceOnly: reduceOnly ? true : null);
-
-            return new OrderResultDto
-            {
-                Success = result.Success,
-                OrderId = result.Data?.OrderId,
-                FilledPrice = limitPrice,
-                FilledQuantity = qty,
-                ErrorMessage = result.Error?.Message
-            };
-        }
-        catch (Exception ex)
-        {
-            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
-        }
-    }
-
     internal static OrderLifecycleStatus MapOrderStatus(OrderStatus s) => s switch
     {
         OrderStatus.New or OrderStatus.Created or OrderStatus.Active or OrderStatus.Untriggered => OrderLifecycleStatus.Open,
@@ -729,14 +602,15 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
     };
 
     // Lot rules change rarely and were fetched on every grid tick (reconcile) and every order —
-    // same process-wide cache idea as _rulesCache. Only real answers are cached; the 0.001
+    // one process-wide cache shared by every service instance. Only real answers are cached; the 0.001
     // fallback is not, so a failed lookup is retried next time.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, decimal QtyStep, decimal MinQty)>
         _symbolInfoCache = new();
+    private static readonly TimeSpan _symbolInfoCacheTtl = TimeSpan.FromHours(1);
 
     private async Task<(decimal qtyStep, decimal minQty)> GetSymbolInfoAsync(string bybitSymbol)
     {
-        if (_symbolInfoCache.TryGetValue(bybitSymbol, out var hit) && DateTime.UtcNow - hit.At < _rulesCacheTtl)
+        if (_symbolInfoCache.TryGetValue(bybitSymbol, out var hit) && DateTime.UtcNow - hit.At < _symbolInfoCacheTtl)
             return (hit.QtyStep, hit.MinQty);
 
         var result = await _client.V5Api.ExchangeData.GetLinearInverseSymbolsAsync(Category.Linear, bybitSymbol);
@@ -858,63 +732,6 @@ public class BybitFuturesExchangeService : IFuturesExchangeService
         catch (Exception)
         {
             return new List<PositionDto>();
-        }
-    }
-
-    /// <summary>
-    /// Fetches funding fee payment history from Bybit transaction logs (type = Settlement).
-    /// Bybit V5 transaction log API filters by baseAsset (e.g. "BTC"), not by full symbol.
-    /// We post-filter results by symbol to ensure accuracy.
-    /// </summary>
-    public async Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null)
-    {
-        try
-        {
-            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
-            // Extract base asset from symbol (e.g. "BTCUSDT" -> "BTC")
-            var baseAsset = bybitSymbol.Replace("USDT", "", StringComparison.OrdinalIgnoreCase);
-            var payments = new List<FundingPaymentDto>();
-            string? cursor = null;
-
-            do
-            {
-                var result = await _client.V5Api.Account.GetTransactionHistoryAsync(
-                    category: Category.Linear,
-                    baseAsset: baseAsset,
-                    type: TransactionLogType.Settlement,
-                    startTime: startTime,
-                    limit: 50,
-                    cursor: cursor);
-
-                if (!result.Success || result.Data?.List == null)
-                    break;
-
-                foreach (var log in result.Data.List)
-                {
-                    // Post-filter by exact symbol in case baseAsset matches multiple pairs
-                    if (!string.IsNullOrEmpty(log.Symbol) &&
-                        !log.Symbol.Equals(bybitSymbol, StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    payments.Add(new FundingPaymentDto
-                    {
-                        Symbol = symbol,
-                        Amount = log.Funding ?? 0m,
-                        FundingRate = log.FeeRate ?? 0m,
-                        PositionSize = Math.Abs(log.Size ?? 0m),
-                        Timestamp = log.TransactionTime
-                    });
-                }
-
-                cursor = result.Data.NextPageCursor;
-            }
-            while (!string.IsNullOrEmpty(cursor));
-
-            return payments.OrderByDescending(p => p.Timestamp).ToList();
-        }
-        catch (Exception)
-        {
-            return new List<FundingPaymentDto>();
         }
     }
 

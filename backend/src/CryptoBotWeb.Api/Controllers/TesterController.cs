@@ -70,24 +70,19 @@ public class TesterController : ControllerBase
     [HttpPost("simulate")]
     public async Task<IActionResult> Simulate([FromBody] SimulationRunRequest request, CancellationToken ct)
     {
-        var (account, secondAccount, error) = await ResolveAccountsAsync(request);
-        if (error != null)
-            return error;
+        var account = await LoadOwnedAccountAsync(request.AccountId);
+        if (account == null)
+            return NotFound();
 
-        IFuturesExchangeService? secondService = null;
         try
         {
-            using var service = _exchangeFactory.CreateFutures(account!);
-            if (secondAccount != null)
-                secondService = _exchangeFactory.CreateFutures(secondAccount);
-
-            var result = await _engine.RunAsync(request, service, secondService, ct,
-                account!.ExchangeType, secondAccount?.ExchangeType);
+            using var service = _exchangeFactory.CreateFutures(account);
+            var result = await _engine.RunAsync(request, service, ct, account.ExchangeType);
             return Ok(result);
         }
         catch (NotSupportedException)
         {
-            return BadRequest(new { message = $"Биржа {account!.ExchangeType} не поддерживается симулятором. Используйте аккаунт Bybit, Bitget или BingX." });
+            return BadRequest(new { message = $"Биржа {account.ExchangeType} не поддерживается симулятором. Используйте аккаунт Bybit, Bitget или BingX." });
         }
         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
@@ -104,10 +99,6 @@ public class TesterController : ControllerBase
             // of a bare 500 — the message already names the exchange and symbol.
             return BadRequest(new { message = ex.Message });
         }
-        finally
-        {
-            secondService?.Dispose();
-        }
     }
 
     // ───────────── parameter optimization (sweep over config fields) ─────────────
@@ -120,13 +111,13 @@ public class TesterController : ControllerBase
     [HttpPost("optimize")]
     public async Task<IActionResult> StartOptimization([FromBody] OptimizationRunRequest request)
     {
-        var (account, secondAccount, error) = await ResolveAccountsAsync(request);
-        if (error != null)
-            return error;
+        var account = await LoadOwnedAccountAsync(request.AccountId);
+        if (account == null)
+            return NotFound();
 
         try
         {
-            return Ok(_optimizer.Start(request, account!, secondAccount));
+            return Ok(_optimizer.Start(request, account));
         }
         catch (ArgumentException ex)
         {
@@ -163,40 +154,6 @@ public class TesterController : ControllerBase
     {
         var removed = await _klineCache.ClearAsync(exchangeType, symbol, timeframe, ct);
         return Ok(new { removedCandles = removed });
-    }
-
-    /// <summary>
-    /// Resolves the caller's account(s) for a simulation-shaped request and enforces the
-    /// FuturesArbitrage two-venue rules (same ones the live handler validates).
-    /// </summary>
-    private async Task<(ExchangeAccount? Account, ExchangeAccount? SecondAccount, IActionResult? Error)>
-        ResolveAccountsAsync(SimulationRunRequest request)
-    {
-        var account = await LoadOwnedAccountAsync(request.AccountId);
-        if (account == null)
-            return (null, null, NotFound());
-
-        ExchangeAccount? secondAccount = null;
-        if (request.StrategyType == StrategyTypes.FuturesArbitrage)
-        {
-            if (!request.SecondAccountId.HasValue)
-                return (null, null, BadRequest(new { message = "Для FuturesArbitrage нужен второй аккаунт (secondAccountId) — арбитраж торгуется между двумя биржами." }));
-
-            if (request.SecondAccountId.Value == request.AccountId)
-                return (null, null, BadRequest(new { message = "Второй аккаунт совпадает с первым — межбиржевому арбитражу нужны две разные биржи." }));
-
-            secondAccount = await LoadOwnedAccountAsync(request.SecondAccountId.Value);
-            if (secondAccount == null)
-                return (null, null, NotFound());
-
-            if (account.ExchangeType == ExchangeType.Dzengi || secondAccount.ExchangeType == ExchangeType.Dzengi)
-                return (null, null, BadRequest(new { message = "Dzengi не поддерживается симулятором. Используйте аккаунты Bybit, Bitget или BingX." }));
-
-            if (account.ExchangeType == secondAccount.ExchangeType)
-                return (null, null, BadRequest(new { message = $"Оба аккаунта на {account.ExchangeType} — межбиржевому арбитражу нужны две разные биржи." }));
-        }
-
-        return (account, secondAccount, null);
     }
 
     /// <summary>Account lookup with the proxy graph the exchange factory needs, scoped to the caller.</summary>

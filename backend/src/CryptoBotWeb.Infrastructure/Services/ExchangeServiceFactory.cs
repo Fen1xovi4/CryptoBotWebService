@@ -105,7 +105,7 @@ public class ExchangeServiceFactory : IExchangeServiceFactory
 
     /// <summary>
     /// Exposes the same failover/health-aware proxy pick the REST clients get, so websocket
-    /// streams (FuturesArbitrage quotes) leave from the same egress IP as the account's REST calls.
+    /// streams leave from the same egress IP as the account's REST calls.
     /// </summary>
     public ProxyServer? SelectProxyFor(ExchangeAccount account) => SelectProxy(account);
 

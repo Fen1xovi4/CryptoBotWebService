@@ -41,21 +41,13 @@ public class SimulationEngine
     public IReadOnlyList<string> SupportedStrategyTypes =>
         _simulators.Select(s => s.StrategyType).ToList();
 
-    /// <param name="exchange">Client of the primary account (request.AccountId).</param>
-    /// <param name="secondExchange">
-    /// Client of the secondary account (request.SecondAccountId) — required for FuturesArbitrage,
-    /// which prices a spread between two DIFFERENT venues, and null for every other strategy type.
-    /// The caller owns and disposes it, exactly like <paramref name="exchange"/>.
-    /// </param>
-    /// <param name="exchangeType">Exchange of the primary account — the kline-cache key. Null disables caching.</param>
-    /// <param name="secondExchangeType">Exchange of the secondary account; null disables caching for its series.</param>
+    /// <param name="exchange">Client of the account (request.AccountId).</param>
+    /// <param name="exchangeType">Exchange of the account — the kline-cache key. Null disables caching.</param>
     public async Task<SimulationRunResult> RunAsync(
         SimulationRunRequest request, IFuturesExchangeService exchange,
-        IFuturesExchangeService? secondExchange = null, CancellationToken ct = default,
-        ExchangeType? exchangeType = null, ExchangeType? secondExchangeType = null)
+        CancellationToken ct = default, ExchangeType? exchangeType = null)
     {
-        var (ctx, stats, simulator) = await BuildContextAsync(
-            request, exchange, secondExchange, ct, exchangeType, secondExchangeType);
+        var (ctx, stats, simulator) = await BuildContextAsync(request, exchange, ct, exchangeType);
 
         var result = simulator.Run(ctx);
 
@@ -78,8 +70,7 @@ public class SimulationEngine
     public async Task<(SimulationContext Context, KlineHistoryCache.FetchStats Stats, IStrategySimulator Simulator)>
         BuildContextAsync(
             SimulationRunRequest request, IFuturesExchangeService exchange,
-            IFuturesExchangeService? secondExchange = null, CancellationToken ct = default,
-            ExchangeType? exchangeType = null, ExchangeType? secondExchangeType = null)
+            CancellationToken ct = default, ExchangeType? exchangeType = null)
     {
         var simulator = _simulators.FirstOrDefault(s => s.StrategyType == request.StrategyType)
             ?? throw new InvalidOperationException(
@@ -139,43 +130,14 @@ public class SimulationEngine
         if (ctx.PathCandles.Count == 0)
             throw new InvalidOperationException($"Биржа не вернула свечи по {request.Symbol} за запрошенный период.");
 
-        if (request.StrategyType == StrategyTypes.FuturesArbitrage)
-        {
-            // Cross-exchange arbitrage: the second series is the SAME window on the OTHER venue,
-            // so it is fetched with the secondary account's client (not with a second symbol on the
-            // primary exchange, which is what GridHedge CrossTicker does below).
-            if (secondExchange == null)
-                throw new InvalidOperationException(
-                    "FuturesArbitrage: не задан второй аккаунт (secondAccountId) — межбиржевой арбитраж " +
-                    "симулируется по двум разным биржам.");
-
-            var secondSymbol = string.IsNullOrWhiteSpace(request.SecondSymbol)
-                ? request.Symbol
-                : request.SecondSymbol!;
-
-            ctx.SecondSymbol = secondSymbol;
-            ctx.SecondSymbolPathCandles =
-                await LoadKlinesAsync(secondExchange, secondExchangeType, secondSymbol, pathTf, from, to, request.BypassCache, stats, ct);
-
-            if (ctx.SecondSymbolPathCandles.Count == 0)
-                throw new InvalidOperationException(
-                    $"Вторая биржа не вернула свечи по {secondSymbol} за запрошенный период.");
-
-            // Both legs are charged the single taker rate carried by the context (primary account's
-            // rate, or the request override) — flag it when the venues actually disagree.
-            if (request.TakerFeeRate == null && secondExchange.TakerFeeRate != exchange.TakerFeeRate)
-                ctx.Warnings.Add(
-                    $"Комиссия обеих ног взята с первичной биржи ({ctx.TakerFeeRate * 100m:0.####}% taker); " +
-                    $"на второй бирже она {secondExchange.TakerFeeRate * 100m:0.####}%.");
-        }
-        else if (!string.IsNullOrWhiteSpace(request.SecondSymbol))
+        if (!string.IsNullOrWhiteSpace(request.SecondSymbol))
         {
             ctx.SecondSymbol = request.SecondSymbol;
             ctx.SecondSymbolPathCandles =
                 await LoadKlinesAsync(exchange, exchangeType, request.SecondSymbol, pathTf, from, to, request.BypassCache, stats, ct);
         }
 
-        if (request.StrategyType is StrategyTypes.HuntingFunding or StrategyTypes.FundingClaim)
+        if (request.StrategyType == StrategyTypes.HuntingFunding)
         {
             // Funding strategies act in minute-sized windows around settlements; with coarse bars
             // (ticks every span/4) those windows can fall between ticks and entries get skipped.

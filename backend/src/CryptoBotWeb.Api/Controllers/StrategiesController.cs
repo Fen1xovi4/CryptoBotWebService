@@ -23,23 +23,17 @@ public class StrategiesController : ControllerBase
     private readonly IExchangeServiceFactory _exchangeFactory;
     private readonly GridHedgeHandler _gridHedgeHandler;
     private readonly SmartGridHedgeHandler _smartGridHedgeHandler;
-    private readonly ArbitrageHandler _arbitrageHandler;
-    private readonly IQuoteStreamService _quotes;
 
     public StrategiesController(
         AppDbContext db,
         IExchangeServiceFactory exchangeFactory,
         GridHedgeHandler gridHedgeHandler,
-        SmartGridHedgeHandler smartGridHedgeHandler,
-        ArbitrageHandler arbitrageHandler,
-        IQuoteStreamService quotes)
+        SmartGridHedgeHandler smartGridHedgeHandler)
     {
         _db = db;
         _exchangeFactory = exchangeFactory;
         _gridHedgeHandler = gridHedgeHandler;
         _smartGridHedgeHandler = smartGridHedgeHandler;
-        _arbitrageHandler = arbitrageHandler;
-        _quotes = quotes;
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -57,8 +51,6 @@ public class StrategiesController : ControllerBase
             {
                 s.Id,
                 s.AccountId,
-                s.SecondAccountId,
-                SecondAccountName = s.SecondAccount != null ? s.SecondAccount.Name : null,
                 s.WorkspaceId,
                 s.TelegramBotId,
                 AccountName = s.Account.Name,
@@ -122,22 +114,6 @@ public class StrategiesController : ControllerBase
                                     ? (hfState.LastPrice.Value - hfState.AvgEntryPrice.Value) / hfState.AvgEntryPrice.Value * 100m
                                     : (hfState.AvgEntryPrice.Value - hfState.LastPrice.Value) / hfState.AvgEntryPrice.Value * 100m;
                                 unrealizedPnl += hfState.TotalFilledUsdt.Value * pnlPct / 100m;
-                            }
-                        }
-                        else if (s.Type == StrategyTypes.FundingClaim)
-                        {
-                            var fcState = JsonSerializer.Deserialize<FundingClaimState>(s.StateJson, jsonOpts);
-                            if (fcState == null) continue;
-
-                            if (fcState.Phase == FundingClaimPhase.InPosition
-                                && fcState.EntryPrice.HasValue && fcState.EntryPrice.Value > 0
-                                && fcState.EntrySizeUsdt.HasValue
-                                && fcState.LastPrice.HasValue)
-                            {
-                                var pnlPct = fcState.Direction == "Long"
-                                    ? (fcState.LastPrice.Value - fcState.EntryPrice.Value) / fcState.EntryPrice.Value * 100m
-                                    : (fcState.EntryPrice.Value - fcState.LastPrice.Value) / fcState.EntryPrice.Value * 100m;
-                                unrealizedPnl += fcState.EntrySizeUsdt.Value * pnlPct / 100m;
                             }
                         }
                         else if (s.Type == StrategyTypes.GridFloat)
@@ -292,8 +268,6 @@ public class StrategiesController : ControllerBase
             {
                 s.Id,
                 s.AccountId,
-                s.SecondAccountId,
-                SecondAccountName = s.SecondAccount != null ? s.SecondAccount.Name : null,
                 AccountName = s.Account.Name,
                 Exchange = s.Account.ExchangeType.ToString(),
                 s.Name,
@@ -361,38 +335,10 @@ public class StrategiesController : ControllerBase
                 return BadRequest(new { message = "Workspace not found" });
         }
 
-        // FuturesArbitrage requires a second exchange account (the other leg of the pair).
-        // Both legs must belong to the caller, be on different exchanges, and neither may be
-        // Dzengi (no futures support there).
-        Guid? secondAccountId = null;
-        if (request.Type == StrategyTypes.FuturesArbitrage)
-        {
-            if (!request.SecondAccountId.HasValue)
-                return BadRequest(new { message = "Для FuturesArbitrage нужно указать второй аккаунт (SecondAccountId)." });
-
-            if (request.SecondAccountId.Value == request.AccountId)
-                return BadRequest(new { message = "Второй аккаунт должен отличаться от первого." });
-
-            var secondAccount = await _db.ExchangeAccounts
-                .FirstOrDefaultAsync(a => a.Id == request.SecondAccountId.Value && a.UserId == GetUserId());
-
-            if (secondAccount == null)
-                return NotFound(new { message = "Второй аккаунт не найден" });
-
-            if (account.ExchangeType == secondAccount.ExchangeType)
-                return BadRequest(new { message = "Аккаунты для FuturesArbitrage должны быть на разных биржах." });
-
-            if (account.ExchangeType == ExchangeType.Dzengi || secondAccount.ExchangeType == ExchangeType.Dzengi)
-                return BadRequest(new { message = "Dzengi не поддерживается для FuturesArbitrage." });
-
-            secondAccountId = secondAccount.Id;
-        }
-
         var strategy = new Strategy
         {
             Id = Guid.NewGuid(),
             AccountId = request.AccountId,
-            SecondAccountId = secondAccountId,
             WorkspaceId = request.WorkspaceId,
             Name = request.Name,
             Type = request.Type,
@@ -414,7 +360,6 @@ public class StrategiesController : ControllerBase
 
         var strategy = await _db.Strategies
             .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
-            .Include(s => s.SecondAccount)
             .Include(s => s.Workspace)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == userId);
 
@@ -489,22 +434,6 @@ public class StrategiesController : ControllerBase
             }
             strategy.StateJson = JsonSerializer.Serialize(freshGfState, jsonOpts);
         }
-        else if (strategy.Type == StrategyTypes.FundingClaim)
-        {
-            // FundingClaim: preserve cycle stats across restarts, reset phase to Idle
-            var prevFcState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
-                ? new FundingClaimState()
-                : JsonSerializer.Deserialize<FundingClaimState>(strategy.StateJson, jsonOpts) ?? new FundingClaimState();
-
-            var freshFcState = new FundingClaimState
-            {
-                Phase = FundingClaimPhase.Idle,
-                CycleCount = prevFcState.CycleCount,
-                CycleTotalPnl = prevFcState.CycleTotalPnl,
-                CycleTotalFundingPnl = prevFcState.CycleTotalFundingPnl
-            };
-            strategy.StateJson = JsonSerializer.Serialize(freshFcState, jsonOpts);
-        }
         else if (strategy.Type == StrategyTypes.SmartGridHedge)
         {
             // SmartGridHedge Start semantics:
@@ -568,50 +497,6 @@ public class StrategiesController : ControllerBase
                 };
             }
             strategy.StateJson = JsonSerializer.Serialize(freshGhState, jsonOpts);
-        }
-        else if (strategy.Type == StrategyTypes.FuturesArbitrage)
-        {
-            // Re-validate the account pairing at Start time too — ConfigJson/accounts could
-            // have been edited via PUT since Create, and this is the last gate before the
-            // worker starts placing orders on both legs.
-            if (!strategy.SecondAccountId.HasValue || strategy.SecondAccount == null)
-                return BadRequest(new { message = "Для FuturesArbitrage нужно указать второй аккаунт (SecondAccountId)." });
-
-            if (strategy.SecondAccountId.Value == strategy.AccountId)
-                return BadRequest(new { message = "Второй аккаунт должен отличаться от первого." });
-
-            if (strategy.Account.ExchangeType == strategy.SecondAccount.ExchangeType)
-                return BadRequest(new { message = "Аккаунты для FuturesArbitrage должны быть на разных биржах." });
-
-            if (strategy.Account.ExchangeType == ExchangeType.Dzengi || strategy.SecondAccount.ExchangeType == ExchangeType.Dzengi)
-                return BadRequest(new { message = "Dzengi не поддерживается для FuturesArbitrage." });
-
-            // FuturesArbitrage Start semantics:
-            //   - Empty state OR no level currently open — fresh start (new ArbitrageState,
-            //     preserving cumulative PnL/cycle stats so the user sees continuous history).
-            //   - Any level still open (mid-cycle) — resume as-is; only clear the transient
-            //     failure counter so a prior run of exchange errors doesn't carry over.
-            var prevArbState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
-                ? new ArbitrageState()
-                : JsonSerializer.Deserialize<ArbitrageState>(strategy.StateJson, jsonOpts) ?? new ArbitrageState();
-
-            var arbMidCycle = prevArbState.Levels.Any(l => l.IsOpen);
-
-            ArbitrageState freshArbState;
-            if (arbMidCycle)
-            {
-                freshArbState = prevArbState;
-                freshArbState.ConsecutiveFailures = 0;
-            }
-            else
-            {
-                freshArbState = new ArbitrageState
-                {
-                    RealizedPnlUsdt = prevArbState.RealizedPnlUsdt,
-                    CompletedCycles = prevArbState.CompletedCycles
-                };
-            }
-            strategy.StateJson = JsonSerializer.Serialize(freshArbState, jsonOpts);
         }
         else
         {
@@ -878,29 +763,6 @@ public class StrategiesController : ControllerBase
         if (strategy.Status == StrategyStatus.Running || strategy.Status == StrategyStatus.Paused)
             return BadRequest(new { message = "ĐťĐµĐ»ŃŚĐ·ŃŹ Ń€ĐµĐ´Đ°ĐşŃ‚Đ¸Ń€ĐľĐ˛Đ°Ń‚ŃŚ Đ·Đ°ĐżŃŃ‰ĐµĐ˝Đ˝ĐľĐłĐľ Đ±ĐľŃ‚Đ° Đ¸Đ»Đ¸ Đ±ĐľŃ‚Đ° Đ˝Đ° ĐżĐ°ŃĐ·Đµ. ĐˇĐ˝Đ°Ń‡Đ°Đ»Đ° ĐľŃŃ‚Đ°Đ˝ĐľĐ˛Đ¸Ń‚Đµ ĐµĐłĐľ." });
 
-        // FuturesArbitrage: allow changing the second account while stopped, with the same
-        // ownership/exchange-pair validation as Create (the account pairing can't be fixed at
-        // Start time without a valid account to point at, unlike ConfigJson tweaks).
-        if (strategy.Type == StrategyTypes.FuturesArbitrage && request.SecondAccountId.HasValue)
-        {
-            if (request.SecondAccountId.Value == strategy.AccountId)
-                return BadRequest(new { message = "Второй аккаунт должен отличаться от первого." });
-
-            var secondAccount = await _db.ExchangeAccounts
-                .FirstOrDefaultAsync(a => a.Id == request.SecondAccountId.Value && a.UserId == GetUserId());
-
-            if (secondAccount == null)
-                return NotFound(new { message = "Второй аккаунт не найден" });
-
-            if (strategy.Account.ExchangeType == secondAccount.ExchangeType)
-                return BadRequest(new { message = "Аккаунты для FuturesArbitrage должны быть на разных биржах." });
-
-            if (strategy.Account.ExchangeType == ExchangeType.Dzengi || secondAccount.ExchangeType == ExchangeType.Dzengi)
-                return BadRequest(new { message = "Dzengi не поддерживается для FuturesArbitrage." });
-
-            strategy.SecondAccountId = secondAccount.Id;
-        }
-
         strategy.Name = request.Name;
         strategy.ConfigJson = request.ConfigJson ?? strategy.ConfigJson;
         await _db.SaveChangesAsync();
@@ -966,7 +828,6 @@ public class StrategiesController : ControllerBase
     {
         var strategy = await _db.Strategies
             .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
-            .Include(s => s.SecondAccount).ThenInclude(a => a!.AccountProxies).ThenInclude(ap => ap.Proxy)
             .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
 
         if (strategy == null)
@@ -1387,15 +1248,6 @@ public class StrategiesController : ControllerBase
             });
         }
 
-        // --- FuturesArbitrage path ---
-        if (strategy.Type == StrategyTypes.FuturesArbitrage)
-        {
-            using var arbFutures = _exchangeFactory.CreateFutures(strategy.Account);
-            await _arbitrageHandler.ForceCloseAsync(strategy, arbFutures, HttpContext.RequestAborted);
-
-            return Ok(new { message = "Позиции арбитража закрыты по рынку" });
-        }
-
         // --- EmaBounce / MaratG path ---
         var state = JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, jsonOpts);
 
@@ -1557,91 +1409,6 @@ public class StrategiesController : ControllerBase
         return Ok(new { message = "ĐŁĐ±Ń‹Ń‚ĐşĐ¸ ŃĐ±Ń€ĐľŃĐµĐ˝Ń‹", consecutiveLosses = 0 });
     }
 
-    /// <summary>
-    /// Live top-of-book and spread for a FuturesArbitrage bot, straight off the websocket streams.
-    ///
-    /// The bot's own state only carries the spread seen on its last 5s tick, so the UI could never
-    /// show more than a stale, sampled number. This reads the streams directly instead — the same
-    /// quotes and the same formulas (<see cref="ArbitrageSpreadMath"/>) the worker trades on.
-    ///
-    /// Subscribing here is on demand and shared: the first poll opens the streams, later polls
-    /// reuse them, and the quote service drops them once nobody has asked for ~5 minutes. So the
-    /// connections exist only while somebody is actually watching the page.
-    ///
-    /// Ages are returned per leg and NOT hidden: a quote that stopped updating still renders, and
-    /// the client is expected to show it as stale rather than pretend it is live.
-    /// </summary>
-    [HttpGet("{id:guid}/arbitrage-quotes")]
-    public async Task<IActionResult> GetArbitrageQuotes(Guid id)
-    {
-        var strategy = await _db.Strategies
-            .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
-            .Include(s => s.SecondAccount!).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
-            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
-
-        if (strategy == null) return NotFound();
-        if (strategy.Type != StrategyTypes.FuturesArbitrage)
-            return BadRequest(new { message = "Живые котировки доступны только для стратегии «Арбитраж фьюч-фьюч»." });
-        if (strategy.SecondAccount == null)
-            return BadRequest(new { message = "У стратегии не задан второй аккаунт." });
-
-        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-        var config = JsonSerializer.Deserialize<ArbitrageConfig>(strategy.ConfigJson, jsonOpts);
-        if (config == null || string.IsNullOrWhiteSpace(config.Symbol))
-            return BadRequest(new { message = "Конфигурация стратегии не читается." });
-
-        var symbolA = config.Symbol;
-        var symbolB = string.IsNullOrWhiteSpace(config.SecondSymbol) ? config.Symbol : config.SecondSymbol!;
-
-        await _quotes.EnsureSubscribedAsync(strategy.Account, symbolA, HttpContext.RequestAborted);
-        await _quotes.EnsureSubscribedAsync(strategy.SecondAccount, symbolB, HttpContext.RequestAborted);
-
-        var now = DateTime.UtcNow;
-        var quoteA = _quotes.TryGetQuote(strategy.Account.ExchangeType, symbolA);
-        var quoteB = _quotes.TryGetQuote(strategy.SecondAccount.ExchangeType, symbolB);
-        var statusA = _quotes.GetStatus(strategy.Account.ExchangeType, symbolA);
-        var statusB = _quotes.GetStatus(strategy.SecondAccount.ExchangeType, symbolB);
-
-        object? primaryExpensive = null;
-        object? secondaryExpensive = null;
-
-        if (quoteA is { IsValid: true } && quoteB is { IsValid: true })
-        {
-            primaryExpensive = new
-            {
-                entrySpreadPercent = ArbitrageSpreadMath.EntrySpreadPercent(quoteA.Bid, quoteB.Ask),
-                exitSpreadPercent = ArbitrageSpreadMath.ExitSpreadPercent(quoteA.Ask, quoteB.Bid)
-            };
-            secondaryExpensive = new
-            {
-                entrySpreadPercent = ArbitrageSpreadMath.EntrySpreadPercent(quoteB.Bid, quoteA.Ask),
-                exitSpreadPercent = ArbitrageSpreadMath.ExitSpreadPercent(quoteB.Ask, quoteA.Bid)
-            };
-        }
-
-        return Ok(new
-        {
-            serverTimeUtc = now,
-            primary = LegQuote(strategy.Account.ExchangeType.ToString(), symbolA, quoteA, statusA, now),
-            secondary = LegQuote(strategy.SecondAccount.ExchangeType.ToString(), symbolB, quoteB, statusB, now),
-            primaryExpensive,
-            secondaryExpensive
-        });
-    }
-
-    private static object LegQuote(string exchange, string symbol, QuoteSnapshot? quote,
-        QuoteStreamStatus? status, DateTime nowUtc) => new
-    {
-        exchange,
-        symbol,
-        bid = quote?.Bid,
-        ask = quote?.Ask,
-        ageMs = quote == null ? (double?)null : Math.Round(quote.AgeMs(nowUtc)),
-        connected = status?.Connected ?? false,
-        updates = status?.UpdateCount ?? 0,
-        lastError = status?.LastError
-    };
-
     [HttpGet("{id:guid}/chart")]
     public async Task<IActionResult> GetChart(Guid id, [FromQuery] int limit = 300, [FromQuery] string? timeframe = null)
     {
@@ -1671,7 +1438,7 @@ public class StrategiesController : ControllerBase
         if (string.IsNullOrEmpty(symbol))
             return BadRequest(new { message = "Invalid config" });
 
-        // Strategies without a timeframe (HuntingFunding/FundingClaim/grids) fall back to 1h just for viewing.
+        // Strategies without a timeframe (HuntingFunding/grids) fall back to 1h just for viewing.
         var resolvedTf = string.IsNullOrEmpty(config?.Timeframe) ? "1h" : config.Timeframe;
 
         // Optional view-only timeframe override from the chart modal — validated against a
@@ -1784,10 +1551,6 @@ public class StrategiesController : ControllerBase
 public class CreateStrategyRequest
 {
     public Guid AccountId { get; set; }
-
-    // FuturesArbitrage only: the second exchange account (the other leg). Ignored for
-    // all other strategy types.
-    public Guid? SecondAccountId { get; set; }
     public Guid? WorkspaceId { get; set; }
     public string Name { get; set; } = string.Empty;
     public string Type { get; set; } = string.Empty;
@@ -1798,9 +1561,6 @@ public class UpdateStrategyRequest
 {
     public string Name { get; set; } = string.Empty;
     public string? ConfigJson { get; set; }
-
-    // FuturesArbitrage only: allows changing the second account while the bot is stopped.
-    public Guid? SecondAccountId { get; set; }
 }
 
 public class SetTelegramBotRequest

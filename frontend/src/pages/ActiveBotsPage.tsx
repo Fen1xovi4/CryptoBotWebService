@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import api, { optimizeSmartGridHedge, getArbitrageQuotes } from '../api/client';
-import type { OptimizeSmartGridHedgeResponse, ArbitrageQuotesResponse } from '../api/client';
+import api, { optimizeSmartGridHedge } from '../api/client';
+import type { OptimizeSmartGridHedgeResponse } from '../api/client';
 import Header from '../components/Layout/Header';
 import StatusBadge from '../components/ui/StatusBadge';
 import SearchableSelect from '../components/ui/SearchableSelect';
@@ -12,8 +12,6 @@ import { formatStakeSequence } from './tester/formDefaults';
 interface Strategy {
   id: string;
   accountId: string;
-  secondAccountId: string | null;
-  secondAccountName: string | null;
   workspaceId: string | null;
   telegramBotId: string | null;
   accountName: string;
@@ -67,14 +65,6 @@ interface WorkspaceConfig {
   // SmaDca workspace settings
   timerEnabled: boolean;
   timerExpiresAt: string | null; // ISO UTC
-  // FundingClaim workspace settings
-  fcSizeUsdt: number;
-  fcMinFundingRatePercent: number;
-  fcMaxFundingRatePercent: number;
-  fcStopLossPercent: number;
-  fcLeverage: number;
-  fcSlGraceMinutes: number;
-  fcSlCooldownHours: number;
 }
 
 interface WorkspaceStats {
@@ -104,13 +94,6 @@ const defaultConfig: WorkspaceConfig = {
   fundingRateMax: 2.0,
   timerEnabled: false,
   timerExpiresAt: null,
-  fcSizeUsdt: 100,
-  fcMinFundingRatePercent: 0.6,
-  fcMaxFundingRatePercent: 2.0,
-  fcStopLossPercent: 2.5,
-  fcLeverage: 3,
-  fcSlGraceMinutes: 10,
-  fcSlCooldownHours: 6,
 };
 
 const exchangeNames: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX', 4: 'Dzengi' };
@@ -452,11 +435,9 @@ export default function ActiveBotsPage() {
             <option value="MaratG">MaratG</option>
             <option value="HuntingFunding">HuntingFunding</option>
             <option value="SmaDca">SMA DCA</option>
-            <option value="FundingClaim">FundingClaim</option>
             <option value="GridFloat">Grid Float</option>
             <option value="GridHedge">Grid Hedge</option>
             <option value="SmartGridHedge">Smart Grid + Hedge</option>
-            <option value="FuturesArbitrage">Арбитраж (фьюч/фьюч)</option>
           </select>
         </div>
 
@@ -555,114 +536,6 @@ export default function ActiveBotsPage() {
               Остальные настройки задаются индивидуально в каждом боте через уровни ордеров.
             </p>
           </>
-        ) : activeWorkspace?.strategyType === 'FundingClaim' ? (
-          <>
-            <div className="h-6 w-px bg-border" />
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-secondary">Размер позиции:</span>
-              <input
-                type="number"
-                step="1"
-                min="1"
-                value={localConfig.fcSizeUsdt}
-                onChange={(e) => updateConfig({ fcSizeUsdt: Number(e.target.value) })}
-                className="w-24 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
-              />
-              <span className="text-xs text-text-secondary">USDT</span>
-            </div>
-            <div className="h-6 w-px bg-border" />
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-secondary">Плечо:</span>
-              <input
-                type="number"
-                step="1"
-                min="1"
-                max="125"
-                value={localConfig.fcLeverage}
-                onChange={(e) => updateConfig({ fcLeverage: Number(e.target.value) })}
-                className="w-16 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
-              />
-              <span className="text-xs text-text-secondary">x</span>
-            </div>
-            <div className="h-6 w-px bg-border" />
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-secondary">Фандинг:</span>
-              <input
-                type="number"
-                step="0.01"
-                min="0.01"
-                value={localConfig.fcMinFundingRatePercent}
-                onChange={(e) => updateConfig({ fcMinFundingRatePercent: Number(e.target.value) })}
-                className="w-20 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
-              />
-              <span className="text-xs text-text-secondary">..</span>
-              <input
-                type="number"
-                step="0.1"
-                min="0"
-                value={localConfig.fcMaxFundingRatePercent}
-                onChange={(e) => updateConfig({ fcMaxFundingRatePercent: Number(e.target.value) })}
-                className="w-20 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
-              />
-              <span className="text-xs text-text-secondary">%</span>
-              <span className="text-xs text-text-secondary italic">
-                диапазон |funding|. 0 = без верхней границы.
-              </span>
-            </div>
-            <div className="h-6 w-px bg-border" />
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-secondary">Стоп-лосс:</span>
-              <input
-                type="number"
-                step="0.1"
-                min="0"
-                value={localConfig.fcStopLossPercent}
-                onChange={(e) => updateConfig({ fcStopLossPercent: Number(e.target.value) })}
-                className="w-20 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
-              />
-              <span className="text-xs text-text-secondary">%</span>
-              <span className="text-xs text-text-secondary italic">
-                закрыть позицию при просадке. 0 = выключен.
-              </span>
-            </div>
-            <div className="h-6 w-px bg-border" />
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-secondary">SL grace:</span>
-              <span className="text-xs text-text-secondary">±</span>
-              <input
-                type="number"
-                step="1"
-                min="0"
-                value={localConfig.fcSlGraceMinutes}
-                onChange={(e) => updateConfig({ fcSlGraceMinutes: Number(e.target.value) })}
-                className="w-16 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
-              />
-              <span className="text-xs text-text-secondary">мин</span>
-              <span className="text-xs text-text-secondary italic">
-                окно вокруг фандинга где SL отключён. 0 = всегда активен.
-              </span>
-            </div>
-            <div className="h-6 w-px bg-border" />
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-text-secondary">SL cooldown:</span>
-              <input
-                type="number"
-                step="1"
-                min="0"
-                value={localConfig.fcSlCooldownHours}
-                onChange={(e) => updateConfig({ fcSlCooldownHours: Number(e.target.value) })}
-                className="w-16 bg-bg-tertiary border border-border rounded-lg px-3 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors"
-              />
-              <span className="text-xs text-text-secondary">ч</span>
-              <span className="text-xs text-text-secondary italic">
-                после SL не входить в тикер N часов (workspace-wide). 0 = выключен.
-              </span>
-            </div>
-            <div className="h-6 w-px bg-border" />
-            <p className="text-sm text-text-secondary italic">
-              Остальные настройки (авторотация, макс. циклов, проверка перед фандингом) задаются в каждом боте.
-            </p>
-          </>
         ) : activeWorkspace?.strategyType === 'GridFloat' ? (
           <>
             <div className="h-6 w-px bg-border" />
@@ -682,13 +555,6 @@ export default function ActiveBotsPage() {
             <div className="h-6 w-px bg-border" />
             <p className="text-sm text-text-secondary italic">
               Геометрический шаг, NUp/NDown, SkimMode, лот, плечо и Q_hedge задаются в каждом боте. Только Bybit hedge mode.
-            </p>
-          </>
-        ) : activeWorkspace?.strategyType === 'FuturesArbitrage' ? (
-          <>
-            <div className="h-6 w-px bg-border" />
-            <p className="text-sm text-text-secondary italic">
-              Пара аккаунтов (биржа A / биржа B), символы и сетка уровней входа/выхода по спреду задаются в каждом боте.
             </p>
           </>
         ) : (
@@ -989,28 +855,6 @@ export default function ActiveBotsPage() {
               );
             }
 
-            if (s.type === 'FundingClaim') {
-              return (
-                <FundingClaimCard
-                  key={s.id}
-                  s={s}
-                  cfg={cfg}
-                  state={state}
-                  isRunning={isRunning}
-                  onStart={() => startMutation.mutate(s.id)}
-                  onStop={() => stopMutation.mutate(s.id)}
-                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
-                  onEdit={() => setEditingStrategy(s)}
-                  onLogs={() => setLogStrategy(s)}
-                  onChart={() => setChartStrategy(s)}
-                  onClosePosition={() => closePositionMutation.mutate(s.id)}
-                  closePositionPending={closePositionMutation.isPending}
-                  telegramBots={telegramBots}
-                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
-                />
-              );
-            }
-
             if (s.type === 'GridFloat') {
               return (
                 <GridFloatCard
@@ -1081,27 +925,6 @@ export default function ActiveBotsPage() {
                   onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
                   onSetTakeProfit={(enabled, targetUsd) => setTakeProfitMutation.mutate({ strategyId: s.id, enabled, targetUsd })}
                   setTakeProfitPending={setTakeProfitMutation.isPending}
-                />
-              );
-            }
-
-            if (s.type === 'FuturesArbitrage') {
-              return (
-                <ArbitrageCard
-                  key={s.id}
-                  s={s}
-                  cfg={cfg as ArbitrageCfg | null}
-                  state={state as ArbitrageStateData | null}
-                  isRunning={isRunning}
-                  onStart={() => startMutation.mutate(s.id)}
-                  onStop={() => stopMutation.mutate(s.id)}
-                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
-                  onEdit={() => setEditingStrategy(s)}
-                  onLogs={() => setLogStrategy(s)}
-                  onClosePosition={() => closePositionMutation.mutate(s.id)}
-                  closePositionPending={closePositionMutation.isPending}
-                  telegramBots={telegramBots}
-                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
                 />
               );
             }
@@ -1587,32 +1410,6 @@ interface HFStateData {
   lastPrice: number | null;
 }
 
-/* ── FundingClaim types ──────────────────────────────────── */
-
-interface FCConfig {
-  symbol: string;
-  maxCycles: number;
-  autoRotateTicker: boolean;
-  checkBeforeFundingMinutes: number;
-}
-
-interface FCStateData {
-  phase: number; // 0=Idle, 1=InPosition
-  direction: string | null;
-  symbol: string | null;
-  currentFundingRate: number | null;
-  nextFundingTime: string | null;
-  entryPrice: number | null;
-  entryQuantity: number | null;
-  entrySizeUsdt: number | null;
-  positionOpenedAt: string | null;
-  cycleCount: number;
-  cycleTotalPnl: number;
-  cycleTotalFundingPnl: number;
-  currentCycleFundingPnl: number;
-  lastPrice: number | null;
-}
-
 function useCountdown(targetIso: string | null | undefined): string {
   const [display, setDisplay] = useState('--:--:--');
 
@@ -1912,312 +1709,6 @@ function HuntingFundingCard({
         <div className="flex-1" />
 
         {phase === 2 && isRunning && (
-          <button
-            onClick={() => { if (confirm('Закрыть позицию по рынку?')) onClosePosition(); }}
-            disabled={closePositionPending}
-            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
-          >
-            {closePositionPending ? '...' : 'Закрыть'}
-          </button>
-        )}
-
-        {isRunning ? (
-          <button
-            onClick={onStop}
-            className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
-          >
-            Стоп
-          </button>
-        ) : (
-          <>
-            <button
-              onClick={onStart}
-              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
-            >
-              Старт
-            </button>
-            <button
-              onClick={onEdit}
-              title="Редактировать"
-              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-              </svg>
-            </button>
-          </>
-        )}
-
-        <button
-          onClick={onDelete}
-          title="Удалить"
-          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-          </svg>
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ── FundingClaim Card ──────────────────────────────────── */
-
-function FundingClaimCard({
-  s,
-  cfg,
-  state,
-  isRunning,
-  onStart,
-  onStop,
-  onDelete,
-  onEdit,
-  onLogs,
-  onChart,
-  onClosePosition,
-  closePositionPending,
-  telegramBots,
-  onSetTelegramBot,
-}: {
-  s: Strategy;
-  cfg: FCConfig | null;
-  state: FCStateData | null;
-  isRunning: boolean;
-  onStart: () => void;
-  onStop: () => void;
-  onDelete: () => void;
-  onEdit: () => void;
-  onLogs: () => void;
-  onChart: () => void;
-  onClosePosition: () => void;
-  closePositionPending: boolean;
-  telegramBots: TelegramBotOption[] | undefined;
-  onSetTelegramBot: (botId: string | null) => void;
-}) {
-  const phase = state?.phase ?? 0;
-  const fundingCountdown = useCountdown(state?.nextFundingTime);
-
-  const borderAccent = isRunning
-    ? phase === 1 ? 'border-l-accent-yellow' : 'border-l-accent-green'
-    : 'border-l-border';
-
-  // PnL calculation for InPosition phase
-  let pnlUsd = 0;
-  let pnlPct = 0;
-  if (phase === 1 && state?.entryPrice && state?.lastPrice && state?.entrySizeUsdt) {
-    const isLong = state.direction === 'Long';
-    pnlPct = isLong
-      ? (state.lastPrice - state.entryPrice) / state.entryPrice * 100
-      : (state.entryPrice - state.lastPrice) / state.entryPrice * 100;
-    pnlUsd = (pnlPct / 100) * state.entrySizeUsdt;
-  }
-
-  return (
-    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
-      {/* Header */}
-      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-mono font-semibold text-text-primary truncate">
-              {state?.symbol || cfg?.symbol || '—'}
-            </span>
-            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400">
-              FC
-            </span>
-            {cfg?.autoRotateTicker && (
-              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">
-                AUTO
-              </span>
-            )}
-          </div>
-          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
-            {s.name} · {s.accountName}
-          </div>
-        </div>
-        <StatusBadge status={s.status} />
-      </div>
-
-      {/* Config chips */}
-      {cfg && (
-        <div className="px-4 pb-2 flex flex-wrap gap-1">
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-            -{cfg.checkBeforeFundingMinutes}мин
-          </span>
-          {cfg.maxCycles > 0 && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-              макс {cfg.maxCycles} цикл.
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Divider */}
-      <div className="border-t border-border/50" />
-
-      {/* Phase content */}
-      <div className="px-4 py-2.5 min-h-[52px] flex items-center">
-        {!isRunning ? (
-          <span className="text-text-secondary text-xs">Остановлен</span>
-        ) : phase === 0 ? (
-          <div className="w-full space-y-1">
-            <div className="flex items-center gap-2">
-              {state?.currentFundingRate != null && (
-                <span className={`text-xs font-semibold ${state.currentFundingRate >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                  Funding: {state.currentFundingRate >= 0 ? '+' : ''}{(state.currentFundingRate * 100).toFixed(4)}%
-                </span>
-              )}
-            </div>
-            {state?.nextFundingTime && (
-              <div className="text-[11px] text-text-secondary">
-                До фандинга: <span className="font-mono text-text-primary">{fundingCountdown}</span>
-              </div>
-            )}
-          </div>
-        ) : phase === 1 ? (
-          <div className="w-full space-y-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              {state?.direction && (
-                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${state.direction === 'Long' ? 'bg-accent-green/15 text-accent-green' : 'bg-accent-red/15 text-accent-red'}`}>
-                  {state.direction.toUpperCase()}
-                </span>
-              )}
-              {state?.entryPrice != null && (
-                <span className="text-[10px] text-text-secondary">
-                  Вход: <span className="text-text-primary">${state.entryPrice.toFixed(2)}</span>
-                </span>
-              )}
-              {state?.lastPrice != null && (
-                <span className="text-[10px] text-text-secondary">
-                  Цена: <span className="text-text-primary">${state.lastPrice.toFixed(2)}</span>
-                </span>
-              )}
-              {state?.entryPrice != null && state?.lastPrice != null && state?.entrySizeUsdt != null && (
-                <span className={`text-[10px] font-semibold ${pnlUsd >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                  {pnlUsd >= 0 ? '+' : ''}${pnlUsd.toFixed(2)} ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
-                </span>
-              )}
-            </div>
-            {state?.currentCycleFundingPnl != null && (
-              <div className={`text-[10px] font-medium ${state.currentCycleFundingPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                Funding PnL: {state.currentCycleFundingPnl >= 0 ? '+' : ''}${state.currentCycleFundingPnl.toFixed(4)}
-              </div>
-            )}
-            {state?.currentFundingRate != null && (
-              <div className="text-[11px] text-text-secondary flex items-center gap-2">
-                <span>
-                  Текущий funding: <span className={`font-mono font-semibold ${state.currentFundingRate >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                    {state.currentFundingRate >= 0 ? '+' : ''}{(state.currentFundingRate * 100).toFixed(4)}%
-                  </span>
-                </span>
-              </div>
-            )}
-            {state?.nextFundingTime && (
-              <div className="text-[11px] text-text-secondary">
-                До фандинга: <span className="font-mono text-text-primary">{fundingCountdown}</span>
-              </div>
-            )}
-          </div>
-        ) : (
-          <span className="text-text-secondary text-xs">—</span>
-        )}
-      </div>
-
-      {/* Bottom stats row */}
-      <div className="px-4 pb-2 flex items-center gap-3">
-        {cfg && (
-          <span className="text-[10px] text-text-secondary">
-            Цикл: <span className="text-text-primary font-medium">{state?.cycleCount ?? 0}/{cfg.maxCycles || '∞'}</span>
-          </span>
-        )}
-        {state != null && state.cycleTotalPnl != null && (
-          <span className={`text-[10px] font-medium ${state.cycleTotalPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-            PnL: {state.cycleTotalPnl >= 0 ? '+' : ''}${state.cycleTotalPnl.toFixed(2)}
-          </span>
-        )}
-        {state != null && (state.cycleTotalFundingPnl != null || state.currentCycleFundingPnl != null) && (() => {
-          const totalF = (state.cycleTotalFundingPnl ?? 0) + (state.currentCycleFundingPnl ?? 0);
-          return (
-            <span className={`text-[10px] font-medium ${totalF >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-              Funding: {totalF >= 0 ? '+' : ''}${totalF.toFixed(4)}
-            </span>
-          );
-        })()}
-      </div>
-
-      {/* Divider */}
-      <div className="border-t border-border/50" />
-
-      {/* Actions */}
-      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
-        <button
-          onClick={onChart}
-          title="График"
-          className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
-          </svg>
-        </button>
-        <button
-          onClick={onLogs}
-          title="Логи"
-          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-          </svg>
-        </button>
-
-        {/* TG signal toggle */}
-        {telegramBots && telegramBots.length > 0 && (
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => {
-                if (s.telegramBotId) {
-                  onSetTelegramBot(null);
-                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
-                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
-                }
-              }}
-              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
-              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
-                s.telegramBotId
-                  ? 'bg-accent-blue/15 text-accent-blue'
-                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
-              }`}
-            >
-              TG
-            </button>
-            {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
-              <select
-                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
-                value=""
-                onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
-              >
-                <option value="">Select bot...</option>
-                {telegramBots.filter((b) => b.isActive).map((b) => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
-                ))}
-              </select>
-            )}
-            {s.telegramBotId && (
-              <select
-                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
-                value={s.telegramBotId}
-                onChange={(e) => onSetTelegramBot(e.target.value || null)}
-              >
-                {telegramBots.filter((b) => b.isActive).map((b) => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
-                ))}
-              </select>
-            )}
-          </div>
-        )}
-
-        <div className="flex-1" />
-
-        {phase === 1 && isRunning && (
           <button
             onClick={() => { if (confirm('Закрыть позицию по рынку?')) onClosePosition(); }}
             disabled={closePositionPending}
@@ -4482,561 +3973,6 @@ function SmartGridHedgeCard({
   );
 }
 
-/* ── FuturesArbitrage types + card ──────────────────────── */
-
-interface ArbitrageLevelCfg {
-  entrySpreadPercent: number;
-  exitSpreadPercent: number;
-  notionalUsdt: number;
-}
-
-interface ArbitrageCfg {
-  symbol: string;
-  secondSymbol: string;
-  leverage: number;
-  allowBothDirections: boolean;
-  levels: ArbitrageLevelCfg[];
-  maxConsecutiveFailures: number;
-  orderMode?: 'Market' | 'LimitIoc';
-  maxSlippagePercent?: number;
-  entryConfirmSeconds?: number;
-}
-
-interface ArbitrageLevelState {
-  index: number;
-  isOpen: boolean;
-  shortQty: number;
-  longQty: number;
-  shortEntryPrice: number;
-  longEntryPrice: number;
-  entrySpreadPercent: number;
-  openedAt: string | null;
-}
-
-// direction: 0=no positions, 1=primary(A) dearer → short A + long B, 2=secondary(B) dearer → short B + long A
-interface ArbitrageStateData {
-  direction: 0 | 1 | 2;
-  levels: ArbitrageLevelState[];
-  consecutiveFailures: number;
-  realizedPnlUsdt: number;
-  completedCycles: number;
-  lastSpreadPercent: number | null;
-  lastCheckAt: string | null;
-  // Taker rates the exchanges reported for the two accounts (fractions), null until resolved.
-  primaryTakerFeeRate?: number | null;
-  secondaryTakerFeeRate?: number | null;
-}
-
-/** "0.05%" from a fraction like 0.0005. */
-function formatFeeRate(rate: number): string {
-  return `${(rate * 100).toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}%`;
-}
-
-const ARB_DIRECTION_LABELS: Record<number, string> = {
-  0: 'Нет позиций',
-  1: 'Шорт A + Лонг B',
-  2: 'Шорт B + Лонг A',
-};
-
-function arbDirectionColor(direction: number): string {
-  if (direction === 1) return 'bg-accent-red/15 text-accent-red';
-  if (direction === 2) return 'bg-accent-blue/15 text-accent-blue';
-  return 'bg-bg-tertiary text-text-secondary';
-}
-
-// Rolling window of the live spread drawn on the bot card. Three minutes at one sample per second
-// is enough to see both the current move and whether the feed is alive at all.
-const SPREAD_WINDOW_MS = 180_000;
-const SPREAD_MAX_POINTS = 400;
-
-// A gap longer than this between two samples is drawn as a break in the line instead of a
-// straight segment across it — the whole point of the chart is that a frozen feed LOOKS frozen.
-const SPREAD_GAP_MS = 3000;
-
-interface SpreadPoint {
-  t: number;
-  v: number;
-}
-
-/**
- * Spread pulse: signed entry spread over time, zero line in the middle, entry thresholds dashed.
- * Positive = venue A is the expensive one, negative = venue B — same sign convention as the
- * number above it and as the bot's own state.
- */
-function SpreadSparkline({
-  points,
-  nowMs,
-  entryThreshold,
-  bothDirections,
-}: {
-  points: SpreadPoint[];
-  nowMs: number;
-  entryThreshold: number | null;
-  bothDirections: boolean;
-}) {
-  const from = nowMs - SPREAD_WINDOW_MS;
-  const visible = points.filter((p) => p.t >= from);
-
-  if (visible.length < 2) {
-    return (
-      <div className="h-14 flex items-center justify-center text-[10px] text-text-secondary/60">
-        Собираем историю спреда…
-      </div>
-    );
-  }
-
-  // Symmetric scale around zero so the sign is readable at a glance, and always tall enough to
-  // show the entry threshold — a chart that clipped the trigger line would be misleading.
-  const maxAbs =
-    Math.max(...visible.map((p) => Math.abs(p.v)), entryThreshold ?? 0, 0.0001) * 1.15;
-
-  const x = (t: number) => ((t - from) / SPREAD_WINDOW_MS) * 100;
-  const y = (v: number) => 15 - (v / maxAbs) * 13.5;
-
-  let path = '';
-  visible.forEach((p, i) => {
-    const gap = i > 0 && p.t - visible[i - 1].t > SPREAD_GAP_MS;
-    path += `${i === 0 || gap ? 'M' : 'L'}${x(p.t).toFixed(2)},${y(p.v).toFixed(2)} `;
-  });
-
-  const last = visible[visible.length - 1];
-  const lastFresh = nowMs - last.t <= SPREAD_GAP_MS;
-  const lineColor = last.v >= 0 ? 'text-accent-red' : 'text-accent-blue';
-  const thresholdY = entryThreshold != null ? y(entryThreshold) : null;
-  const thresholdYNeg = entryThreshold != null && bothDirections ? y(-entryThreshold) : null;
-
-  return (
-    <div className="relative">
-      <svg viewBox="0 0 100 30" preserveAspectRatio="none" className="w-full h-14">
-        {/* zero line */}
-        <line x1="0" y1="15" x2="100" y2="15" className="stroke-border" strokeWidth="0.5"
-              vectorEffect="non-scaling-stroke" />
-
-        {/* entry thresholds — where the bot would open */}
-        {thresholdY != null && (
-          <line x1="0" y1={thresholdY} x2="100" y2={thresholdY} className="stroke-accent-yellow/60"
-                strokeWidth="0.5" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
-        )}
-        {thresholdYNeg != null && (
-          <line x1="0" y1={thresholdYNeg} x2="100" y2={thresholdYNeg} className="stroke-accent-yellow/60"
-                strokeWidth="0.5" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
-        )}
-
-        <path d={path.trim()} fill="none" className={`${lineColor} stroke-current`} strokeWidth="1.25"
-              strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
-
-        {lastFresh && (
-          <circle cx={x(last.t)} cy={y(last.v)} r="1.5" className={`${lineColor} fill-current`}
-                  vectorEffect="non-scaling-stroke" />
-        )}
-      </svg>
-
-      <div className="flex items-center justify-between text-[9px] text-text-secondary/60 -mt-1">
-        <span>3 мин</span>
-        <span>
-          макс ±{maxAbs.toFixed(3)}%
-          {entryThreshold != null && <span className="text-accent-yellow/70"> · вход {entryThreshold}%</span>}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-function formatArbBook(bid: number | null, ask: number | null): string {
-  if (bid == null || ask == null) return '—';
-  return `${bid} / ${ask}`;
-}
-
-/** Exit spread of the direction the live entry spread points at (the one the bot would trade). */
-function formatArbExitSpread(live: ArbitrageQuotesResponse, signedEntrySpread: number): string {
-  const pair = signedEntrySpread >= 0 ? live.primaryExpensive : live.secondaryExpensive;
-  if (!pair) return '—';
-  return `${pair.exitSpreadPercent.toFixed(3)}%`;
-}
-
-function formatArbTime(iso: string | null): string {
-  if (!iso) return '—';
-  const t = new Date(iso);
-  if (isNaN(t.getTime())) return '—';
-  return t.toLocaleTimeString();
-}
-
-function ArbitrageCard({
-  s,
-  cfg,
-  state,
-  isRunning,
-  onStart,
-  onStop,
-  onDelete,
-  onEdit,
-  onLogs,
-  onClosePosition,
-  closePositionPending,
-  telegramBots,
-  onSetTelegramBot,
-}: {
-  s: Strategy;
-  cfg: ArbitrageCfg | null;
-  state: ArbitrageStateData | null;
-  isRunning: boolean;
-  onStart: () => void;
-  onStop: () => void;
-  onDelete: () => void;
-  onEdit: () => void;
-  onLogs: () => void;
-  onClosePosition: () => void;
-  closePositionPending: boolean;
-  telegramBots: TelegramBotOption[] | undefined;
-  onSetTelegramBot: (botId: string | null) => void;
-}) {
-  const direction = state?.direction ?? 0;
-  const levels = state?.levels ?? [];
-  const openLevels = levels.filter((l) => l.isOpen);
-  const hasPosition = openLevels.length > 0;
-
-  // Live spread off the websocket streams. Polled once a second while the bot runs; the bot's own
-  // state only carries the value from its last 5s tick, which is too coarse to watch a spread on.
-  const { data: live } = useQuery({
-    queryKey: ['arbitrage-quotes', s.id],
-    queryFn: () => getArbitrageQuotes(s.id),
-    enabled: isRunning,
-    refetchInterval: 1000,
-    staleTime: 0,
-    retry: false,
-  });
-
-  // Same freshness rule the worker applies before trading on a quote: anything older than 2s is
-  // a silent socket, not a quiet market, so the card falls back to the last tick's value.
-  const liveAgeMs = live
-    ? Math.max(live.primary.ageMs ?? Number.POSITIVE_INFINITY, live.secondary.ageMs ?? Number.POSITIVE_INFINITY)
-    : Number.POSITIVE_INFINITY;
-  const liveFresh = liveAgeMs <= 2000;
-
-  // Signed like state.lastSpreadPercent: positive = venue A (primary) is the expensive one.
-  const liveSpread = live?.primaryExpensive && live?.secondaryExpensive
-    ? (live.primaryExpensive.entrySpreadPercent >= live.secondaryExpensive.entrySpreadPercent
-        ? live.primaryExpensive.entrySpreadPercent
-        : -live.secondaryExpensive.entrySpreadPercent)
-    : null;
-
-  const spread = liveFresh && liveSpread != null ? liveSpread : state?.lastSpreadPercent ?? null;
-
-  // Rolling spread history for the chart. Only fresh samples are recorded — a stale quote must
-  // leave a visible gap rather than a flat line pretending the market stood still.
-  const [spreadHistory, setSpreadHistory] = useState<SpreadPoint[]>([]);
-  useEffect(() => {
-    if (!live || !liveFresh || liveSpread == null) return;
-    setSpreadHistory((prev) => {
-      const next = [...prev, { t: Date.now(), v: liveSpread }];
-      return next.length > SPREAD_MAX_POINTS ? next.slice(next.length - SPREAD_MAX_POINTS) : next;
-    });
-    // One point per server response, keyed on its timestamp.
-  }, [live?.serverTimeUtc]);
-
-  // Own clock so the window keeps scrolling even if polling dies: the line then stops and the gap
-  // grows on screen, which is exactly the "is anything frozen?" signal this chart is for.
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    if (!isRunning) return;
-    const id = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [isRunning]);
-
-  const entryThreshold = cfg?.levels?.length
-    ? Math.min(...cfg.levels.map((l) => l.entrySpreadPercent))
-    : null;
-
-  const spreadColor = spread == null || spread === 0
-    ? 'text-text-secondary'
-    : spread > 0
-      ? 'text-accent-red'
-      : 'text-accent-blue';
-
-  const borderAccent = !isRunning
-    ? 'border-l-border'
-    : hasPosition
-      ? 'border-l-accent-yellow'
-      : 'border-l-accent-green';
-
-  const secondSymbol = cfg?.secondSymbol?.trim() ? cfg.secondSymbol : cfg?.symbol;
-  const realizedPnl = state?.realizedPnlUsdt ?? 0;
-
-  return (
-    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
-      {/* Header */}
-      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-mono font-semibold text-text-primary truncate">
-              {cfg?.symbol || '—'}
-              {secondSymbol && secondSymbol !== cfg?.symbol && (
-                <span className="text-text-secondary"> / {secondSymbol}</span>
-              )}
-            </span>
-            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-400">
-              FA
-            </span>
-            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${arbDirectionColor(direction)}`}>
-              {ARB_DIRECTION_LABELS[direction] ?? String(direction)}
-            </span>
-          </div>
-          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
-            {s.name} · A: {s.accountName} · B: {s.secondAccountName ?? '—'}
-          </div>
-        </div>
-        <StatusBadge status={s.status} />
-      </div>
-
-      {/* Config chips */}
-      {cfg && (
-        <div className="px-4 pb-2 flex flex-wrap gap-1">
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-            ×{cfg.leverage}
-          </span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
-            {cfg.levels?.length ?? 0} уровн.
-          </span>
-          {cfg.allowBothDirections && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent-blue/10 text-accent-blue">
-              обе стороны
-            </span>
-          )}
-          {cfg.orderMode === 'LimitIoc' && (
-            <span
-              className="text-[10px] px-1.5 py-0.5 rounded bg-accent-yellow/10 text-accent-yellow"
-              title="Лимитные IOC-ордера с допуском проскальзывания"
-            >
-              IOC ±{cfg.maxSlippagePercent ?? 0.05}%
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Divider */}
-      <div className="border-t border-border/50" />
-
-      {/* State block */}
-      <div className="px-4 py-2.5 min-h-[52px]">
-        {!isRunning ? (
-          <span className="text-text-secondary text-xs">Остановлен</span>
-        ) : state == null ? (
-          <span className="text-text-secondary text-xs">Ожидание состояния...</span>
-        ) : (
-          <div className="w-full space-y-1.5">
-            {/* Spread + levels summary */}
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className="text-[10px] text-text-secondary">
-                Спред: <span className={`font-mono font-semibold ${spreadColor}`}>
-                  {spread == null ? '—' : `${spread >= 0 ? '+' : ''}${spread.toFixed(3)}%`}
-                </span>
-              </span>
-              {isRunning && (
-                <span
-                  title={
-                    liveFresh
-                      ? 'Живые котировки по websocket'
-                      : 'Поток котировок молчит — показано значение с последнего тика бота'
-                  }
-                  className={`text-[9px] font-bold px-1 py-0.5 rounded ${
-                    liveFresh ? 'bg-accent-green/15 text-accent-green' : 'bg-bg-tertiary text-text-secondary/60'
-                  }`}
-                >
-                  {liveFresh ? 'LIVE' : 'ТИК 5с'}
-                </span>
-              )}
-              <span className="text-[10px] text-text-secondary">
-                Уровней: <span className="text-text-primary font-medium">{openLevels.length}/{levels.length}</span>
-              </span>
-              <span className="text-[10px] text-text-secondary">
-                Циклов: <span className="text-text-primary font-medium">{state.completedCycles ?? 0}</span>
-              </span>
-            </div>
-
-            {/* Per-leg top of book — the two prices the spread above is computed from */}
-            {isRunning && live && (
-              <div className="flex items-center gap-3 flex-wrap font-mono text-[10px] text-text-secondary/80">
-                <span title={live.primary.lastError ?? undefined}>
-                  A {live.primary.exchange}: {formatArbBook(live.primary.bid, live.primary.ask)}
-                </span>
-                <span title={live.secondary.lastError ?? undefined}>
-                  B {live.secondary.exchange}: {formatArbBook(live.secondary.bid, live.secondary.ask)}
-                </span>
-                {liveFresh && liveSpread != null && (
-                  <span title="Спред выхода: во что обойдётся закрытие прямо сейчас">
-                    выход: {formatArbExitSpread(live, liveSpread)}
-                  </span>
-                )}
-              </div>
-            )}
-
-            {/* Fee rates the exchanges actually charge these accounts — what the PnL is computed with */}
-            {state.primaryTakerFeeRate != null && state.secondaryTakerFeeRate != null && (
-              <div
-                className="font-mono text-[10px] text-text-secondary/70"
-                title="Тейкер-комиссии аккаунтов по данным бирж. Круг = вход и выход на обеих ногах"
-              >
-                комиссии: A {formatFeeRate(state.primaryTakerFeeRate)} · B {formatFeeRate(state.secondaryTakerFeeRate)}
-                {' · '}круг {formatFeeRate((state.primaryTakerFeeRate + state.secondaryTakerFeeRate) * 2)}
-              </div>
-            )}
-
-            {/* Open levels detail */}
-            {openLevels.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {openLevels.map((l) => (
-                  <span
-                    key={l.index}
-                    title={`long ${l.longQty} @ ${l.longEntryPrice} · short ${l.shortQty} @ ${l.shortEntryPrice}`}
-                    className="text-[10px] px-1.5 py-0.5 rounded bg-accent-yellow/10 text-accent-yellow"
-                  >
-                    #{l.index} вход {l.entrySpreadPercent}%
-                  </span>
-                ))}
-              </div>
-            )}
-
-            {/* Failures */}
-            {(state.consecutiveFailures ?? 0) > 0 && (
-              <div className="text-[10px] text-accent-red">
-                Ошибок подряд: {state.consecutiveFailures}
-              </div>
-            )}
-
-            {/* PnL + last check */}
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className={`text-[10px] font-medium ${realizedPnl >= 0 ? 'text-accent-green' : 'text-accent-red'}`}>
-                PnL: {realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)}
-              </span>
-              <span className="text-[10px] text-text-secondary/70">
-                Проверено: {formatArbTime(state.lastCheckAt)}
-              </span>
-            </div>
-
-            {/* Spread pulse — live chart of the cross-exchange spread */}
-            <SpreadSparkline
-              points={spreadHistory}
-              nowMs={nowMs}
-              entryThreshold={entryThreshold}
-              bothDirections={cfg?.allowBothDirections ?? false}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Divider */}
-      <div className="border-t border-border/50" />
-
-      {/* Actions */}
-      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
-        <button
-          onClick={onLogs}
-          title="Логи"
-          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-          </svg>
-        </button>
-
-        {telegramBots && telegramBots.length > 0 && (
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => {
-                if (s.telegramBotId) {
-                  onSetTelegramBot(null);
-                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
-                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
-                }
-              }}
-              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
-              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
-                s.telegramBotId
-                  ? 'bg-accent-blue/15 text-accent-blue'
-                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
-              }`}
-            >
-              TG
-            </button>
-            {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
-              <select
-                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
-                value=""
-                onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
-              >
-                <option value="">Select bot...</option>
-                {telegramBots.filter((b) => b.isActive).map((b) => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
-                ))}
-              </select>
-            )}
-            {s.telegramBotId && (
-              <select
-                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
-                value={s.telegramBotId}
-                onChange={(e) => onSetTelegramBot(e.target.value || null)}
-              >
-                {telegramBots.filter((b) => b.isActive).map((b) => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
-                ))}
-              </select>
-            )}
-          </div>
-        )}
-
-        <div className="flex-1" />
-
-        {hasPosition && isRunning && (
-          <button
-            onClick={() => { if (confirm('Закрыть все позиции по рынку на обеих биржах?')) onClosePosition(); }}
-            disabled={closePositionPending}
-            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
-          >
-            {closePositionPending ? '...' : 'Закрыть'}
-          </button>
-        )}
-
-        {isRunning ? (
-          <button
-            onClick={onStop}
-            className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
-          >
-            Стоп
-          </button>
-        ) : (
-          <>
-            <button
-              onClick={onStart}
-              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
-            >
-              Старт
-            </button>
-            <button
-              onClick={onEdit}
-              title="Редактировать"
-              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-              </svg>
-            </button>
-          </>
-        )}
-
-        <button
-          onClick={onDelete}
-          title="Удалить"
-          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-          </svg>
-        </button>
-      </div>
-    </div>
-  );
-}
-
 /* ── Stat Card ─────────────────────────────────────────── */
 
 function StatCard({
@@ -5142,13 +4078,6 @@ function AddStrategyModal({
     [{ fromTier: '3', takeProfitPercent: '0.5' }],
   );
 
-  // FundingClaim fields
-  const [fcForm, setFcForm] = useState({
-    maxCycles: '0',
-    checkBeforeFundingMinutes: '10',
-  });
-  const [fcAutoRotate, setFcAutoRotate] = useState(true);
-
   // GridFloat fields. `tiers` is the dynamic expanding-grid list; start with one tier so the
   // default config matches the legacy single-zone behaviour ($100 in the first 10%). Per-tier
   // dca/tp inputs default empty — empty falls back to the global step from gfForm.
@@ -5186,21 +4115,6 @@ function AddStrategyModal({
     gridLeverage: '1',
   });
 
-  // FuturesArbitrage fields
-  const [secondAccountId, setSecondAccountId] = useState('');
-  const [arbForm, setArbForm] = useState({
-    secondSymbol: '',
-    leverage: '1',
-    allowBothDirections: true,
-    maxConsecutiveFailures: '3',
-    orderMode: 'Market' as 'Market' | 'LimitIoc',
-    maxSlippagePercent: '0.05',
-    entryConfirmSeconds: '1.5',
-  });
-  const [arbLevels, setArbLevels] = useState<Array<{ entrySpreadPercent: string; exitSpreadPercent: string; notionalUsdt: string }>>(
-    [{ entrySpreadPercent: '1', exitSpreadPercent: '0', notionalUsdt: '100' }],
-  );
-
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
     queryKey: ['symbols', accountId],
     queryFn: () => api.get(`/exchange/${accountId}/symbols`).then((r) => r.data),
@@ -5216,7 +4130,6 @@ function AddStrategyModal({
   const activeAccounts = accounts?.filter((a) => a.isActive) || [];
   const currentAccountExchangeType = activeAccounts.find((a) => a.id === accountId)?.exchangeType ?? 0;
   const isBybit = currentAccountExchangeType === 1;
-  const secondAccountExchangeType = activeAccounts.find((a) => a.id === secondAccountId)?.exchangeType ?? 0;
 
   const [checkingHedgeMode, setCheckingHedgeMode] = useState(false);
   const [hedgeCheckResult, setHedgeCheckResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -5298,7 +4211,7 @@ function AddStrategyModal({
   };
 
   const mutation = useMutation({
-    mutationFn: (data: { accountId: string; secondAccountId?: string; workspaceId: string; name: string; type: string; configJson: string }) =>
+    mutationFn: (data: { accountId: string; workspaceId: string; name: string; type: string; configJson: string }) =>
       api.post('/strategies', data),
     onSuccess: () => {
       invalidateAll(queryClient);
@@ -5363,13 +4276,6 @@ function AddStrategyModal({
         })),
         takeProfitTierShiftEnabled: sdForm.takeProfitTierShiftEnabled,
         takeProfitTierShifts: tpShifts,
-      });
-    } else if (strategyType === 'FundingClaim') {
-      configJson = JSON.stringify({
-        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
-        maxCycles: Number(fcForm.maxCycles),
-        autoRotateTicker: fcAutoRotate,
-        checkBeforeFundingMinutes: Number(fcForm.checkBeforeFundingMinutes),
       });
     } else if (strategyType === 'GridFloat') {
       const gfMultiplier = Number(gfForm.stakeMultiplier);
@@ -5537,79 +4443,6 @@ function AddStrategyModal({
         takeProfitEnabled: sghForm.takeProfitEnabled,
         takeProfitTargetUsd: tpTarget,
       });
-    } else if (strategyType === 'FuturesArbitrage') {
-      if (!secondAccountId) {
-        setError('Выберите аккаунт B (вторая биржа)');
-        return;
-      }
-      if (accountId === secondAccountId) {
-        setError('Аккаунты A и B должны быть разными');
-        return;
-      }
-      if (currentAccountExchangeType === 4 || secondAccountExchangeType === 4) {
-        setError('Dzengi не поддерживается для арбитража');
-        return;
-      }
-      if (currentAccountExchangeType === secondAccountExchangeType) {
-        setError('Аккаунты A и B должны быть на разных биржах');
-        return;
-      }
-      if (Number(arbForm.leverage) < 1) {
-        setError('Плечо должно быть ≥ 1');
-        return;
-      }
-      const maxFailures = Number(arbForm.maxConsecutiveFailures);
-      if (maxFailures < 0) {
-        setError('Макс. ошибок подряд не может быть отрицательным');
-        return;
-      }
-      const maxSlippage = Number(arbForm.maxSlippagePercent);
-      if (arbForm.orderMode === 'LimitIoc' && !(maxSlippage >= 0 && maxSlippage <= 2)) {
-        setError('Допуск проскальзывания: от 0 до 2%');
-        return;
-      }
-      const entryConfirm = Number(arbForm.entryConfirmSeconds);
-      if (!(entryConfirm >= 0 && entryConfirm <= 30)) {
-        setError('Подтверждение спреда: от 0 до 30 секунд');
-        return;
-      }
-      const parsedLevels = arbLevels.map((l) => ({
-        entrySpreadPercent: Number(l.entrySpreadPercent),
-        exitSpreadPercent: Number(l.exitSpreadPercent),
-        notionalUsdt: Number(l.notionalUsdt),
-      }));
-      if (parsedLevels.length === 0) {
-        setError('Добавьте хотя бы один уровень');
-        return;
-      }
-      for (const l of parsedLevels) {
-        if (!(l.entrySpreadPercent > l.exitSpreadPercent) || l.exitSpreadPercent < 0) {
-          setError('Для каждого уровня: вход > выход ≥ 0');
-          return;
-        }
-        if (!(l.notionalUsdt > 0)) {
-          setError('Объём уровня должен быть > 0 USDT');
-          return;
-        }
-      }
-      const sortedLevels = [...parsedLevels].sort((a, b) => a.entrySpreadPercent - b.entrySpreadPercent);
-      for (let i = 1; i < sortedLevels.length; i++) {
-        if (sortedLevels[i].entrySpreadPercent === sortedLevels[i - 1].entrySpreadPercent) {
-          setError('Уровни не должны дублироваться по входному спреду');
-          return;
-        }
-      }
-      configJson = JSON.stringify({
-        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
-        secondSymbol: arbForm.secondSymbol.trim() ? arbForm.secondSymbol.replace(/\s+/g, '').toUpperCase() : '',
-        leverage: Number(arbForm.leverage),
-        allowBothDirections: arbForm.allowBothDirections,
-        levels: sortedLevels,
-        maxConsecutiveFailures: maxFailures,
-        orderMode: arbForm.orderMode,
-        maxSlippagePercent: maxSlippage,
-        entryConfirmSeconds: entryConfirm,
-      });
     } else {
       configJson = JSON.stringify({
         indicatorType: mgForm.indicatorType,
@@ -5629,7 +4462,6 @@ function AddStrategyModal({
       name,
       type: strategyType,
       configJson,
-      ...(strategyType === 'FuturesArbitrage' ? { secondAccountId } : {}),
     });
   };
 
@@ -5643,24 +4475,6 @@ function AddStrategyModal({
     setHfLevels((prev) => prev.filter((_, idx) => idx !== i));
   const updateHfLevel = (i: number, field: keyof HFLevel, value: number) =>
     setHfLevels((prev) => prev.map((l, idx) => idx === i ? { ...l, [field]: value } : l));
-
-  const addArbLevel = () =>
-    setArbLevels((prev) => [...prev, { entrySpreadPercent: '1', exitSpreadPercent: '0', notionalUsdt: '100' }]);
-  const removeArbLevel = (i: number) =>
-    setArbLevels((prev) => prev.filter((_, idx) => idx !== i));
-  const updateArbLevel = (i: number, field: 'entrySpreadPercent' | 'exitSpreadPercent' | 'notionalUsdt', value: string) =>
-    setArbLevels((prev) => prev.map((l, idx) => idx === i ? { ...l, [field]: value } : l));
-
-  const arbAccountError = strategyType === 'FuturesArbitrage' && accountId && secondAccountId
-    ? accountId === secondAccountId
-      ? 'Аккаунты A и B должны быть разными'
-      : currentAccountExchangeType === secondAccountExchangeType
-        ? 'Аккаунты A и B должны быть на разных биржах'
-        : currentAccountExchangeType === 4 || secondAccountExchangeType === 4
-          ? 'Dzengi не поддерживается для арбитража'
-          : null
-    : null;
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="bg-bg-secondary rounded-xl border border-border w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
@@ -5688,7 +4502,7 @@ function AddStrategyModal({
 
           {/* Account */}
           <div>
-            <label className={labelCls}>{strategyType === 'FuturesArbitrage' ? 'Аккаунт A (первичный) *' : 'Аккаунт *'}</label>
+            <label className={labelCls}>Аккаунт *</label>
             <select
               value={accountId}
               onChange={(e) => { setAccountId(e.target.value); setSymbol(''); }}
@@ -5701,9 +4515,6 @@ function AddStrategyModal({
                 </option>
               ))}
             </select>
-            {strategyType === 'FuturesArbitrage' && currentAccountExchangeType === 4 && (
-              <p className="text-xs text-accent-red mt-1">Dzengi не поддерживается для арбитража.</p>
-            )}
             {strategyType === 'HuntingFunding' && activeAccounts.find((a) => a.id === accountId)?.exchangeType === 3 && (
               <div className="flex items-start gap-2 mt-2 bg-blue-500/10 border border-blue-500/20 rounded-lg px-3 py-2">
                 <svg className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -5713,31 +4524,6 @@ function AddStrategyModal({
               </div>
             )}
           </div>
-
-          {/* Account B — only for FuturesArbitrage */}
-          {strategyType === 'FuturesArbitrage' && (
-            <div>
-              <label className={labelCls}>Аккаунт B (вторая биржа) *</label>
-              <select
-                value={secondAccountId}
-                onChange={(e) => setSecondAccountId(e.target.value)}
-                className={inputCls}
-              >
-                <option value="">Выберите аккаунт...</option>
-                {activeAccounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} ({exchangeNames[a.exchangeType]})
-                  </option>
-                ))}
-              </select>
-              {secondAccountExchangeType === 4 && (
-                <p className="text-xs text-accent-red mt-1">Dzengi не поддерживается для арбитража.</p>
-              )}
-              {arbAccountError && (
-                <p className="text-xs text-accent-red mt-1">{arbAccountError}</p>
-              )}
-            </div>
-          )}
 
           {/* Name */}
           <div>
@@ -6031,50 +4817,6 @@ function AddStrategyModal({
                     Лимитки ставятся на {sdForm.entryLimitOffsetPercent}% {sdForm.direction === 'Long' ? 'ниже' : 'выше'} цены закрытия свечи (всегда maker). Entry-лимит отменяется через {sdForm.entryLimitTimeoutBars} свечей если не исполнился; DCA-лимит висит до исполнения или пока TP не закроет позицию.
                   </>
                 )}
-              </p>
-            </>
-          ) : strategyType === 'FundingClaim' ? (
-            <>
-              {/* Auto-rotate ticker */}
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={fcAutoRotate}
-                  onChange={(e) => setFcAutoRotate(e.target.checked)}
-                  className="rounded border-dark-border"
-                />
-                <span className="text-sm text-text-primary">Автообновление тикера</span>
-                <span className="text-xs text-text-secondary">(по макс. фандингу)</span>
-              </label>
-
-              {/* Check before + Max cycles */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Проверка за (мин)</label>
-                  <input
-                    type="number"
-                    min="1"
-                    value={fcForm.checkBeforeFundingMinutes}
-                    onChange={(e) => setFcForm({ ...fcForm, checkBeforeFundingMinutes: e.target.value })}
-                    className={inputCls}
-                  />
-                  <p className="text-xs text-text-secondary mt-0.5">Минут до фандинга для проверки ставки</p>
-                </div>
-                <div>
-                  <label className={labelCls}>Макс. циклов <span className="font-normal">(0 = ∞)</span></label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={fcForm.maxCycles}
-                    onChange={(e) => setFcForm({ ...fcForm, maxCycles: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
-              </div>
-
-              <p className="text-xs text-text-secondary italic">
-                Бот автоматически определяет направление по знаку фандинга: шорт при положительном, лонг при отрицательном.
-                Позиция открывается маркет-ордером и держится для сбора фандинговых выплат.
               </p>
             </>
           ) : strategyType === 'GridFloat' ? (
@@ -6860,184 +5602,6 @@ function AddStrategyModal({
                 Верхние ячейки: skim в выбранном режиме. HBreak/LBreak = жёсткое закрытие. Только Bybit hedge mode.
               </p>
             </>
-          ) : strategyType === 'FuturesArbitrage' ? (
-            <>
-              {/* Second symbol */}
-              <div>
-                <label className={labelCls}>Символ на бирже B (если отличается)</label>
-                <input
-                  type="text"
-                  value={arbForm.secondSymbol}
-                  onChange={(e) => setArbForm({ ...arbForm, secondSymbol: e.target.value })}
-                  placeholder={symbol || 'пусто = тот же символ'}
-                  className={inputCls}
-                />
-                <p className="text-xs text-text-secondary mt-0.5">Оставьте пустым, если символ на бирже B совпадает с символом на бирже A.</p>
-              </div>
-
-              {/* Leverage + both directions */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Плечо</label>
-                  <input
-                    type="number"
-                    step="1"
-                    min="1"
-                    value={arbForm.leverage}
-                    onChange={(e) => setArbForm({ ...arbForm, leverage: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>Макс. ошибок подряд</label>
-                  <input
-                    type="number"
-                    step="1"
-                    min="0"
-                    value={arbForm.maxConsecutiveFailures}
-                    onChange={(e) => setArbForm({ ...arbForm, maxConsecutiveFailures: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
-              </div>
-
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={arbForm.allowBothDirections}
-                  onChange={(e) => setArbForm({ ...arbForm, allowBothDirections: e.target.checked })}
-                  className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
-                />
-                <span className="text-sm font-medium text-text-secondary">Торговать в обе стороны</span>
-              </label>
-              <p className="text-xs text-text-secondary -mt-2">
-                Выключено — бот входит только когда биржа A дороже (шорт A + лонг B).
-              </p>
-
-              {/* Order execution mode */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Исполнение ордеров</label>
-                  <select
-                    value={arbForm.orderMode}
-                    onChange={(e) => setArbForm({ ...arbForm, orderMode: e.target.value as 'Market' | 'LimitIoc' })}
-                    className={inputCls}
-                  >
-                    <option value="Market">Маркет</option>
-                    <option value="LimitIoc">Лимит IOC</option>
-                  </select>
-                </div>
-                {arbForm.orderMode === 'LimitIoc' && (
-                  <div>
-                    <label className={labelCls}>Допуск проскальзывания, %</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      max="2"
-                      value={arbForm.maxSlippagePercent}
-                      onChange={(e) => setArbForm({ ...arbForm, maxSlippagePercent: e.target.value })}
-                      className={inputCls}
-                    />
-                  </div>
-                )}
-              </div>
-              <p className="text-xs text-text-secondary -mt-2">
-                {arbForm.orderMode === 'LimitIoc'
-                  ? 'Обе ноги — лимит «исполнить сразу или отменить» по котировке ± допуск: хуже допуска не исполнится, но может исполниться частично или никак. Разницу между ногами бот сразу закрывает маркетом, уровень всегда держит равные объёмы.'
-                  : 'Обе ноги — маркет: исполнятся всегда, по той цене, что даст стакан.'}
-              </p>
-
-              <div>
-                <label className={labelCls}>Подтверждение спреда, сек</label>
-                <input
-                  type="number"
-                  step="0.5"
-                  min="0"
-                  max="30"
-                  value={arbForm.entryConfirmSeconds}
-                  onChange={(e) => setArbForm({ ...arbForm, entryConfirmSeconds: e.target.value })}
-                  className={inputCls}
-                />
-                <p className="text-xs text-text-secondary mt-1">
-                  Вход только если спред держится столько секунд и обе биржи за это время прислали свежие котировки.
-                  Отсекает «спред» на резком движении, когда одна биржа просто не успела переоценить цену. 0 — без фильтра.
-                </p>
-              </div>
-
-              {/* Levels table */}
-              <div>
-                <label className={labelCls}>Уровни сетки спреда</label>
-                <div className="rounded-lg border border-border overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
-                        <th className="px-3 py-2 text-left font-medium">Вход, спред %</th>
-                        <th className="px-3 py-2 text-left font-medium">Выход, спред %</th>
-                        <th className="px-3 py-2 text-left font-medium">Объём, USDT</th>
-                        <th className="px-3 py-2 w-8" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {arbLevels.map((lvl, i) => (
-                        <tr key={i} className="border-t border-border/50">
-                          <td className="px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="0.1"
-                              value={lvl.entrySpreadPercent}
-                              onChange={(e) => updateArbLevel(i, 'entrySpreadPercent', e.target.value)}
-                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
-                            />
-                          </td>
-                          <td className="px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="0.1"
-                              min="0"
-                              value={lvl.exitSpreadPercent}
-                              onChange={(e) => updateArbLevel(i, 'exitSpreadPercent', e.target.value)}
-                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
-                            />
-                          </td>
-                          <td className="px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="1"
-                              min="0"
-                              value={lvl.notionalUsdt}
-                              onChange={(e) => updateArbLevel(i, 'notionalUsdt', e.target.value)}
-                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
-                            />
-                          </td>
-                          <td className="px-2 py-1.5 text-center">
-                            <button
-                              onClick={() => removeArbLevel(i)}
-                              className="text-text-secondary/40 hover:text-accent-red transition-colors"
-                              title="Удалить уровень"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                              </svg>
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <button
-                  onClick={addArbLevel}
-                  className="mt-2 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors"
-                >
-                  + Добавить уровень
-                </button>
-              </div>
-
-              <p className="text-xs text-text-secondary italic">
-                Уровень открывается когда |спред| достигает «вход», закрывается когда |спред| падает до «выход». Уровни сортируются по возрастанию входа.
-              </p>
-            </>
           ) : strategyType === 'HuntingFunding' ? (
             <>
               {/* Auto-rotate ticker */}
@@ -7320,7 +5884,7 @@ function AddStrategyModal({
           </button>
           <button
             onClick={handleSubmit}
-            disabled={mutation.isPending || !!arbAccountError}
+            disabled={mutation.isPending}
             className="px-4 py-2 text-sm font-medium bg-accent-blue hover:bg-accent-blue/90 text-white rounded-lg transition-colors shadow-md shadow-accent-blue/20 disabled:opacity-50 disabled:shadow-none"
           >
             {mutation.isPending ? 'Создание...' : 'Создать бота'}
@@ -7344,11 +5908,9 @@ function EditStrategyModal({
   const cfg = parseJson(strategy.configJson) || {};
   const isHF = strategy.type === 'HuntingFunding';
   const isSD = strategy.type === 'SmaDca';
-  const isFC = strategy.type === 'FundingClaim';
   const isGF = strategy.type === 'GridFloat';
   const isGH = strategy.type === 'GridHedge';
   const isGSH = strategy.type === 'SmartGridHedge';
-  const isArb = strategy.type === 'FuturesArbitrage';
 
   const [name, setName] = useState(strategy.name);
   const [symbol, setSymbol] = useState(cfg.symbol || 'BTCUSDT');
@@ -7416,13 +5978,6 @@ function EditStrategyModal({
     enableShort: cfg.enableShort ?? true,
     minFundingShort: String(cfg.minFundingShort ?? 1.0),
   });
-
-  // FundingClaim form state
-  const [fcForm, setFcForm] = useState({
-    maxCycles: String(cfg.maxCycles ?? 0),
-    checkBeforeFundingMinutes: String(cfg.checkBeforeFundingMinutes ?? 10),
-  });
-  const [fcAutoRotate, setFcAutoRotate] = useState(cfg.autoRotateTicker !== false);
 
   // GridFloat form state. Auto-migrate legacy single-zone config (baseSizeUsdt+rangePercent)
   // into a single-tier list so the editor always works against the new shape.
@@ -7498,38 +6053,6 @@ function EditStrategyModal({
   });
   const currentAccountExchangeType = accountsForExchange?.find((a) => a.id === strategy.accountId)?.exchangeType ?? 0;
   const isBybit = currentAccountExchangeType === 1;
-  const activeAccountsForEdit = accountsForExchange?.filter((a) => a.isActive) || [];
-
-  // FuturesArbitrage form state — initialise from existing configJson + strategy.secondAccountId
-  const [secondAccountId, setSecondAccountId] = useState(strategy.secondAccountId ?? '');
-  const [arbForm, setArbForm] = useState({
-    secondSymbol: cfg.secondSymbol || '',
-    leverage: String(cfg.leverage ?? 1),
-    allowBothDirections: cfg.allowBothDirections !== false,
-    maxConsecutiveFailures: String(cfg.maxConsecutiveFailures ?? 3),
-    orderMode: (cfg.orderMode === 'LimitIoc' ? 'LimitIoc' : 'Market') as 'Market' | 'LimitIoc',
-    maxSlippagePercent: String(cfg.maxSlippagePercent ?? 0.05),
-    entryConfirmSeconds: String(cfg.entryConfirmSeconds ?? 1.5),
-  });
-  const [arbLevels, setArbLevels] = useState<Array<{ entrySpreadPercent: string; exitSpreadPercent: string; notionalUsdt: string }>>(
-    Array.isArray(cfg.levels) && cfg.levels.length > 0
-      ? cfg.levels.map((l: ArbitrageLevelCfg) => ({
-          entrySpreadPercent: String(l.entrySpreadPercent),
-          exitSpreadPercent: String(l.exitSpreadPercent),
-          notionalUsdt: String(l.notionalUsdt),
-        }))
-      : [{ entrySpreadPercent: '1', exitSpreadPercent: '0', notionalUsdt: '100' }],
-  );
-  const secondAccountExchangeType = accountsForExchange?.find((a) => a.id === secondAccountId)?.exchangeType ?? 0;
-  const arbAccountError = isArb && secondAccountId
-    ? secondAccountId === strategy.accountId
-      ? 'Аккаунты A и B должны быть разными'
-      : currentAccountExchangeType === secondAccountExchangeType
-        ? 'Аккаунты A и B должны быть на разных биржах'
-        : currentAccountExchangeType === 4 || secondAccountExchangeType === 4
-          ? 'Dzengi не поддерживается для арбитража'
-          : null
-    : null;
 
   const [checkingHedgeMode, setCheckingHedgeMode] = useState(false);
   const [hedgeCheckResult, setHedgeCheckResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -7611,7 +6134,7 @@ function EditStrategyModal({
   };
 
   const mutation = useMutation({
-    mutationFn: (data: { name: string; configJson: string; secondAccountId?: string }) =>
+    mutationFn: (data: { name: string; configJson: string }) =>
       api.put(`/strategies/${strategy.id}`, data),
     onSuccess: () => {
       invalidateAll(queryClient);
@@ -7675,13 +6198,6 @@ function EditStrategyModal({
         })),
         takeProfitTierShiftEnabled: sdForm.takeProfitTierShiftEnabled,
         takeProfitTierShifts: tpShifts,
-      });
-    } else if (isFC) {
-      configJson = JSON.stringify({
-        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
-        maxCycles: Number(fcForm.maxCycles),
-        autoRotateTicker: fcAutoRotate,
-        checkBeforeFundingMinutes: Number(fcForm.checkBeforeFundingMinutes),
       });
     } else if (isGF) {
       const gfMultiplier = Number(gfForm.stakeMultiplier);
@@ -7847,79 +6363,6 @@ function EditStrategyModal({
         takeProfitEnabled: sghForm.takeProfitEnabled,
         takeProfitTargetUsd: tpTarget,
       });
-    } else if (isArb) {
-      if (!secondAccountId) {
-        setError('Выберите аккаунт B (вторая биржа)');
-        return;
-      }
-      if (secondAccountId === strategy.accountId) {
-        setError('Аккаунты A и B должны быть разными');
-        return;
-      }
-      if (currentAccountExchangeType === 4 || secondAccountExchangeType === 4) {
-        setError('Dzengi не поддерживается для арбитража');
-        return;
-      }
-      if (currentAccountExchangeType === secondAccountExchangeType) {
-        setError('Аккаунты A и B должны быть на разных биржах');
-        return;
-      }
-      if (Number(arbForm.leverage) < 1) {
-        setError('Плечо должно быть ≥ 1');
-        return;
-      }
-      const maxFailures = Number(arbForm.maxConsecutiveFailures);
-      if (maxFailures < 0) {
-        setError('Макс. ошибок подряд не может быть отрицательным');
-        return;
-      }
-      const maxSlippage = Number(arbForm.maxSlippagePercent);
-      if (arbForm.orderMode === 'LimitIoc' && !(maxSlippage >= 0 && maxSlippage <= 2)) {
-        setError('Допуск проскальзывания: от 0 до 2%');
-        return;
-      }
-      const entryConfirm = Number(arbForm.entryConfirmSeconds);
-      if (!(entryConfirm >= 0 && entryConfirm <= 30)) {
-        setError('Подтверждение спреда: от 0 до 30 секунд');
-        return;
-      }
-      const parsedLevels = arbLevels.map((l) => ({
-        entrySpreadPercent: Number(l.entrySpreadPercent),
-        exitSpreadPercent: Number(l.exitSpreadPercent),
-        notionalUsdt: Number(l.notionalUsdt),
-      }));
-      if (parsedLevels.length === 0) {
-        setError('Добавьте хотя бы один уровень');
-        return;
-      }
-      for (const l of parsedLevels) {
-        if (!(l.entrySpreadPercent > l.exitSpreadPercent) || l.exitSpreadPercent < 0) {
-          setError('Для каждого уровня: вход > выход ≥ 0');
-          return;
-        }
-        if (!(l.notionalUsdt > 0)) {
-          setError('Объём уровня должен быть > 0 USDT');
-          return;
-        }
-      }
-      const sortedLevels = [...parsedLevels].sort((a, b) => a.entrySpreadPercent - b.entrySpreadPercent);
-      for (let i = 1; i < sortedLevels.length; i++) {
-        if (sortedLevels[i].entrySpreadPercent === sortedLevels[i - 1].entrySpreadPercent) {
-          setError('Уровни не должны дублироваться по входному спреду');
-          return;
-        }
-      }
-      configJson = JSON.stringify({
-        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
-        secondSymbol: arbForm.secondSymbol.trim() ? arbForm.secondSymbol.replace(/\s+/g, '').toUpperCase() : '',
-        leverage: Number(arbForm.leverage),
-        allowBothDirections: arbForm.allowBothDirections,
-        levels: sortedLevels,
-        maxConsecutiveFailures: maxFailures,
-        orderMode: arbForm.orderMode,
-        maxSlippagePercent: maxSlippage,
-        entryConfirmSeconds: entryConfirm,
-      });
     } else {
       configJson = JSON.stringify({
         indicatorType: mgForm.indicatorType,
@@ -7938,7 +6381,6 @@ function EditStrategyModal({
     mutation.mutate({
       name,
       configJson,
-      ...(isArb ? { secondAccountId } : {}),
     });
   };
 
@@ -7953,12 +6395,6 @@ function EditStrategyModal({
   const updateHfLevel = (i: number, field: keyof HFLevel, value: number) =>
     setHfLevels((prev) => prev.map((l, idx) => idx === i ? { ...l, [field]: value } : l));
 
-  const addArbLevel = () =>
-    setArbLevels((prev) => [...prev, { entrySpreadPercent: '1', exitSpreadPercent: '0', notionalUsdt: '100' }]);
-  const removeArbLevel = (i: number) =>
-    setArbLevels((prev) => prev.filter((_, idx) => idx !== i));
-  const updateArbLevel = (i: number, field: 'entrySpreadPercent' | 'exitSpreadPercent' | 'notionalUsdt', value: string) =>
-    setArbLevels((prev) => prev.map((l, idx) => idx === i ? { ...l, [field]: value } : l));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -7997,28 +6433,6 @@ function EditStrategyModal({
               className={inputCls}
             />
           </div>
-
-          {/* Account B — only for FuturesArbitrage; Account A is fixed at creation */}
-          {isArb && (
-            <div>
-              <label className={labelCls}>Аккаунт B (вторая биржа) *</label>
-              <select
-                value={secondAccountId}
-                onChange={(e) => setSecondAccountId(e.target.value)}
-                className={inputCls}
-              >
-                <option value="">Выберите аккаунт...</option>
-                {activeAccountsForEdit.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} ({exchangeNames[a.exchangeType]})
-                  </option>
-                ))}
-              </select>
-              {arbAccountError && (
-                <p className="text-xs text-accent-red mt-1">{arbAccountError}</p>
-              )}
-            </div>
-          )}
 
           <div className="border-t border-border pt-4">
             <p className="text-xs font-semibold text-text-secondary uppercase tracking-widest mb-3">
@@ -8274,50 +6688,6 @@ function EditStrategyModal({
                   />
                 </div>
               )}
-            </>
-          ) : isFC ? (
-            <>
-              {/* Auto-rotate ticker */}
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={fcAutoRotate}
-                  onChange={(e) => setFcAutoRotate(e.target.checked)}
-                  className="rounded border-dark-border"
-                />
-                <span className="text-sm text-text-primary">Автообновление тикера</span>
-                <span className="text-xs text-text-secondary">(по макс. фандингу)</span>
-              </label>
-
-              {/* Check before + Max cycles */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Проверка за (мин)</label>
-                  <input
-                    type="number"
-                    min="1"
-                    value={fcForm.checkBeforeFundingMinutes}
-                    onChange={(e) => setFcForm({ ...fcForm, checkBeforeFundingMinutes: e.target.value })}
-                    className={inputCls}
-                  />
-                  <p className="text-xs text-text-secondary mt-0.5">Минут до фандинга для проверки ставки</p>
-                </div>
-                <div>
-                  <label className={labelCls}>Макс. циклов <span className="font-normal">(0 = ∞)</span></label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={fcForm.maxCycles}
-                    onChange={(e) => setFcForm({ ...fcForm, maxCycles: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
-              </div>
-
-              <p className="text-xs text-text-secondary italic">
-                Бот автоматически определяет направление по знаку фандинга: шорт при положительном, лонг при отрицательном.
-                Позиция открывается маркет-ордером и держится для сбора фандинговых выплат.
-              </p>
             </>
           ) : isGF ? (
             <>
@@ -9074,184 +7444,6 @@ function EditStrategyModal({
                 Верхние ячейки: skim в выбранном режиме. HBreak/LBreak = жёсткое закрытие. Только Bybit hedge mode.
               </p>
             </>
-          ) : isArb ? (
-            <>
-              {/* Second symbol */}
-              <div>
-                <label className={labelCls}>Символ на бирже B (если отличается)</label>
-                <input
-                  type="text"
-                  value={arbForm.secondSymbol}
-                  onChange={(e) => setArbForm({ ...arbForm, secondSymbol: e.target.value })}
-                  placeholder={symbol || 'пусто = тот же символ'}
-                  className={inputCls}
-                />
-                <p className="text-xs text-text-secondary mt-0.5">Оставьте пустым, если символ на бирже B совпадает с символом на бирже A.</p>
-              </div>
-
-              {/* Leverage + both directions */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Плечо</label>
-                  <input
-                    type="number"
-                    step="1"
-                    min="1"
-                    value={arbForm.leverage}
-                    onChange={(e) => setArbForm({ ...arbForm, leverage: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>Макс. ошибок подряд</label>
-                  <input
-                    type="number"
-                    step="1"
-                    min="0"
-                    value={arbForm.maxConsecutiveFailures}
-                    onChange={(e) => setArbForm({ ...arbForm, maxConsecutiveFailures: e.target.value })}
-                    className={inputCls}
-                  />
-                </div>
-              </div>
-
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={arbForm.allowBothDirections}
-                  onChange={(e) => setArbForm({ ...arbForm, allowBothDirections: e.target.checked })}
-                  className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
-                />
-                <span className="text-sm font-medium text-text-secondary">Торговать в обе стороны</span>
-              </label>
-              <p className="text-xs text-text-secondary -mt-2">
-                Выключено — бот входит только когда биржа A дороже (шорт A + лонг B).
-              </p>
-
-              {/* Order execution mode */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className={labelCls}>Исполнение ордеров</label>
-                  <select
-                    value={arbForm.orderMode}
-                    onChange={(e) => setArbForm({ ...arbForm, orderMode: e.target.value as 'Market' | 'LimitIoc' })}
-                    className={inputCls}
-                  >
-                    <option value="Market">Маркет</option>
-                    <option value="LimitIoc">Лимит IOC</option>
-                  </select>
-                </div>
-                {arbForm.orderMode === 'LimitIoc' && (
-                  <div>
-                    <label className={labelCls}>Допуск проскальзывания, %</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      max="2"
-                      value={arbForm.maxSlippagePercent}
-                      onChange={(e) => setArbForm({ ...arbForm, maxSlippagePercent: e.target.value })}
-                      className={inputCls}
-                    />
-                  </div>
-                )}
-              </div>
-              <p className="text-xs text-text-secondary -mt-2">
-                {arbForm.orderMode === 'LimitIoc'
-                  ? 'Обе ноги — лимит «исполнить сразу или отменить» по котировке ± допуск: хуже допуска не исполнится, но может исполниться частично или никак. Разницу между ногами бот сразу закрывает маркетом, уровень всегда держит равные объёмы.'
-                  : 'Обе ноги — маркет: исполнятся всегда, по той цене, что даст стакан.'}
-              </p>
-
-              <div>
-                <label className={labelCls}>Подтверждение спреда, сек</label>
-                <input
-                  type="number"
-                  step="0.5"
-                  min="0"
-                  max="30"
-                  value={arbForm.entryConfirmSeconds}
-                  onChange={(e) => setArbForm({ ...arbForm, entryConfirmSeconds: e.target.value })}
-                  className={inputCls}
-                />
-                <p className="text-xs text-text-secondary mt-1">
-                  Вход только если спред держится столько секунд и обе биржи за это время прислали свежие котировки.
-                  Отсекает «спред» на резком движении, когда одна биржа просто не успела переоценить цену. 0 — без фильтра.
-                </p>
-              </div>
-
-              {/* Levels table */}
-              <div>
-                <label className={labelCls}>Уровни сетки спреда</label>
-                <div className="rounded-lg border border-border overflow-hidden">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="bg-bg-tertiary text-text-secondary text-xs">
-                        <th className="px-3 py-2 text-left font-medium">Вход, спред %</th>
-                        <th className="px-3 py-2 text-left font-medium">Выход, спред %</th>
-                        <th className="px-3 py-2 text-left font-medium">Объём, USDT</th>
-                        <th className="px-3 py-2 w-8" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {arbLevels.map((lvl, i) => (
-                        <tr key={i} className="border-t border-border/50">
-                          <td className="px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="0.1"
-                              value={lvl.entrySpreadPercent}
-                              onChange={(e) => updateArbLevel(i, 'entrySpreadPercent', e.target.value)}
-                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
-                            />
-                          </td>
-                          <td className="px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="0.1"
-                              min="0"
-                              value={lvl.exitSpreadPercent}
-                              onChange={(e) => updateArbLevel(i, 'exitSpreadPercent', e.target.value)}
-                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
-                            />
-                          </td>
-                          <td className="px-3 py-1.5">
-                            <input
-                              type="number"
-                              step="1"
-                              min="0"
-                              value={lvl.notionalUsdt}
-                              onChange={(e) => updateArbLevel(i, 'notionalUsdt', e.target.value)}
-                              className="w-full bg-transparent text-text-primary focus:outline-none focus:text-accent-blue"
-                            />
-                          </td>
-                          <td className="px-2 py-1.5 text-center">
-                            <button
-                              onClick={() => removeArbLevel(i)}
-                              className="text-text-secondary/40 hover:text-accent-red transition-colors"
-                              title="Удалить уровень"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                              </svg>
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <button
-                  onClick={addArbLevel}
-                  className="mt-2 text-xs text-accent-blue hover:text-accent-blue/80 transition-colors"
-                >
-                  + Добавить уровень
-                </button>
-              </div>
-
-              <p className="text-xs text-text-secondary italic">
-                Уровень открывается когда |спред| достигает «вход», закрывается когда |спред| падает до «выход». Уровни сортируются по возрастанию входа.
-              </p>
-            </>
           ) : isHF ? (
             <>
               {/* Auto-rotate ticker */}
@@ -9556,7 +7748,7 @@ function EditStrategyModal({
           </button>
           <button
             onClick={handleSubmit}
-            disabled={mutation.isPending || !!arbAccountError}
+            disabled={mutation.isPending}
             className="px-4 py-2 text-sm font-medium bg-accent-blue hover:bg-accent-blue/90 text-white rounded-lg transition-colors shadow-md shadow-accent-blue/20 disabled:opacity-50 disabled:shadow-none"
           >
             {mutation.isPending ? 'Сохранение...' : 'Сохранить'}

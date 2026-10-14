@@ -16,7 +16,7 @@ builder.Services.AddSingleton<IProxyHealthTracker, ProxyHealthTracker>();
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
 
 // Websocket top-of-book streams. Singleton because the connections must outlive the per-tick
-// REST clients; consumed by FuturesArbitrage, and by GridFloat for its take-profit mark.
+// REST clients; consumed by GridFloat for its take-profit mark.
 builder.Services.AddSingleton<IQuoteStreamService, QuoteStreamService>();
 
 // Private order streams, one per exchange account (Bybit only for now). Lets GridFloat detect
@@ -25,12 +25,10 @@ builder.Services.AddSingleton<IOrderStreamService, OrderStreamService>();
 
 builder.Services.AddScoped<IStrategyHandler, EmaBounceHandler>();
 builder.Services.AddScoped<IStrategyHandler, HuntingFundingHandler>();
-builder.Services.AddScoped<IStrategyHandler, FundingClaimHandler>();
 builder.Services.AddScoped<IStrategyHandler, SmaDcaHandler>();
 builder.Services.AddScoped<IStrategyHandler, GridFloatHandler>();
 builder.Services.AddScoped<IStrategyHandler, GridHedgeHandler>();
 builder.Services.AddScoped<IStrategyHandler, SmartGridHedgeHandler>();
-builder.Services.AddScoped<IStrategyHandler, ArbitrageHandler>();
 builder.Services.AddScoped<ITelegramSignalService, TelegramSignalService>();
 builder.Services.AddScoped<IFundingTickerRotationService, FundingTickerRotationService>();
 builder.Services.AddScoped<ISymbolBlacklistService, SymbolBlacklistService>();
@@ -42,10 +40,6 @@ builder.Services.AddScoped<TronGridService>();
 builder.Services.AddScoped<BscScanService>();
 
 builder.Services.AddHostedService<TradingHostedService>();
-
-// FuturesArbitrage only — 1s tick on top of the websocket quote cache. Excluded from
-// TradingHostedService's query so it is never processed by both loops.
-builder.Services.AddHostedService<CryptoBotWeb.Worker.ArbitrageFastLoopService>();
 builder.Services.AddHostedService<PaymentVerificationService>();
 builder.Services.AddHostedService<CryptoBotWeb.Worker.TelegramBotPollingService>();
 

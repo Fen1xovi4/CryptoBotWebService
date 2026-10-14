@@ -37,12 +37,11 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
     public async Task RotateTickersAsync(CancellationToken ct)
     {
-        // 1. Load all funding-based strategies with workspace + account
-        var fundingTypes = new[] { StrategyTypes.HuntingFunding, StrategyTypes.FundingClaim };
+        // 1. Load all HuntingFunding strategies with workspace + account
         var allStrategies = await _db.Strategies
             .Include(s => s.Account).ThenInclude(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
             .Include(s => s.Workspace)
-            .Where(s => fundingTypes.Contains(s.Type) && s.WorkspaceId != null)
+            .Where(s => s.Type == StrategyTypes.HuntingFunding && s.WorkspaceId != null)
             .ToListAsync(ct);
 
         if (allStrategies.Count == 0)
@@ -115,37 +114,6 @@ public class FundingTickerRotationService : IFundingTickerRotationService
                 wsSymbolHolders[key] = holders;
             }
             holders.Add(strategy.Id);
-        }
-
-        // 4b. Build workspace-wide SL cooldown map by unioning all FundingClaim bot states.
-        //     Any symbol cooled-down in any bot in a workspace is off-limits to all bots there.
-        var nowUtcRotation = DateTime.UtcNow;
-        var wsSlCooldowns = new Dictionary<(Guid wsId, string symbol), DateTime>();
-        foreach (var strategy in allStrategies)
-        {
-            if (strategy.Type != StrategyTypes.FundingClaim) continue;
-            if (strategy.WorkspaceId is not Guid wsId) continue;
-            if (string.IsNullOrEmpty(strategy.StateJson)) continue;
-            FundingClaimState? state;
-            try
-            {
-                state = JsonSerializer.Deserialize<FundingClaimState>(strategy.StateJson, JsonOptions);
-            }
-            catch { continue; }
-            if (state?.SlCooldowns == null || state.SlCooldowns.Count == 0) continue;
-            foreach (var kv in state.SlCooldowns)
-            {
-                if (kv.Value <= nowUtcRotation) continue;
-                var key = (wsId, kv.Key.ToUpperInvariant());
-                if (!wsSlCooldowns.TryGetValue(key, out var existing) || existing < kv.Value)
-                    wsSlCooldowns[key] = kv.Value;
-            }
-        }
-
-        bool IsInSlCooldown(Guid? workspaceId, string symbol)
-        {
-            if (workspaceId is not Guid wsId) return false;
-            return wsSlCooldowns.ContainsKey((wsId, symbol.ToUpperInvariant()));
         }
 
         bool IsTakenByOtherInWorkspace(Guid? workspaceId, string symbol, Guid currentStrategyId)
@@ -238,9 +206,6 @@ public class FundingTickerRotationService : IFundingTickerRotationService
                     if (IsTakenByOtherInWorkspace(strategy.WorkspaceId, rate.Symbol, strategy.Id))
                         continue;
 
-                    if (IsInSlCooldown(strategy.WorkspaceId, rate.Symbol))
-                        continue;
-
                     var absPct = Math.Abs(rate.Rate * 100m);
                     if (absPct < minPct || absPct > maxPct)
                         continue;
@@ -273,8 +238,7 @@ public class FundingTickerRotationService : IFundingTickerRotationService
                 // `armedAndActive` guard then preserves Direction through rate decay until
                 // funding+60s. Runs every rotation tick (even when symbol didn't change) so
                 // bots stay armed across hourly cycles.
-                if (strategy.Type == StrategyTypes.HuntingFunding)
-                    await PreArmHuntingFundingAsync(strategy, picked, ct);
+                await PreArmHuntingFundingAsync(strategy, picked, ct);
 
                 occupiedTickers.Add(picked.Symbol);
             }
@@ -368,16 +332,8 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
         try
         {
-            if (strategy.Type == StrategyTypes.FundingClaim)
-            {
-                var cfg = JsonSerializer.Deserialize<FundingClaimConfig>(strategy.ConfigJson, JsonOptions);
-                return cfg?.AutoRotateTicker ?? true;
-            }
-            else
-            {
-                var cfg = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, JsonOptions);
-                return cfg?.AutoRotateTicker ?? true;
-            }
+            var cfg = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, JsonOptions);
+            return cfg?.AutoRotateTicker ?? true;
         }
         catch
         {
@@ -392,16 +348,8 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
         try
         {
-            if (strategy.Type == StrategyTypes.FundingClaim)
-            {
-                var state = JsonSerializer.Deserialize<FundingClaimState>(strategy.StateJson, JsonOptions);
-                return state?.Phase == FundingClaimPhase.Idle;
-            }
-            else
-            {
-                var state = JsonSerializer.Deserialize<HuntingFundingState>(strategy.StateJson, JsonOptions);
-                return state?.Phase == HuntingFundingPhase.WaitingForFunding;
-            }
+            var state = JsonSerializer.Deserialize<HuntingFundingState>(strategy.StateJson, JsonOptions);
+            return state?.Phase == HuntingFundingPhase.WaitingForFunding;
         }
         catch
         {
@@ -411,28 +359,6 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
     private static (decimal minPct, decimal maxPct) GetFundingRange(Strategy strategy)
     {
-        // FundingClaim uses workspace-level threshold + optional upper bound
-        if (strategy.Type == StrategyTypes.FundingClaim)
-        {
-            var wsJson = strategy.Workspace?.ConfigJson;
-            if (string.IsNullOrEmpty(wsJson))
-                return (0.3m, 2.0m);
-
-            try
-            {
-                var cfg = JsonSerializer.Deserialize<WorkspaceFundingClaimConfig>(wsJson, JsonOptions);
-                var min = cfg?.FcMinFundingRatePercent ?? 0.3m;
-                var max = cfg?.FcMaxFundingRatePercent ?? 2.0m;
-                if (max <= 0) max = decimal.MaxValue; // 0 disables upper bound
-                if (max < min) (min, max) = (max, min);
-                return (min, max);
-            }
-            catch
-            {
-                return (0.3m, 2.0m);
-            }
-        }
-
         // HuntingFunding uses workspace-level range
         var workspaceJson = strategy.Workspace?.ConfigJson;
         if (string.IsNullOrEmpty(workspaceJson))
@@ -481,20 +407,10 @@ public class FundingTickerRotationService : IFundingTickerRotationService
 
         try
         {
-            if (strategy.Type == StrategyTypes.FundingClaim)
-            {
-                var cfg = JsonSerializer.Deserialize<FundingClaimConfig>(strategy.ConfigJson, JsonOptions);
-                if (cfg == null) return;
-                cfg.Symbol = newSymbol;
-                strategy.ConfigJson = JsonSerializer.Serialize(cfg, JsonOptions);
-            }
-            else
-            {
-                var cfg = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, JsonOptions);
-                if (cfg == null) return;
-                cfg.Symbol = newSymbol;
-                strategy.ConfigJson = JsonSerializer.Serialize(cfg, JsonOptions);
-            }
+            var cfg = JsonSerializer.Deserialize<HuntingFundingConfig>(strategy.ConfigJson, JsonOptions);
+            if (cfg == null) return;
+            cfg.Symbol = newSymbol;
+            strategy.ConfigJson = JsonSerializer.Serialize(cfg, JsonOptions);
         }
         catch
         {

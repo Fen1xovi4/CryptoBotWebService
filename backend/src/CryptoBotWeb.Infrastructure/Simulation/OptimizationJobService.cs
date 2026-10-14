@@ -53,7 +53,7 @@ public class OptimizationJobService
     /// on a bad sweep spec and <see cref="InvalidOperationException"/> when a job is already running.
     /// </summary>
     public OptimizationStartResponse Start(
-        OptimizationRunRequest request, ExchangeAccount account, ExchangeAccount? secondAccount)
+        OptimizationRunRequest request, ExchangeAccount account)
     {
         var combos = ConfigJsonMutator.BuildCombinations(request.ConfigJson, request.Parameters);
 
@@ -67,7 +67,7 @@ public class OptimizationJobService
             PruneFinished();
         }
 
-        _ = Task.Run(() => RunJobAsync(job, request, account, secondAccount, combos));
+        _ = Task.Run(() => RunJobAsync(job, request, account, combos));
         return new OptimizationStartResponse { JobId = job.Id, TotalCombinations = combos.Count };
     }
 
@@ -103,7 +103,7 @@ public class OptimizationJobService
     }
 
     private async Task RunJobAsync(
-        Job job, OptimizationRunRequest request, ExchangeAccount account, ExchangeAccount? secondAccount,
+        Job job, OptimizationRunRequest request, ExchangeAccount account,
         List<Dictionary<string, decimal>> combos)
     {
         var ct = job.Cts.Token;
@@ -115,11 +115,10 @@ public class OptimizationJobService
             var engine = scope.ServiceProvider.GetRequiredService<SimulationEngine>();
 
             using var exchange = _exchangeFactory.CreateFutures(account);
-            using var secondExchange = secondAccount != null ? _exchangeFactory.CreateFutures(secondAccount) : null;
 
             job.Status = "Downloading";
             var (baseCtx, stats, simulator) = await engine.BuildContextAsync(
-                request, exchange, secondExchange, ct, account.ExchangeType, secondAccount?.ExchangeType);
+                request, exchange, ct, account.ExchangeType);
 
             job.History = engine.BuildHistoryStats(request, stats, account.ExchangeType);
             job.Warnings = baseCtx.Warnings.ToList();

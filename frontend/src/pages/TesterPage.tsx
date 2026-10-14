@@ -46,7 +46,6 @@ export default function TesterPage() {
   const [accountId, setAccountId] = useState('');
   const [symbol, setSymbol] = useState('BTCUSDT');
   const [strategyType, setStrategyType] = useState<StrategyType>('MaratG');
-  const [secondAccountId, setSecondAccountId] = useState('');
   const [previewTimeframe, setPreviewTimeframe] = useState('1h');
 
   const [days, setDays] = useState(30);
@@ -80,7 +79,7 @@ export default function TesterPage() {
   const hiddenAccountCount = (accounts?.length ?? 0) - simAccounts.length;
 
   // The path-timeframe default follows the strategy: indicator strategies model on their own
-  // timeframe (downloading finer bars would be wasted), everything else (grids/funding/arbitrage)
+  // timeframe (downloading finer bars would be wasted), everything else (grids/funding)
   // is tick-driven and defaults to 1m. The user can still override until the strategy TF changes.
   const strategyDefaultPathTf = useMemo(() => {
     if (strategyType === 'MaratG') return forms.mg.timeframe;
@@ -113,8 +112,8 @@ export default function TesterPage() {
     const acc = simAccounts.find((a) => a.id === accountId);
     if (!acc || pathBars == null) return null;
     const rate = DOWNLOAD_CANDLES_PER_SEC[acc.exchangeType] ?? 1000;
-    // FuturesArbitrage / CrossTicker GridHedge pull a second series; ballpark ×2.
-    const series = strategyType === 'FuturesArbitrage' || (strategyType === 'GridHedge' && forms.gh.mode === 2) ? 2 : 1;
+    // CrossTicker GridHedge pulls a second series; ballpark ×2.
+    const series = strategyType === 'GridHedge' && forms.gh.mode === 2 ? 2 : 1;
     return Math.max(1, Math.round((pathBars * series) / rate / 60));
   }, [simAccounts, accountId, pathBars, strategyType, forms.gh.mode]);
 
@@ -180,8 +179,6 @@ export default function TesterPage() {
 
   const buildRequestBody = (): { body?: SimulateRequest; error?: string } => {
     if (!accountId || !symbol.trim()) return { error: 'Выберите аккаунт и укажите символ' };
-    if (strategyType === 'FuturesArbitrage' && !secondAccountId)
-      return { error: 'Выберите второй аккаунт (другая биржа) для арбитража' };
     const build = buildSimConfig(strategyType, symbol, forms);
     if (!build.ok || !build.configJson) return { error: build.error ?? 'Некорректная конфигурация' };
     const useExplicitRange = !!fromDate && !!toDate;
@@ -191,7 +188,6 @@ export default function TesterPage() {
         strategyType,
         symbol: symbol.replace(/\s+/g, '').toUpperCase(),
         secondSymbol: build.secondSymbol ?? null,
-        secondAccountId: strategyType === 'FuturesArbitrage' ? secondAccountId : null,
         fromUtc: useExplicitRange ? new Date(`${fromDate}T00:00:00Z`).toISOString() : null,
         toUtc: useExplicitRange ? new Date(`${toDate}T23:59:59Z`).toISOString() : null,
         days,
@@ -309,44 +305,6 @@ export default function TesterPage() {
           </select>
         </div>
 
-        {strategyType === 'FuturesArbitrage' && (
-          <>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-text-secondary">Account 2 (другая биржа) *</label>
-              <select
-                value={secondAccountId}
-                onChange={(e) => setSecondAccountId(e.target.value)}
-                className={`${inputCls} min-w-[200px]`}
-              >
-                <option value="">Select account...</option>
-                {simAccounts.filter((a) => a.id !== accountId).map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} ({EXCHANGE_NAMES[a.exchangeType]})
-                  </option>
-                ))}
-              </select>
-              {secondAccountId && (() => {
-                const acc1 = simAccounts.find((a) => a.id === accountId);
-                const acc2 = simAccounts.find((a) => a.id === secondAccountId);
-                if (acc1 && acc2 && acc1.exchangeType === acc2.exchangeType) {
-                  return <p className="text-xs text-accent-yellow">⚠ Второй аккаунт должен быть на другой бирже</p>;
-                }
-                return null;
-              })()}
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-text-secondary">Symbol B (опционально)</label>
-              <input
-                type="text"
-                value={forms.arb.secondSymbol}
-                onChange={(e) => setForms((f) => ({ ...f, arb: { ...f.arb, secondSymbol: e.target.value.toUpperCase() } }))}
-                placeholder="пусто = тот же символ"
-                className={`${inputCls} w-[160px] font-mono`}
-              />
-            </div>
-          </>
-        )}
       </div>
 
       {/* Period + fees */}

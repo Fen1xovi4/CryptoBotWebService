@@ -201,40 +201,6 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         return ticker?.LastPrice;
     }
 
-    public async Task<BookTickerDto?> GetBookTickerAsync(string symbol)
-    {
-        try
-        {
-            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
-            // BingX swap/v2 has a dedicated symbol-order-book-ticker endpoint (bestBidPrice/
-            // bestBidQty/bestAskPrice/bestAskQty) — single symbol, unlike GetTickersAsync which
-            // returns every contract. Response carries no server timestamp.
-            var result = await _client.PerpetualFuturesApi.ExchangeData.GetBookTickerAsync(bingxSymbol);
-
-            if (!result.Success || result.Data == null)
-                return null;
-
-            // Prices are non-nullable on the SDK model, so a missing side deserializes as 0 —
-            // that's not an executable book, treat it as a failed fetch.
-            if (result.Data.BestBidPrice <= 0 || result.Data.BestAskPrice <= 0)
-                return null;
-
-            return new BookTickerDto
-            {
-                Symbol = symbol,
-                BidPrice = result.Data.BestBidPrice,
-                BidQuantity = result.Data.BestBidQuantity,
-                AskPrice = result.Data.BestAskPrice,
-                AskQuantity = result.Data.BestAskQuantity,
-                Timestamp = DateTime.UtcNow
-            };
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-    }
-
     public async Task<OrderResultDto> OpenLongAsync(string symbol, decimal quoteAmount)
     {
         var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
@@ -495,96 +461,6 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
         };
     }
 
-    public async Task<decimal?> GetTakerFeeRateAsync(string symbol)
-    {
-        try
-        {
-            // /openApi/swap/v2/user/commissionRate — account-wide for USDT perpetuals, as a fraction.
-            var result = await _client.PerpetualFuturesApi.Account.GetTradingFeesAsync();
-            if (!result.Success || result.Data == null) return null;
-
-            var rate = result.Data.TakerFeeRate;
-            return rate > 0 ? rate : null;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
-    }
-
-    // Instrument rules are public and change rarely. BingX has no per-symbol contract query, so
-    // a miss downloads the whole contract list — and caches every contract in it, process-wide.
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime At, InstrumentRulesDto Rules)>
-        _rulesCache = new();
-    private static readonly TimeSpan _rulesCacheTtl = TimeSpan.FromHours(1);
-
-    public async Task<InstrumentRulesDto?> GetInstrumentRulesAsync(string symbol)
-    {
-        var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
-        if (_rulesCache.TryGetValue(bingxSymbol, out var hit) && DateTime.UtcNow - hit.At < _rulesCacheTtl)
-            return hit.Rules;
-
-        try
-        {
-            var result = await _client.PerpetualFuturesApi.ExchangeData.GetContractsAsync();
-            if (result.Success && result.Data != null)
-            {
-                var now = DateTime.UtcNow;
-                foreach (var c in result.Data)
-                {
-                    if (string.IsNullOrEmpty(c.Symbol)) continue;
-                    _rulesCache[c.Symbol] = (now, new InstrumentRulesDto(
-                        (decimal)Math.Pow(10, -c.QuantityPrecision),
-                        c.MinOrderQuantity,
-                        (decimal)Math.Pow(10, -c.PricePrecision)));
-                }
-            }
-        }
-        catch (Exception)
-        {
-            // fall through to the stale entry, if any
-        }
-
-        return _rulesCache.TryGetValue(bingxSymbol, out var entry) ? entry.Rules : null;
-    }
-
-    public async Task<OrderResultDto> PlaceTakerOrderAsync(string symbol, string side, decimal quantity,
-        decimal? limitPrice, bool reduceOnly)
-    {
-        try
-        {
-            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
-            var orderSide = side.Equals("Buy", StringComparison.OrdinalIgnoreCase) ? OrderSide.Buy : OrderSide.Sell;
-            var rules = await GetInstrumentRulesAsync(symbol);
-            var qty = rules != null ? FloorToStep(quantity, rules.QtyStep) : quantity;
-            if (qty <= 0)
-                return new OrderResultDto { Success = false, ErrorMessage = $"Qty {quantity} rounds to 0 for {symbol}" };
-
-            // One-way mode: PositionSide.Both; reduceOnly so a close never flips the position.
-            var result = limitPrice.HasValue
-                ? await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
-                    bingxSymbol, orderSide, FuturesOrderType.Limit, PositionSide.Both, qty,
-                    price: limitPrice.Value, reduceOnly: reduceOnly ? true : null,
-                    timeInForce: TimeInForce.ImmediateOrCancel)
-                : await _client.PerpetualFuturesApi.Trading.PlaceOrderAsync(
-                    bingxSymbol, orderSide, FuturesOrderType.Market, PositionSide.Both, qty,
-                    price: null, reduceOnly: reduceOnly ? true : null);
-
-            return new OrderResultDto
-            {
-                Success = result.Success,
-                OrderId = result.Data?.OrderId.ToString(),
-                FilledPrice = limitPrice,
-                FilledQuantity = qty,
-                ErrorMessage = result.Error?.Message
-            };
-        }
-        catch (Exception ex)
-        {
-            return new OrderResultDto { Success = false, ErrorMessage = ex.Message };
-        }
-    }
-
     public async Task<List<LimitOrderDto>> GetOpenOrdersAsync(string symbol)
     {
         try
@@ -762,38 +638,6 @@ public class BingXFuturesExchangeService : IFuturesExchangeService
     {
         if (step <= 0) return value;
         return Math.Floor(value / step) * step;
-    }
-
-    public async Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null)
-    {
-        try
-        {
-            var bingxSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.BingX);
-            var result = await _client.PerpetualFuturesApi.Account.GetIncomesAsync(
-                symbol: bingxSymbol,
-                incomeType: IncomeType.FundingFee,
-                startTime: startTime,
-                limit: 100);
-
-            if (!result.Success || result.Data == null)
-                return new List<FundingPaymentDto>();
-
-            return result.Data
-                .Select(i => new FundingPaymentDto
-                {
-                    Symbol = (i.Symbol ?? bingxSymbol).Replace("-", ""),
-                    Amount = i.Income,
-                    FundingRate = 0m, // BingX income endpoint does not return the funding rate
-                    PositionSize = 0m, // BingX income endpoint does not return position size
-                    Timestamp = i.Timestamp
-                })
-                .OrderByDescending(p => p.Timestamp)
-                .ToList();
-        }
-        catch (Exception)
-        {
-            return new List<FundingPaymentDto>();
-        }
     }
 
     public async Task<bool> SetLeverageAsync(string symbol, int leverage) =>

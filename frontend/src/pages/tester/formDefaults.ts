@@ -1,4 +1,4 @@
-import type { ArbLevel, GfTier, HFLevel, SdLevel, SdTpShift } from './types';
+import type { GfTier, HFLevel, SdLevel, SdTpShift } from './types';
 
 /* Field lists, defaults and units mirror the real bot-creation form in
  * ActiveBotsPage.tsx (AddStrategyModal) so a simulated config matches what a
@@ -56,19 +56,6 @@ export interface SdForm {
   takeProfitTierShiftEnabled: boolean;
 }
 
-export interface FcForm {
-  maxCycles: string;
-  checkBeforeFundingMinutes: string;
-  // Workspace-level fields, flattened into configJson for simulation only.
-  fcSizeUsdt: string;
-  fcMinFundingRatePercent: string;
-  fcMaxFundingRatePercent: string;
-  fcStopLossPercent: string;
-  fcLeverage: string;
-  fcSlGraceMinutes: string;
-  fcSlCooldownHours: string;
-}
-
 export interface GfForm {
   timeframe: string;
   direction: string;
@@ -114,14 +101,6 @@ export interface SghForm {
   takeProfitTargetUsd: string;
 }
 
-export interface ArbForm {
-  // Symbol on the second exchange; empty = same symbol as the primary leg.
-  secondSymbol: string;
-  leverage: string;
-  allowBothDirections: boolean;
-  maxConsecutiveFailures: string;
-}
-
 export interface AllForms {
   mg: MgForm;
   hf: HfForm;
@@ -129,13 +108,10 @@ export interface AllForms {
   sd: SdForm;
   sdLevels: SdLevel[];
   sdTpShifts: SdTpShift[];
-  fc: FcForm;
   gf: GfForm;
   gfTiers: GfTier[];
   gh: GhForm;
   sgh: SghForm;
-  arb: ArbForm;
-  arbLevels: ArbLevel[];
 }
 
 export const defaultMgForm: MgForm = {
@@ -191,18 +167,6 @@ export const defaultSdForm: SdForm = {
 export const defaultSdLevels: SdLevel[] = [{ stepPercent: '3.0', multiplier: '3.0', count: '5' }];
 export const defaultSdTpShifts: SdTpShift[] = [{ fromTier: '3', takeProfitPercent: '0.5' }];
 
-export const defaultFcForm: FcForm = {
-  maxCycles: '0',
-  checkBeforeFundingMinutes: '10',
-  fcSizeUsdt: '100',
-  fcMinFundingRatePercent: '0.6',
-  fcMaxFundingRatePercent: '2.0',
-  fcStopLossPercent: '2.5',
-  fcLeverage: '3',
-  fcSlGraceMinutes: '10',
-  fcSlCooldownHours: '6',
-};
-
 export const defaultGfForm: GfForm = {
   timeframe: '1h',
   direction: 'Long',
@@ -250,17 +214,6 @@ export const defaultSghForm: SghForm = {
   takeProfitTargetUsd: '100',
 };
 
-export const defaultArbForm: ArbForm = {
-  secondSymbol: '',
-  leverage: '1',
-  allowBothDirections: true,
-  maxConsecutiveFailures: '3',
-};
-
-export const defaultArbLevels: ArbLevel[] = [
-  { entrySpreadPercent: '1', exitSpreadPercent: '0', notionalUsdt: '100' },
-];
-
 export function makeDefaultForms(): AllForms {
   return {
     mg: { ...defaultMgForm },
@@ -269,13 +222,10 @@ export function makeDefaultForms(): AllForms {
     sd: { ...defaultSdForm },
     sdLevels: defaultSdLevels.map((l) => ({ ...l })),
     sdTpShifts: defaultSdTpShifts.map((s) => ({ ...s })),
-    fc: { ...defaultFcForm },
     gf: { ...defaultGfForm },
     gfTiers: defaultGfTiers.map((t) => ({ ...t })),
     gh: { ...defaultGhForm },
     sgh: { ...defaultSghForm },
-    arb: { ...defaultArbForm },
-    arbLevels: defaultArbLevels.map((l) => ({ ...l })),
   };
 }
 

@@ -473,9 +473,6 @@ public class DzengiFuturesExchangeService : IFuturesExchangeService
     public Task<List<FundingRateDto>> GetAllFundingRatesAsync() =>
         throw new NotSupportedException("Dzengi has no funding rate (CFD-leverage)");
 
-    public Task<List<FundingPaymentDto>> GetFundingPaymentsAsync(string symbol, DateTime? startTime = null) =>
-        throw new NotSupportedException("Dzengi has no funding rate (CFD-leverage)");
-
     private async Task<string?> EnsureAccountIdAsync()
     {
         if (!string.IsNullOrEmpty(_accountId)) return _accountId;
