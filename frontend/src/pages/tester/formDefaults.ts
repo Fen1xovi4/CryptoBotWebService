@@ -79,6 +79,7 @@ export interface GfForm {
   takeProfitEnabled: boolean;
   takeProfitTargetUsd: string;
   restartOnRangeExit: boolean;
+  takeProfitContinue: boolean;
   anchorPriceLimit: string;
 }
 
@@ -210,6 +211,7 @@ export const defaultGfForm: GfForm = {
   takeProfitEnabled: false,
   takeProfitTargetUsd: '100',
   restartOnRangeExit: false,
+  takeProfitContinue: true,
   anchorPriceLimit: '',
 };
 

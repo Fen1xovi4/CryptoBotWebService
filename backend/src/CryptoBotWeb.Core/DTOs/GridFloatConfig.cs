@@ -74,6 +74,13 @@ public class GridFloatConfig
     public bool TakeProfitEnabled { get; set; } = false;
     public decimal TakeProfitTargetUsd { get; set; } = 100m;
 
+    // When true, reaching the take-profit closes everything and the bot keeps trading: the
+    // target is then measured per series (state.SeriesRealizedPnl + unrealized, zeroed at each
+    // take-profit) instead of against lifetime realized PnL, and the next anchor opens one
+    // closed bar later. RestartOnRangeExit always behaves this way regardless of this flag.
+    // Default ON (user's choice, 2026-10-14): set false explicitly to get the old stop-the-bot TP.
+    public bool TakeProfitContinue { get; set; } = true;
+
     // Restart-on-range-exit ("stake ladder") mode. Tiers stop being an expanding grid and
     // become STAKE STEPS: the grid only ever spans Tiers[0]'s geometry (UpToPercent width,
     // DCA/TP steps), and the per-order size comes from Tiers[StakeStage].SizeUsdt.

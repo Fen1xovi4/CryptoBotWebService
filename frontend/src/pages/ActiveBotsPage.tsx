@@ -2668,6 +2668,7 @@ interface GridFloatCfg {
   takeProfitTargetUsd?: number;
   // Stake-ladder mode: grid from T1 only, tiers become stake steps on range exit.
   restartOnRangeExit?: boolean;
+  takeProfitContinue?: boolean;
   anchorPriceLimit?: number | null;
   // Legacy fields (read-only, kept for back-compat when reading old strategies from API).
   baseSizeUsdt?: number;
@@ -3201,7 +3202,9 @@ function GridFloatCard({
         <span className="text-[10px] text-text-secondary">
           {restartMode
             ? 'USDT за серию (realized + unrealized) — закрыть всё и вернуться на ставку T1'
-            : 'USDT (realized + unrealized, останавливает бота)'}
+            : normalizedCfg?.takeProfitContinue !== false
+              ? 'USDT за серию (realized + unrealized) — закрыть всё и продолжить торговлю'
+              : 'USDT (realized + unrealized, останавливает бота)'}
         </span>
         {tpDraftDirty && (
           <button
@@ -5134,6 +5137,7 @@ function AddStrategyModal({
     takeProfitEnabled: false,
     takeProfitTargetUsd: '100',
     restartOnRangeExit: false,
+    takeProfitContinue: true,
     anchorPriceLimit: '',
   });
   const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(
@@ -5402,6 +5406,7 @@ function AddStrategyModal({
         takeProfitEnabled: gfForm.takeProfitEnabled,
         takeProfitTargetUsd: gfTpTarget,
         restartOnRangeExit: gfForm.restartOnRangeExit,
+        takeProfitContinue: gfForm.takeProfitContinue,
         anchorPriceLimit: gfAnchorLimit,
       });
     } else if (strategyType === 'GridHedge') {
@@ -6298,9 +6303,22 @@ function AddStrategyModal({
                     <span className="text-xs text-text-secondary">
                       {gfForm.restartOnRangeExit
                         ? 'USDT за серию (realized + unrealized) — закрыть всё и вернуться на ставку T1'
-                        : 'USDT (realized + unrealized, останавливает бота)'}
+                        : gfForm.takeProfitContinue
+                          ? 'USDT за серию (realized + unrealized) — закрыть всё и продолжить торговлю'
+                          : 'USDT (realized + unrealized, останавливает бота)'}
                     </span>
                   </div>
+                )}
+                {gfForm.takeProfitEnabled && !gfForm.restartOnRangeExit && (
+                  <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={gfForm.takeProfitContinue}
+                      onChange={(e) => setGfForm({ ...gfForm, takeProfitContinue: e.target.checked })}
+                      className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                    />
+                    <span className="text-sm text-text-primary">Не останавливать бота после тейка</span>
+                  </label>
                 )}
               </div>
 
@@ -7341,6 +7359,7 @@ function EditStrategyModal({
     takeProfitEnabled: cfg.takeProfitEnabled === true,
     takeProfitTargetUsd: String(cfg.takeProfitTargetUsd ?? 100),
     restartOnRangeExit: cfg.restartOnRangeExit ?? false,
+    takeProfitContinue: cfg.takeProfitContinue ?? true,
     anchorPriceLimit: typeof cfg.anchorPriceLimit === 'number' ? String(cfg.anchorPriceLimit) : '',
   });
   const [gfTiers, setGfTiers] = useState<Array<{ upTo: string; size: string; dca: string; tp: string }>>(() => {
@@ -7645,6 +7664,7 @@ function EditStrategyModal({
         takeProfitEnabled: gfForm.takeProfitEnabled,
         takeProfitTargetUsd: gfTpTarget,
         restartOnRangeExit: gfForm.restartOnRangeExit,
+        takeProfitContinue: gfForm.takeProfitContinue,
         anchorPriceLimit: gfAnchorLimit,
       });
     } else if (isGH) {
@@ -8466,9 +8486,22 @@ function EditStrategyModal({
                     <span className="text-xs text-text-secondary">
                       {gfForm.restartOnRangeExit
                         ? 'USDT за серию (realized + unrealized) — закрыть всё и вернуться на ставку T1'
-                        : 'USDT (realized + unrealized, останавливает бота)'}
+                        : gfForm.takeProfitContinue
+                          ? 'USDT за серию (realized + unrealized) — закрыть всё и продолжить торговлю'
+                          : 'USDT (realized + unrealized, останавливает бота)'}
                     </span>
                   </div>
+                )}
+                {gfForm.takeProfitEnabled && !gfForm.restartOnRangeExit && (
+                  <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={gfForm.takeProfitContinue}
+                      onChange={(e) => setGfForm({ ...gfForm, takeProfitContinue: e.target.checked })}
+                      className="w-4 h-4 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer"
+                    />
+                    <span className="text-sm text-text-primary">Не останавливать бота после тейка</span>
+                  </label>
                 )}
               </div>
             </>
