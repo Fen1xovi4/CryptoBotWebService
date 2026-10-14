@@ -7,6 +7,7 @@ using CryptoBotWeb.Core.Enums;
 using CryptoBotWeb.Core.Helpers;
 using CryptoBotWeb.Core.Interfaces;
 using CryptoBotWeb.Infrastructure.Data;
+using CryptoBotWeb.Infrastructure.Services;
 using CryptoBotWeb.Infrastructure.Strategies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -61,7 +62,8 @@ public class StrategiesController : ControllerBase
                 s.StateJson,
                 Status = s.Status.ToString(),
                 s.CreatedAt,
-                s.StartedAt
+                s.StartedAt,
+                s.HideFromTop
             })
             .OrderByDescending(s => s.CreatedAt)
             .ToListAsync();
@@ -162,103 +164,6 @@ public class StrategiesController : ControllerBase
         return Ok(stats);
     }
 
-    [AllowAnonymous]
-    [HttpGet("top")]
-    public async Task<IActionResult> GetTopBots()
-    {
-        var since = DateTime.UtcNow.AddDays(-90);
-        var minAge = DateTime.UtcNow.AddDays(-15);
-        var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-
-        var topBots = await _db.Strategies
-            .Include(s => s.Trades)
-            .Include(s => s.Account)
-            .Where(s => s.CreatedAt <= minAge)
-            .Where(s => s.Trades.Any(t => t.PnlDollar != null && t.ExecutedAt >= since))
-            .Select(s => new
-            {
-                Strategy = s,
-                Trades90d = s.Trades.Where(t => t.PnlDollar != null && t.ExecutedAt >= since).ToList(),
-                Exchange = s.Account.ExchangeType.ToString()
-            })
-            .ToListAsync();
-
-        var result = topBots
-            .Select(x =>
-            {
-                var pnl = x.Trades90d.Sum(t => t.PnlDollar ?? 0m);
-                var winning = x.Trades90d.Count(t => t.PnlDollar > 0);
-                var total = x.Trades90d.Count;
-
-                string symbol;
-                string timeframe;
-                TopBotConfigDto? configDto;
-
-                if (x.Strategy.Type == StrategyTypes.HuntingFunding)
-                {
-                    HuntingFundingConfig? hfConfig = null;
-                    try { hfConfig = JsonSerializer.Deserialize<HuntingFundingConfig>(x.Strategy.ConfigJson, jsonOpts); }
-                    catch { }
-
-                    symbol = hfConfig?.Symbol ?? "";
-                    timeframe = "";
-                    configDto = hfConfig != null ? new TopBotConfigDto
-                    {
-                        TakeProfitPercent = hfConfig.TakeProfitPercent,
-                        StopLossPercent = hfConfig.StopLossPercent
-                    } : null;
-                }
-                else
-                {
-                    EmaBounceConfig? emaConfig = null;
-                    try { emaConfig = JsonSerializer.Deserialize<EmaBounceConfig>(x.Strategy.ConfigJson, jsonOpts); }
-                    catch { }
-
-                    symbol = emaConfig?.Symbol ?? "";
-                    timeframe = emaConfig?.Timeframe ?? "";
-                    configDto = emaConfig != null ? new TopBotConfigDto
-                    {
-                        IndicatorType = emaConfig.IndicatorType,
-                        IndicatorLength = emaConfig.IndicatorLength,
-                        TakeProfitPercent = emaConfig.TakeProfitPercent,
-                        StopLossPercent = emaConfig.StopLossPercent,
-                        OrderSize = emaConfig.OrderSize,
-                        UseMartingale = emaConfig.UseMartingale,
-                        MartingaleCoeff = emaConfig.MartingaleCoeff,
-                        OnlyLong = emaConfig.OnlyLong,
-                        OnlyShort = emaConfig.OnlyShort
-                    } : null;
-                }
-
-                var totalVolume = x.Trades90d.Sum(t => t.Quantity * t.Price);
-                var pnlPercent = totalVolume > 0 ? pnl / totalVolume * 100m : 0m;
-
-                var runningDays = (DateTime.UtcNow - x.Strategy.CreatedAt).Days;
-
-                return new TopBotDto
-                {
-                    Id = x.Strategy.Id,
-                    Name = x.Strategy.Name,
-                    Symbol = symbol,
-                    Exchange = x.Exchange,
-                    StrategyType = x.Strategy.Type,
-                    Timeframe = timeframe,
-                    RealizedPnlPercent = Math.Round(pnlPercent, 2),
-                    RunningDays = runningDays,
-                    TotalTrades = total,
-                    WinningTrades = winning,
-                    WinRate = total > 0 ? Math.Round((decimal)winning / total * 100, 1) : 0,
-                    Config = configDto
-                };
-            })
-            .Where(b => b.RealizedPnlPercent > 0)
-            .OrderByDescending(b => b.RealizedPnlPercent)
-            .Take(6)
-            .ToList();
-
-        return Ok(result);
-    }
-
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> GetById(Guid id)
     {
@@ -276,7 +181,8 @@ public class StrategiesController : ControllerBase
                 s.StateJson,
                 Status = s.Status.ToString(),
                 s.CreatedAt,
-                s.StartedAt
+                s.StartedAt,
+                s.HideFromTop
             })
             .FirstOrDefaultAsync();
 
@@ -768,6 +674,23 @@ public class StrategiesController : ControllerBase
         await _db.SaveChangesAsync();
 
         return Ok(new { message = "Strategy updated", strategy.Id, strategy.Name });
+    }
+
+    // Opt-out from the public "top bots" leaderboard. Safe while running — display-only flag.
+    [HttpPatch("{id:guid}/top-visibility")]
+    public async Task<IActionResult> SetTopVisibility(
+        Guid id, [FromBody] SetTopVisibilityRequest request, [FromServices] TopBotsService topBots)
+    {
+        var strategy = await _db.Strategies
+            .FirstOrDefaultAsync(s => s.Id == id && s.Account.UserId == GetUserId());
+
+        if (strategy == null) return NotFound();
+
+        strategy.HideFromTop = request.HideFromTop;
+        await _db.SaveChangesAsync();
+        topBots.Invalidate();
+
+        return Ok(new { hideFromTop = strategy.HideFromTop });
     }
 
     [HttpPatch("{id:guid}/telegram-bot")]
@@ -1561,6 +1484,11 @@ public class UpdateStrategyRequest
 {
     public string Name { get; set; } = string.Empty;
     public string? ConfigJson { get; set; }
+}
+
+public class SetTopVisibilityRequest
+{
+    public bool HideFromTop { get; set; }
 }
 
 public class SetTelegramBotRequest

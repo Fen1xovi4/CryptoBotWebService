@@ -16,6 +16,9 @@ public class Strategy
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? StartedAt { get; set; }
 
+    // Opt-out from the public "top bots" leaderboard (settings and results are shown anonymously).
+    public bool HideFromTop { get; set; }
+
     public ExchangeAccount Account { get; set; } = null!;
     public Workspace? Workspace { get; set; }
     public TelegramBot? TelegramBot { get; set; }

@@ -8,6 +8,7 @@ import DashboardPage from './pages/DashboardPage';
 import AccountsPage from './pages/AccountsPage';
 import AccountDetailPage from './pages/AccountDetailPage';
 import StrategiesPage from './pages/StrategiesPage';
+import TopBotsPage from './pages/TopBotsPage';
 import ActiveBotsPage from './pages/ActiveBotsPage';
 import TradeHistoryPage from './pages/TradeHistoryPage';
 import SettingsPage from './pages/SettingsPage';
@@ -79,6 +80,7 @@ export default function App() {
           <Route path="/accounts" element={<AccountsPage />} />
           <Route path="/accounts/:id" element={<AccountDetailPage />} />
           <Route path="/strategies" element={<StrategiesPage />} />
+          <Route path="/top-bots" element={<TopBotsPage />} />
           <Route path="/active-bots" element={<ErrorBoundary label="ActiveBotsPage"><ActiveBotsPage /></ErrorBoundary>} />
           <Route path="/trades" element={<TradeHistoryPage />} />
           <Route path="/settings" element={<SettingsPage />} />

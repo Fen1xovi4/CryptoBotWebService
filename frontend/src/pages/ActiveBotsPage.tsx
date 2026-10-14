@@ -23,6 +23,7 @@ interface Strategy {
   status: string;
   createdAt: string;
   startedAt: string | null;
+  hideFromTop?: boolean;
 }
 
 interface TelegramBotOption {
@@ -167,6 +168,12 @@ export default function ActiveBotsPage() {
   const { data: telegramBots } = useQuery<TelegramBotOption[]>({
     queryKey: ['telegram-bots'],
     queryFn: () => api.get('/telegram-bots').then((r) => r.data),
+  });
+
+  const setTopVisibilityMutation = useMutation({
+    mutationFn: ({ strategyId, hideFromTop }: { strategyId: string; hideFromTop: boolean }) =>
+      api.patch(`/strategies/${strategyId}/top-visibility`, { hideFromTop }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['strategies'] }),
   });
 
   const setTelegramBotMutation = useMutation({
@@ -807,6 +814,7 @@ export default function ActiveBotsPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           {visibleStrategies.map((s) => {
+          const card = (() => {
             const cfg = parseJson(s.configJson);
             const state = parseJson(s.stateJson);
             const isRunning = s.status === 'Running';
@@ -1243,6 +1251,25 @@ export default function ActiveBotsPage() {
                     </svg>
                   </button>
                 </div>
+              </div>
+            );
+          })();
+            return (
+              <div key={s.id} className="flex flex-col gap-1">
+                {card}
+                <label
+                  className="flex items-center gap-1.5 px-1 text-[11px] text-text-secondary cursor-pointer select-none"
+                  title="Разрешить показывать настройки и результаты этого бота в публичном топе (анонимно)"
+                >
+                  <input
+                    type="checkbox"
+                    checked={!s.hideFromTop}
+                    disabled={setTopVisibilityMutation.isPending}
+                    onChange={(e) => setTopVisibilityMutation.mutate({ strategyId: s.id, hideFromTop: !e.target.checked })}
+                    className="accent-accent-blue"
+                  />
+                  Показывать в топе
+                </label>
               </div>
             );
           })}
