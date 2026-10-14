@@ -142,6 +142,7 @@ public class StrategiesController : ControllerBase
                                 var pnlPct = (state.OpenShort.EntryPrice - state.LastPrice.Value) / state.OpenShort.EntryPrice * 100m;
                                 unrealizedPnl += state.OpenShort.OrderSize * pnlPct / 100m;
                             }
+                            unrealizedPnl += state.GridUnrealizedPnl();
                         }
                     }
                     catch { /* skip invalid state */ }
@@ -456,6 +457,8 @@ public class StrategiesController : ControllerBase
             stratConfig["drawdownBalance"] = v;
         if (wsConfig.TryGetValue("drawdownPercent", out v))
             stratConfig["drawdownPercent"] = v;
+        if (wsConfig.TryGetValue("gridLotSize", out v))
+            stratConfig["gridLotSize"] = v;
         if (wsConfig.TryGetValue("drawdownTarget", out v))
             stratConfig["drawdownTarget"] = v;
 
@@ -1187,11 +1190,16 @@ public class StrategiesController : ControllerBase
         var currentPrice2 = await exchange2.GetTickerPriceAsync(symbol2);
 
         var results = new List<string>();
+        // MaratGGrid lots live in the same one-way position as the base: close them with it and
+        // book each lot separately (same fee estimate as the base below).
+        var gridIsLong = state.OpenLong != null;
+        var gridLots = state.GridLots.ToList();
+        var gridQty = gridLots.Sum(l => l.Quantity);
 
         if (state.OpenLong != null)
         {
             var position = state.OpenLong;
-            var result = await exchange2.CloseLongAsync(symbol2, position.Quantity);
+            var result = await exchange2.CloseLongAsync(symbol2, position.Quantity + gridQty); // MaratGGrid: lots share the one-way position
             var closePrice = currentPrice2 ?? position.EntryPrice;
             var pnlPercent = (closePrice - position.EntryPrice) / position.EntryPrice * 100m;
             var pnlDollar = position.OrderSize * pnlPercent / 100m;
@@ -1245,7 +1253,7 @@ public class StrategiesController : ControllerBase
         if (state.OpenShort != null)
         {
             var position = state.OpenShort;
-            var result = await exchange2.CloseShortAsync(symbol2, position.Quantity);
+            var result = await exchange2.CloseShortAsync(symbol2, position.Quantity + gridQty); // MaratGGrid: lots share the one-way position
             var closePrice = currentPrice2 ?? position.EntryPrice;
             var pnlPercent = (position.EntryPrice - closePrice) / position.EntryPrice * 100m;
             var pnlDollar = position.OrderSize * pnlPercent / 100m;
@@ -1296,9 +1304,60 @@ public class StrategiesController : ControllerBase
             state.WaitNextCandleAfterShortClose = true;
         }
 
+        if (gridLots.Count > 0)
+        {
+            var gridClosePrice = currentPrice2 ?? gridLots[0].EntryPrice;
+            foreach (var lot in gridLots)
+            {
+                var gross = gridIsLong
+                    ? lot.Quantity * (gridClosePrice - lot.EntryPrice)
+                    : lot.Quantity * (lot.EntryPrice - gridClosePrice);
+                var commission = lot.OrderSize * 2m * 0.0005m;
+                var net = gross - commission;
+
+                state.GridRealizedPnl += net;
+                state.CycleGridPnl += net;
+                if (emaConfig?.UseMartingale == true)
+                    state.RunningPnlDollar += gross;
+
+                _db.Trades.Add(new Trade
+                {
+                    Id = Guid.NewGuid(),
+                    StrategyId = strategy.Id,
+                    AccountId = strategy.AccountId,
+                    ExchangeOrderId = "",
+                    Symbol = symbol2,
+                    Side = gridIsLong ? "Sell" : "Buy",
+                    Quantity = lot.Quantity,
+                    Price = gridClosePrice,
+                    Status = "GridManualClose",
+                    ExecutedAt = DateTime.UtcNow,
+                    PnlDollar = net,
+                    Commission = commission
+                });
+                results.Add($"Grid lot L{lot.Level} closed: qty={lot.Quantity}, price={gridClosePrice}, PnL=${Math.Round(net, 2)}");
+            }
+
+            _db.StrategyLogs.Add(new StrategyLog
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                Level = "Info",
+                Message = $"Сетка: закрыто вручную лотов: {gridLots.Count}, цена={gridClosePrice}, сетка за цикл=${Math.Round(state.CycleGridPnl, 2)}",
+                CreatedAt = DateTime.UtcNow
+            });
+
+            state.GridLots.Clear();
+            state.GridStarterReopenAt = null;
+            state.GridRetryAfter = null;
+        }
+
         // Recompute next order size with proper martingale calculation
         if (emaConfig != null)
+        {
             state.NextOrderSize = EmaBounceHandler.GetCurrentOrderSize(emaConfig, state).orderSize;
+            state.NextGridLotSize = EmaBounceHandler.GetCurrentGridLotSize(emaConfig, state);
+        }
 
         strategy.StateJson = JsonSerializer.Serialize(state, saveOpts);
         await _db.SaveChangesAsync();
@@ -1381,7 +1440,7 @@ public class StrategiesController : ControllerBase
             // The MA overlay is only meaningful for the EMA/SMA bounce strategy (MaratG).
             // For every other strategy type we return bare candles — no misleading indicator line.
             var indicatorPoints = new List<object>();
-            if (strategy.Type == StrategyTypes.MaratG && config != null)
+            if ((strategy.Type == StrategyTypes.MaratG || strategy.Type == StrategyTypes.MaratGGrid) && config != null)
             {
                 var closePrices = candles.Select(c => c.Close).ToArray();
                 var maValues = config.IndicatorType.Equals("SMA", StringComparison.OrdinalIgnoreCase)

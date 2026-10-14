@@ -26,6 +26,10 @@ export interface MgForm {
   drawdownBalance: string;
   drawdownPercent: string;
   drawdownTarget: string;
+  // MaratGGrid only: gridLotSize is workspace-level, the other two are per-bot.
+  gridLotSize: string; // USDT
+  gridStepPercent: string;
+  gridMaxLots: string; // 0 = until stop loss
 }
 
 export interface HfForm {
@@ -133,6 +137,9 @@ export const defaultMgForm: MgForm = {
   drawdownBalance: '1000',
   drawdownPercent: '10',
   drawdownTarget: '5',
+  gridLotSize: '50',
+  gridStepPercent: '1',
+  gridMaxLots: '0',
 };
 
 export const defaultHfForm: HfForm = {

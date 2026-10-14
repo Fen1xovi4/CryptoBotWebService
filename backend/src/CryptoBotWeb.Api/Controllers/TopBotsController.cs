@@ -36,6 +36,7 @@ public class TopBotsController : ControllerBase
         ("drawdownBalance", "drawdownBalance"),
         ("drawdownPercent", "drawdownPercent"),
         ("drawdownTarget", "drawdownTarget"),
+        ("gridLotSize", "gridLotSize"),
     };
 
     private readonly AppDbContext _db;
@@ -97,7 +98,7 @@ public class TopBotsController : ControllerBase
 
         var strategyConfig = TopBotsService.SanitizeConfig(source.ConfigJson, source.Type);
         var workspaceConfig = TopBotsService.SanitizeWorkspaceConfig(source.Workspace?.ConfigJson, source.Type);
-        if (source.Type == StrategyTypes.MaratG)
+        if (source.Type == StrategyTypes.MaratG || source.Type == StrategyTypes.MaratGGrid)
         {
             foreach (var (wsKey, stKey) in MaratGWorkspaceKeys)
                 if (strategyConfig[stKey] is { } value)

@@ -33,6 +33,7 @@ public class TopBotsService
     private static readonly Dictionary<string, Type> ConfigTypes = new()
     {
         [StrategyTypes.MaratG] = typeof(EmaBounceConfig),
+        [StrategyTypes.MaratGGrid] = typeof(EmaBounceConfig),
         [StrategyTypes.HuntingFunding] = typeof(HuntingFundingConfig),
         [StrategyTypes.SmaDca] = typeof(SmaDcaConfig),
         [StrategyTypes.GridFloat] = typeof(GridFloatConfig),

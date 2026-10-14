@@ -30,7 +30,10 @@ public class MaratGSimulator : IStrategySimulator
         PropertyNameCaseInsensitive = true
     };
 
-    public string StrategyType => StrategyTypes.MaratG;
+    public virtual string StrategyType => StrategyTypes.MaratG;
+
+    /// <summary>MaratGGrid: grid lots on top of the base (see <see cref="MaratGGridSimulator"/>).</summary>
+    protected virtual bool WithGrid => false;
 
     public void ValidateConfig(string configJson)
     {
@@ -57,6 +60,16 @@ public class MaratGSimulator : IStrategySimulator
             throw new ArgumentException("MaratG: шаг ступенчатого мартингейла должен быть ≥ 1.");
         if (string.IsNullOrWhiteSpace(config.Timeframe))
             throw new ArgumentException("MaratG: не указан таймфрейм.");
+
+        if (WithGrid)
+        {
+            if (config.GridLotSize <= 0)
+                throw new ArgumentException("MaratG+Grid: сумма лота сетки (gridLotSize, USDT) должна быть больше 0.");
+            if (config.GridStepPercent <= 0)
+                throw new ArgumentException("MaratG+Grid: шаг сетки, % должен быть больше 0.");
+            if (config.GridMaxLots < 0)
+                throw new ArgumentException("MaratG+Grid: макс. докупок не может быть отрицательным.");
+        }
     }
 
     public SimulationRunResult Run(SimulationContext context)
@@ -94,7 +107,7 @@ public class MaratGSimulator : IStrategySimulator
                 result.IndicatorValues.Add(new IndicatorPoint { Time = agg[j].OpenTime, Value = Math.Round(ma[j], 8) });
         }
 
-        var state = new MgState { CurrentOrderSize = config.OrderSize };
+        var state = new MgState { CurrentOrderSize = config.OrderSize, Grid = WithGrid };
 
         // bucketEnd[j] = the moment aggregated candle j is considered CLOSED (path time must pass it).
         var bucketEnd = new DateTime[agg.Count];
@@ -112,7 +125,10 @@ public class MaratGSimulator : IStrategySimulator
 
             // 2) TP/SL over this 1m span (SL wins if both hit inside the span).
             if (state.Position != null)
-                CheckTpSl(config, state, c, ledger);
+            {
+                if (state.Grid) RunGridTicks(config, state, c, ledger);
+                else CheckTpSl(config, state, c, ledger);
+            }
 
             // 3) Flush every timeframe bucket that has now closed at/before this candle's close.
             bool closedBucketThisCandle = false;
@@ -258,6 +274,7 @@ public class MaratGSimulator : IStrategySimulator
 
         ledger.RecordOpen(time, "Long", "Open", entryPrice, qty, taker: true, reason);
         ledger.TrackOpenNotional(orderSize);
+        if (state.Grid) StartGridCycle(config, state, time, entryPrice, ledger);
     }
 
     private static void OpenShort(EmaBounceConfig config, MgState state, DateTime time, decimal entryPrice,
@@ -280,6 +297,7 @@ public class MaratGSimulator : IStrategySimulator
 
         ledger.RecordOpen(time, "Short", "Open", entryPrice, qty, taker: true, reason);
         ledger.TrackOpenNotional(orderSize);
+        if (state.Grid) StartGridCycle(config, state, time, entryPrice, ledger);
     }
 
     private static void CheckTpSl(EmaBounceConfig config, MgState state, CandleDto candle, SimLedger ledger)
@@ -311,6 +329,7 @@ public class MaratGSimulator : IStrategySimulator
         ledger.RecordClose(time, "Long", reason, closePrice, p.Quantity, taker: true, gross, pnlPercent, reason);
         UpdateMartingaleState(config, state, pnlPercent, p.OrderSize);
 
+        if (state.Grid) CloseAllLots(config, state, time, closePrice, reason, ledger);
         state.Position = null;
         state.LongCounter = 0;
         state.WaitNextCandleAfterLongClose = true;
@@ -326,6 +345,7 @@ public class MaratGSimulator : IStrategySimulator
         ledger.RecordClose(time, "Short", reason, closePrice, p.Quantity, taker: true, gross, pnlPercent, reason);
         UpdateMartingaleState(config, state, pnlPercent, p.OrderSize);
 
+        if (state.Grid) CloseAllLots(config, state, time, closePrice, reason, ledger);
         state.Position = null;
         state.ShortCounter = 0;
         state.WaitNextCandleAfterShortClose = true;
@@ -388,9 +408,148 @@ public class MaratGSimulator : IStrategySimulator
     {
         var p = state.Position;
         if (p == null) return 0m;
-        return p.IsLong
-            ? p.Quantity * (price - p.EntryPrice)
-            : p.Quantity * (p.EntryPrice - price);
+        var qty = p.Quantity;
+        var cost = p.Quantity * p.EntryPrice;
+        foreach (var lot in state.Lots)
+        {
+            qty += lot.Quantity;
+            cost += lot.Quantity * lot.EntryPrice;
+        }
+        return p.IsLong ? qty * price - cost : cost - qty * price;
+    }
+
+    // ───────── Grid (MaratGGrid; ports EmaBounceHandler.Grid) ─────────
+    //
+    // The grid needs the order of prices inside a 1m candle, so while a base is open it walks the
+    // 4-tick CandlePathHelper path instead of the candle's High/Low: base TP/SL first (SL wins),
+    // then lot take-profits, starter reopen, level buys — the live handler's per-poll order.
+    // Lots fill at their trigger level (like base TP/SL), or at the tick price when the level was
+    // already passed before this tick (gap); all grid fills are taker.
+
+    private static void StartGridCycle(EmaBounceConfig config, MgState state, DateTime time, decimal entryPrice,
+        SimLedger ledger)
+    {
+        state.Lots.Clear();
+        state.StarterReopenAt = null;
+        state.LastTickPrice = entryPrice;
+        state.CycleLotSize = config.OrderSize > 0
+            ? Math.Round(config.GridLotSize * state.CurrentOrderSize / config.OrderSize, 2)
+            : config.GridLotSize;
+        if (state.CycleLotSize <= 0 || config.GridStepPercent <= 0) return;
+
+        OpenLot(config, state, time, entryPrice, 0, ledger);
+    }
+
+    private static void RunGridTicks(EmaBounceConfig config, MgState state, CandleDto candle, SimLedger ledger)
+    {
+        var prev = state.LastTickPrice ?? candle.Open;
+        foreach (var tick in CandlePathHelper.GetTicks(candle))
+        {
+            var p = state.Position;
+            if (p == null) break;
+            var price = tick.Price;
+
+            if (p.IsLong)
+            {
+                if (price <= p.StopLoss) { CloseLong(config, state, tick.Time, p.StopLoss, "StopLoss", ledger); break; }
+                if (price >= p.TakeProfit) { CloseLong(config, state, tick.Time, p.TakeProfit, "TakeProfit", ledger); break; }
+            }
+            else
+            {
+                if (price >= p.StopLoss) { CloseShort(config, state, tick.Time, p.StopLoss, "StopLoss", ledger); break; }
+                if (price <= p.TakeProfit) { CloseShort(config, state, tick.Time, p.TakeProfit, "TakeProfit", ledger); break; }
+            }
+
+            GridStep(config, state, tick.Time, price, prev, ledger);
+            prev = price;
+        }
+        state.LastTickPrice = candle.Close;
+    }
+
+    private static void GridStep(EmaBounceConfig config, MgState state, DateTime time, decimal price, decimal prev,
+        SimLedger ledger)
+    {
+        var p = state.Position!;
+        if (state.CycleLotSize <= 0 || config.GridStepPercent <= 0) return;
+        var isLong = p.IsLong;
+
+        // 1. Lot take-profits.
+        foreach (var lot in state.Lots.Where(l => isLong ? price >= l.TakeProfit : price <= l.TakeProfit)
+                     .OrderBy(l => l.Level).ToList())
+        {
+            CloseLot(config, state, time, lot, lot.TakeProfit, "GridTP", ledger);
+            if (lot.Level == 0)
+            {
+                var span = SymbolHelper.GetTimeframeSpan(config.Timeframe);
+                state.StarterReopenAt = new DateTime(time.Ticks - time.Ticks % span.Ticks, DateTimeKind.Utc) + span;
+            }
+        }
+
+        // 2. Starter reopen at market on the next candle.
+        if (state.StarterReopenAt.HasValue && time >= state.StarterReopenAt.Value && state.Lots.All(l => l.Level != 0))
+        {
+            OpenLot(config, state, time, price, 0, ledger);
+            state.StarterReopenAt = null;
+        }
+
+        // 3. Level buys against the base entry.
+        var maxLevel = EmaBounceHandler.GetGridMaxLevel(config);
+        for (var k = 1; k <= maxLevel; k++)
+        {
+            if (state.Lots.Any(l => l.Level == k)) continue;
+            var level = isLong
+                ? p.EntryPrice * (1 - k * config.GridStepPercent / 100m)
+                : p.EntryPrice * (1 + k * config.GridStepPercent / 100m);
+            var reached = isLong ? price <= level : price >= level;
+            if (!reached) continue;
+            var crossedThisTick = isLong ? prev > level : prev < level;
+            OpenLot(config, state, time, crossedThisTick ? level : price, k, ledger);
+        }
+    }
+
+    private static void OpenLot(EmaBounceConfig config, MgState state, DateTime time, decimal price, int level,
+        SimLedger ledger)
+    {
+        var p = state.Position!;
+        if (price <= 0) return;
+        var qty = state.CycleLotSize / price;
+        var step = config.GridStepPercent / 100m;
+        var fee = ledger.RecordOpen(time, p.IsLong ? "Long" : "Short", "GridOpen", price, qty, taker: true,
+            $"GridL{level}", holdForPosition: false);
+        state.Lots.Add(new SimLot
+        {
+            Level = level,
+            EntryPrice = price,
+            Quantity = qty,
+            TakeProfit = p.IsLong ? price * (1 + step) : price * (1 - step),
+            EntryFee = fee
+        });
+        ledger.TrackOpenNotional(p.OrderSize + state.Lots.Count * state.CycleLotSize);
+    }
+
+    private static void CloseLot(EmaBounceConfig config, MgState state, DateTime time, SimLot lot, decimal price,
+        string reason, SimLedger ledger)
+    {
+        var isLong = state.Position!.IsLong;
+        var gross = isLong ? lot.Quantity * (price - lot.EntryPrice) : lot.Quantity * (lot.EntryPrice - price);
+        var pnlPercent = isLong
+            ? (price - lot.EntryPrice) / lot.EntryPrice * 100m
+            : (lot.EntryPrice - price) / lot.EntryPrice * 100m;
+        ledger.RecordClose(time, isLong ? "Long" : "Short", reason, price, lot.Quantity, taker: true, gross,
+            pnlPercent, $"{reason} L{lot.Level}", ownEntryFee: lot.EntryFee);
+        // Grid PnL feeds the drawdown-scaled martingale; the base outcome alone decides win/loss.
+        if (config.UseMartingale) state.RunningPnlDollar += gross;
+        state.Lots.Remove(lot);
+    }
+
+    private static void CloseAllLots(EmaBounceConfig config, MgState state, DateTime time, decimal price,
+        string reason, SimLedger ledger)
+    {
+        foreach (var lot in state.Lots.ToList())
+            CloseLot(config, state, time, lot, price, "Grid" + reason, ledger);
+        state.StarterReopenAt = null;
+        state.LastTickPrice = null;
+        state.BaseCloses++;
     }
 
     private static void BuildSummary(SimulationRunResult result, SimLedger ledger, MgState state,
@@ -419,7 +578,7 @@ public class MaratGSimulator : IStrategySimulator
             MaxNotionalUsd = Math.Round(ledger.MaxNotionalUsd, 8),
             OpenPositionsAtEnd = openPositions,
             UnrealizedPnlAtEndUsd = Math.Round(unrealizedAtEnd, 8),
-            CompletedCycles = ledger.ClosedTrades,
+            CompletedCycles = state.Grid ? state.BaseCloses : ledger.ClosedTrades,
             StartTime = path[0].OpenTime,
             EndTime = path[^1].CloseTime,
             PathCandlesProcessed = path.Count
@@ -442,6 +601,23 @@ public class MaratGSimulator : IStrategySimulator
         public decimal CurrentOrderSize { get; set; }
         public int ConsecutiveLosses { get; set; }
         public decimal RunningPnlDollar { get; set; }
+
+        // Grid (MaratGGrid)
+        public bool Grid { get; set; }
+        public List<SimLot> Lots { get; } = new();
+        public decimal CycleLotSize { get; set; }
+        public DateTime? StarterReopenAt { get; set; }
+        public decimal? LastTickPrice { get; set; }
+        public int BaseCloses { get; set; }
+    }
+
+    private sealed class SimLot
+    {
+        public int Level { get; set; }
+        public decimal EntryPrice { get; set; }
+        public decimal Quantity { get; set; }
+        public decimal TakeProfit { get; set; }
+        public decimal EntryFee { get; set; }
     }
 
     private sealed class MgPosition

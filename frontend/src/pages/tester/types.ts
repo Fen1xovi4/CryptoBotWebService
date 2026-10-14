@@ -2,6 +2,7 @@ import type { CandleData } from '../../components/Chart/CandlestickChart';
 
 export const STRATEGY_TYPES = [
   'MaratG',
+  'MaratGGrid',
   'SmaDca',
   'GridFloat',
   'GridHedge',
@@ -13,6 +14,7 @@ export type StrategyType = (typeof STRATEGY_TYPES)[number];
 
 export const STRATEGY_LABELS: Record<StrategyType, string> = {
   MaratG: 'MaratG (EMA Bounce)',
+  MaratGGrid: 'MaratG+Grid (EMA Bounce + сетка)',
   SmaDca: 'SmaDca (SMA DCA-сетка)',
   GridFloat: 'GridFloat (плавающая сетка)',
   GridHedge: 'GridHedge (сетка + хедж)',

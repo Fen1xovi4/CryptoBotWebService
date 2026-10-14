@@ -16,7 +16,7 @@ builder.Services.AddSingleton<IProxyHealthTracker, ProxyHealthTracker>();
 builder.Services.AddSingleton<IExchangeServiceFactory, ExchangeServiceFactory>();
 
 // Websocket top-of-book streams. Singleton because the connections must outlive the per-tick
-// REST clients; consumed by GridFloat for its take-profit mark.
+// REST clients; consumed by GridFloat for its take-profit mark and by MaratGGrid for its price.
 builder.Services.AddSingleton<IQuoteStreamService, QuoteStreamService>();
 
 // Private order streams, one per exchange account (Bybit only for now). Lets GridFloat detect
@@ -24,6 +24,7 @@ builder.Services.AddSingleton<IQuoteStreamService, QuoteStreamService>();
 builder.Services.AddSingleton<IOrderStreamService, OrderStreamService>();
 
 builder.Services.AddScoped<IStrategyHandler, EmaBounceHandler>();
+builder.Services.AddScoped<IStrategyHandler, MaratGGridHandler>();
 builder.Services.AddScoped<IStrategyHandler, HuntingFundingHandler>();
 builder.Services.AddScoped<IStrategyHandler, SmaDcaHandler>();
 builder.Services.AddScoped<IStrategyHandler, GridFloatHandler>();

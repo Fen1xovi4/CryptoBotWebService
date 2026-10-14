@@ -52,15 +52,18 @@ internal sealed class SimLedger
 
     /// <summary>
     /// Records an opening or scale-in fill (Action = Open | Dca). PnlUsd is null (pure open).
-    /// The fee is added to the running total and held against the position for the eventual close.
+    /// The fee is added to the running total and held against the position for the eventual close —
+    /// unless <paramref name="holdForPosition"/> is false (an independently closed lot, e.g. a
+    /// MaratGGrid grid lot), in which case the caller passes the returned fee back as
+    /// <c>ownEntryFee</c> when that lot closes.
     /// </summary>
-    public void RecordOpen(DateTime time, string side, string action, decimal price, decimal qty,
-        bool taker, string reason)
+    public decimal RecordOpen(DateTime time, string side, string action, decimal price, decimal qty,
+        bool taker, string reason, bool holdForPosition = true)
     {
         var notional = qty * price;
         var fee = FeeFor(notional, taker);
         FeesUsd += fee;
-        _openPositionFees += fee;
+        if (holdForPosition) _openPositionFees += fee;
 
         Trades.Add(new SimTrade
         {
@@ -75,6 +78,7 @@ internal sealed class SimLedger
             PnlPercent = null,
             Reason = reason
         });
+        return fee;
     }
 
     /// <summary>
@@ -83,15 +87,25 @@ internal sealed class SimLedger
     /// gross percentage move on the average entry.
     /// </summary>
     public void RecordClose(DateTime time, string side, string action, decimal price, decimal qty,
-        bool taker, decimal grossRealizedUsd, decimal pnlPercent, string reason)
+        bool taker, decimal grossRealizedUsd, decimal pnlPercent, string reason, decimal? ownEntryFee = null)
     {
         var notional = qty * price;
         var fee = FeeFor(notional, taker);
         FeesUsd += fee;
         GrossRealizedUsd += grossRealizedUsd;
 
-        var netUsd = grossRealizedUsd - _openPositionFees - fee;
-        _openPositionFees = 0m;
+        decimal netUsd;
+        if (ownEntryFee.HasValue)
+        {
+            // A lot opened with holdForPosition: false carries its own entry fee; the pooled
+            // position fees stay for the position's own close.
+            netUsd = grossRealizedUsd - ownEntryFee.Value - fee;
+        }
+        else
+        {
+            netUsd = grossRealizedUsd - _openPositionFees - fee;
+            _openPositionFees = 0m;
+        }
 
         ClosedTrades++;
         if (netUsd > 0) WinningTrades++;

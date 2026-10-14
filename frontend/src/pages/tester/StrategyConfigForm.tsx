@@ -804,6 +804,20 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
         </div>
       </div>
 
+      {strategyType === 'MaratGGrid' && (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={labelCls}>Шаг сетки, %</label>
+            <input type="number" step="0.1" min="0" value={mg.gridStepPercent} onChange={(e) => patch('mg', { gridStepPercent: e.target.value })} className={inputCls} />
+          </div>
+          <div>
+            <label className={labelCls}>Макс. докупок (0 = до стопа)</label>
+            <input type="number" step="1" min="0" value={mg.gridMaxLots} onChange={(e) => patch('mg', { gridMaxLots: e.target.value })} className={inputCls} />
+            <p className="text-xs text-text-secondary mt-1">Уровней сетки: {gridLevelsCount(mg.stopLossPercent, mg.gridStepPercent, mg.gridMaxLots)}</p>
+          </div>
+        </div>
+      )}
+
       {/* Workspace-level settings. Live bots take these from the workspace
           (WorkspaceConfig → MergeWorkspaceConfig at start); the sim has no
           workspace, so they are entered here and flattened into configJson. */}
@@ -814,6 +828,12 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
           <div>
             <label className={labelCls}>Сумма ставки (USDT)</label>
             <input type="number" min="0" step="1" value={mg.orderSize} onChange={(e) => patch('mg', { orderSize: e.target.value })} className={inputCls} />
+            {strategyType === 'MaratGGrid' && (
+              <div className="mt-3">
+                <label className={labelCls}>Сумма лота сетки, USDT</label>
+                <input type="number" min="0" step="1" value={mg.gridLotSize} onChange={(e) => patch('mg', { gridLotSize: e.target.value })} className={inputCls} />
+              </div>
+            )}
           </div>
           <div className="flex flex-col justify-end gap-2 pb-1">
             <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -884,6 +904,16 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
       </div>
     </>
   );
+}
+
+/** Number of grid levels below the base entry: ceil(SL / step) - 1, capped by maxLots (0 = no cap). */
+function gridLevelsCount(stopLoss: string, step: string, maxLots: string): number {
+  const sl = Number(stopLoss);
+  const st = Number(step);
+  if (!(sl > 0) || !(st > 0)) return 0;
+  const levels = Math.max(0, Math.ceil(sl / st) - 1);
+  const cap = Number(maxLots);
+  return cap > 0 ? Math.min(cap, levels) : levels;
 }
 
 function XIcon() {
