@@ -10,10 +10,29 @@ namespace CryptoBotWeb.Infrastructure.Strategies;
 /// </summary>
 public static class GridFloatStakeLadder
 {
+    /// <summary>Number of stakes in the ladder (≥ 1).</summary>
+    public static int StageCount(GridFloatConfig config) => Math.Clamp(config.MaxStakeStages, 1, 20);
+
+    /// <summary>Multiplier applied per stage; values below 1 (or unset) fall back to 1.</summary>
+    public static decimal Multiplier(GridFloatConfig config) => config.StakeMultiplier >= 1m ? config.StakeMultiplier : 1m;
+
+    /// <summary>Per-order stake at <paramref name="stage"/>: base (T1) × multiplier^stage, rounded to cents.</summary>
+    public static decimal StakeAt(GridFloatConfig config, int stage)
+    {
+        if (config.Tiers.Count == 0) return 0m;
+        var stake = config.Tiers[0].SizeUsdt;
+        var mult = Multiplier(config);
+        for (var i = 0; i < Math.Clamp(stage, 0, StageCount(config) - 1); i++) stake *= mult;
+        return Math.Round(stake, 2);
+    }
+
+    /// <summary>True when <paramref name="stage"/> is the last stake of the ladder.</summary>
+    public static bool IsLastStage(GridFloatConfig config, int stage) => stage + 1 >= StageCount(config);
+
     /// <summary>
     /// The config the grid is built from at <paramref name="stage"/>. Outside the mode this is
     /// the config itself. Inside it, a copy whose tier list is a single tier with Tiers[0]'s
-    /// geometry (width, DCA/TP steps) and Tiers[stage]'s size, static range forced off — so the
+    /// geometry (width, DCA/TP steps) and this stage's stake, static range forced off — so the
     /// existing ladder/TP helpers work on it unchanged. Expects tiers already normalised.
     /// </summary>
     public static GridFloatConfig ForStage(GridFloatConfig config, int stage)
@@ -27,7 +46,7 @@ public static class GridFloatStakeLadder
             new()
             {
                 UpToPercent = geometry.UpToPercent,
-                SizeUsdt = config.Tiers[Math.Clamp(stage, 0, config.Tiers.Count - 1)].SizeUsdt,
+                SizeUsdt = StakeAt(config, stage),
                 DcaStepPercent = geometry.DcaStepPercent,
                 TpStepPercent = geometry.TpStepPercent,
             }

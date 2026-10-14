@@ -81,9 +81,9 @@ public class GridFloatConfig
     // Default ON (user's choice, 2026-10-14): set false explicitly to get the old stop-the-bot TP.
     public bool TakeProfitContinue { get; set; } = true;
 
-    // Restart-on-range-exit ("stake ladder") mode. Tiers stop being an expanding grid and
-    // become STAKE STEPS: the grid only ever spans Tiers[0]'s geometry (UpToPercent width,
-    // DCA/TP steps), and the per-order size comes from Tiers[StakeStage].SizeUsdt.
+    // Restart-on-range-exit ("stake ladder") mode. Only Tiers[0] is used: its geometry
+    // (UpToPercent width, DCA/TP steps) and its SizeUsdt as the BASE stake. The per-order size
+    // at stage k is Tiers[0].SizeUsdt × StakeMultiplier^k, for k = 0 .. MaxStakeStages−1.
     //   - Price leaves the range on the losing side (below anchor·(1−width%) for Long) →
     //     cancel everything, market-close, StakeStage++, re-anchor after one closed bar.
     //   - Grid fully closes by its own TPs → if the series (PnL since the last reset) is
@@ -93,6 +93,13 @@ public class GridFloatConfig
     //   - Range exit on the last stage → close everything and stop the bot.
     // UseStaticRange is ignored in this mode.
     public bool RestartOnRangeExit { get; set; } = false;
+
+    // Stake ladder: each stage's stake = previous × this (≥ 1). 2 → 10, 20, 40…
+    public decimal StakeMultiplier { get; set; } = 2m;
+
+    // Stake ladder: total number of stakes including the base. A losing-side range exit on the
+    // last one stops the bot.
+    public int MaxStakeStages { get; set; } = 5;
 
     // Optional anchor price guard. Long: no new anchor while price is ABOVE this; Short: no
     // new anchor while price is BELOW it. Stops the bot from building a fresh grid at the top

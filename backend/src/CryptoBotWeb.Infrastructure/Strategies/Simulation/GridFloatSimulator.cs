@@ -395,11 +395,11 @@ public class GridFloatSimulator : IStrategySimulator
                     completedCycles++;
                     state.OpenAfterTime = when;
 
-                    if (stage + 1 >= config.Tiers.Count)
+                    if (GridFloatStakeLadder.IsLastStage(config, stage))
                     {
                         stopTime = when;
                         result.Warnings.Add(
-                            $"GridFloat: выход из диапазона на последней ступени ({config.Tiers[stage].SizeUsdt}$) — " +
+                            $"GridFloat: выход из диапазона на последней ступени ({GridFloatStakeLadder.StakeAt(config, stage)}$) — " +
                             $"позиции закрыты, бот остановлен в {when:yyyy-MM-dd HH:mm:ss} UTC " +
                             $"(результат серии {Math.Round(RealizedCash() - seriesBase, 2)}$).");
                         return true;
@@ -532,7 +532,7 @@ public class GridFloatSimulator : IStrategySimulator
             result.Summary.Extras.AddRange(new[]
             {
                 new SimSummaryExtra { Label = "Выходов из диапазона", Value = rangeExits.ToString() },
-                new SimSummaryExtra { Label = "Макс. ступень", Value = $"{maxStage + 1} из {config.Tiers.Count} ({config.Tiers[maxStage].SizeUsdt}$)" },
+                new SimSummaryExtra { Label = "Макс. ступень", Value = $"{maxStage + 1} из {GridFloatStakeLadder.StageCount(config)} ({GridFloatStakeLadder.StakeAt(config, maxStage)}$)" },
                 new SimSummaryExtra { Label = "Сбросов на базу", Value = stakeResets.ToString() },
                 new SimSummaryExtra { Label = "Худшая серия", Value = $"{Math.Round(worstSeries, 2)}$" },
                 new SimSummaryExtra { Label = "Ступень в конце", Value = $"{stage + 1} (серия {Math.Round(SeriesPnl(lastTickPrice), 2)}$)" },

@@ -93,7 +93,18 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
     }
 
     case 'GridFloat': {
-      const tiers = forms.gfTiers
+      const gfRestart = forms.gf.restartOnRangeExit;
+      const gfMultiplier = Number(forms.gf.stakeMultiplier);
+      const gfMaxStages = Number(forms.gf.maxStakeStages);
+      if (gfRestart) {
+        if (!(gfMultiplier >= 1)) {
+          return { ok: false, error: 'Множитель ставки должен быть ≥ 1' };
+        }
+        if (!Number.isInteger(gfMaxStages) || gfMaxStages < 1 || gfMaxStages > 20) {
+          return { ok: false, error: 'Макс. ступеней — целое число от 1 до 20' };
+        }
+      }
+      const tiers = (gfRestart ? forms.gfTiers.slice(0, 1) : forms.gfTiers)
         .map((t) => {
           const upToPercent = Number(t.upTo);
           const sizeUsdt = Number(t.size);
@@ -146,6 +157,7 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
         takeProfitEnabled: forms.gf.takeProfitEnabled,
         takeProfitTargetUsd: gfTpTarget,
         restartOnRangeExit: forms.gf.restartOnRangeExit,
+        ...(gfRestart ? { stakeMultiplier: gfMultiplier, maxStakeStages: gfMaxStages } : {}),
         takeProfitContinue: forms.gf.takeProfitContinue,
         anchorPriceLimit: gfAnchorLimit,
       });

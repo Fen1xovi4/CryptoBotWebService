@@ -2,6 +2,7 @@ import { useState } from 'react';
 import api, { optimizeSmartGridHedge } from '../../api/client';
 import type { OptimizeSmartGridHedgeResponse } from '../../api/client';
 import type { AllForms } from './formDefaults';
+import { formatStakeSequence } from './formDefaults';
 import type { ArbLevel, HFLevel, StrategyType } from './types';
 import { gridHedgeRecommendation } from './buildConfig';
 
@@ -339,7 +340,7 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
 
         <div>
           <label className={labelCls}>
-            {gf.restartOnRangeExit ? 'Ступени ставки (от T2 используется только $, ярусы держите по возрастанию До %)' : 'Ярусы сетки'}
+            {gf.restartOnRangeExit ? 'Диапазон и базовая ставка (T1)' : 'Ярусы сетки'}
           </label>
           <div className="rounded-lg border border-border overflow-hidden">
             <table className="w-full text-xs">
@@ -356,6 +357,7 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
               </thead>
               <tbody>
                 {forms.gfTiers.map((t, i) => {
+                  if (gf.restartOnRangeExit && i > 0) return null;
                   const prevUp = i === 0 ? '0' : forms.gfTiers[i - 1].upTo || '?';
                   return (
                     <tr key={i} className="border-t border-border/50">
@@ -382,7 +384,7 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
                           className="w-14 bg-bg-tertiary border border-border rounded px-1.5 py-1 text-text-primary placeholder:text-text-secondary/40" />
                       </td>
                       <td className="px-2 py-1.5 text-right">
-                        {forms.gfTiers.length > 1 && (
+                        {forms.gfTiers.length > 1 && !gf.restartOnRangeExit && (
                           <button type="button"
                             onClick={() => setForms((f) => ({ ...f, gfTiers: f.gfTiers.filter((_, idx) => idx !== i) }))}
                             className="px-1.5 py-0.5 text-accent-red hover:bg-accent-red/10 rounded" title="Удалить ярус">
@@ -396,16 +398,38 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
               </tbody>
             </table>
           </div>
-          <button type="button"
-            onClick={() => setForms((f) => {
-              const last = f.gfTiers[f.gfTiers.length - 1];
-              const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
-              const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
-              return { ...f, gfTiers: [...f.gfTiers, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }] };
-            })}
-            className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors">
-            + Добавить ярус
-          </button>
+          {!gf.restartOnRangeExit && (
+            <button type="button"
+              onClick={() => setForms((f) => {
+                const last = f.gfTiers[f.gfTiers.length - 1];
+                const nextUp = last && Number(last.upTo) > 0 ? Number(last.upTo) * 2 : 10;
+                const nextSize = last && Number(last.size) > 0 ? Number(last.size) * 2 : 100;
+                return { ...f, gfTiers: [...f.gfTiers, { upTo: String(nextUp), size: String(nextSize), dca: '', tp: '' }] };
+              })}
+              className="mt-2 px-3 py-1.5 text-xs font-medium bg-bg-tertiary text-text-secondary rounded-lg hover:bg-bg-tertiary/70 transition-colors">
+              + Добавить ярус
+            </button>
+          )}
+          {gf.restartOnRangeExit && (
+            <div className="mt-3 space-y-2">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelCls}>Множитель ставки</label>
+                  <input type="number" step="0.1" min="1" value={gf.stakeMultiplier}
+                    onChange={(e) => patch('gf', { stakeMultiplier: e.target.value })} className={inputCls} />
+                </div>
+                <div>
+                  <label className={labelCls}>Макс. ступеней</label>
+                  <input type="number" step="1" min="1" max="20" value={gf.maxStakeStages}
+                    onChange={(e) => patch('gf', { maxStakeStages: e.target.value })} className={inputCls} />
+                </div>
+              </div>
+              {(() => {
+                const seq = formatStakeSequence(Number(forms.gfTiers[0]?.size), Number(gf.stakeMultiplier), Number(gf.maxStakeStages));
+                return seq ? <p className="text-xs text-text-secondary">Ставки: {seq}</p> : null;
+              })()}
+            </div>
+          )}
         </div>
 
         <label className="flex items-start gap-2 cursor-pointer select-none">
@@ -414,10 +438,9 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
           <div>
             <span className="text-sm font-medium text-text-primary">Перезапуск при выходе из диапазона</span>
             <p className="text-xs text-text-secondary mt-0.5">
-              Сетка строится только по T1 (ширина, шаги DCA/TP). Ярусы становятся ступенями ставки: при выходе цены
-              за нижнюю границу (Long) всё закрывается по рынку и диапазон переоткрывается со ставкой следующего яруса.
-              Сброс на ставку T1 — когда серия вышла в ≥ 0 (без тейка) или достигла цели тейка. Выход на последней
-              ступени — остановка бота.
+              Сетка строится по T1. При выходе цены за нижнюю границу (Long) / верхнюю (Short) всё закрывается по рынку
+              и диапазон переоткрывается со ставкой × множитель. Сброс на базовую ставку — когда серия вышла в ≥ 0
+              (без тейка) или достигла цели тейка. Выход на последней ступени — остановка бота.
             </p>
           </div>
         </label>

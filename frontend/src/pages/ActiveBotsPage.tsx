@@ -7,6 +7,7 @@ import StatusBadge from '../components/ui/StatusBadge';
 import SearchableSelect from '../components/ui/SearchableSelect';
 import CandlestickChart from '../components/Chart/CandlestickChart';
 import type { CandleData, IndicatorDataPoint } from '../components/Chart/CandlestickChart';
+import { formatStakeSequence } from './tester/formDefaults';
 
 interface Strategy {
   id: string;
@@ -1288,7 +1289,7 @@ export default function ActiveBotsPage() {
                 <div className="border-t border-border/50" />
 
                 {/* Actions */}
-                <div className="px-3 py-2 flex items-center gap-1">
+                <div className="px-3 py-2 flex flex-wrap items-center gap-1">
                   <button
                     onClick={() => setChartStrategy(s)}
                     title="График"
@@ -1330,7 +1331,7 @@ export default function ActiveBotsPage() {
                       </button>
                       {!s.telegramBotId && telegramBots.filter(b => b.isActive).length > 1 && (
                         <select
-                          className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                          className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                           value=""
                           onChange={(e) => {
                             if (e.target.value) {
@@ -1346,7 +1347,7 @@ export default function ActiveBotsPage() {
                       )}
                       {s.telegramBotId && (
                         <select
-                          className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                          className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                           value={s.telegramBotId}
                           onChange={(e) => {
                             setTelegramBotMutation.mutate({
@@ -1842,7 +1843,7 @@ function HuntingFundingCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -1884,7 +1885,7 @@ function HuntingFundingCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -1896,7 +1897,7 @@ function HuntingFundingCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -2148,7 +2149,7 @@ function FundingClaimCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -2190,7 +2191,7 @@ function FundingClaimCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -2202,7 +2203,7 @@ function FundingClaimCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -2537,7 +2538,7 @@ function SmaDcaCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -2578,7 +2579,7 @@ function SmaDcaCard({
             </button>
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -2666,8 +2667,10 @@ interface GridFloatCfg {
   useStaticRange: boolean;
   takeProfitEnabled?: boolean;
   takeProfitTargetUsd?: number;
-  // Stake-ladder mode: grid from T1 only, tiers become stake steps on range exit.
+  // Stake-ladder mode: grid from T1 only; stake escalates by stakeMultiplier on each range exit.
   restartOnRangeExit?: boolean;
+  stakeMultiplier?: number;
+  maxStakeStages?: number;
   takeProfitContinue?: boolean;
   anchorPriceLimit?: number | null;
   // Legacy fields (read-only, kept for back-compat when reading old strategies from API).
@@ -2874,10 +2877,14 @@ function GridFloatCard({
     return total;
   };
   // Restart-on-range-exit mode: the grid is built from T1's geometry only; the current stage
-  // only changes the per-order stake (tiers[stakeStage].sizeUsdt).
+  // only changes the per-order stake (T1.sizeUsdt × stakeMultiplier^stakeStage).
   const restartMode = normalizedCfg?.restartOnRangeExit === true;
-  const stakeStage = Math.min(Math.max(state?.stakeStage ?? 0, 0), Math.max(tiers.length - 1, 0));
-  const currentStake = tiers.length > 0 ? tiers[stakeStage].sizeUsdt : 0;
+  const stakeMultiplierCfg = normalizedCfg?.stakeMultiplier ?? 2;
+  const maxStakeStagesCfg = normalizedCfg?.maxStakeStages ?? 5;
+  const stakeStage = Math.min(Math.max(state?.stakeStage ?? 0, 0), Math.max(maxStakeStagesCfg - 1, 0));
+  const currentStake = tiers.length > 0
+    ? Math.round(tiers[0].sizeUsdt * Math.pow(stakeMultiplierCfg, stakeStage) * 100) / 100
+    : 0;
   const previewSlots = draftValid && normalizedCfg
     ? countSlots(restartMode ? parsedDraft.slice(0, 1) : parsedDraft, normalizedCfg.dcaStepPercent)
     : 0;
@@ -2955,7 +2962,22 @@ function GridFloatCard({
       {/* Config chips */}
       {normalizedCfg && (
         <div className="px-4 pb-2 flex flex-wrap gap-1">
-          {tiers.length === 1 ? (
+          {restartMode && tiers.length > 0 ? (
+            <>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300">
+                T1: 0%–{tiers[0].upToPercent}% · ${tiers[0].sizeUsdt}
+                {(typeof tiers[0].dcaStepPercent === 'number' && tiers[0].dcaStepPercent > 0
+                  || typeof tiers[0].tpStepPercent === 'number' && tiers[0].tpStepPercent > 0) && (
+                  <span className="ml-1 text-indigo-200/80">
+                    ·dca{tiers[0].dcaStepPercent ?? normalizedCfg.dcaStepPercent}%·tp{tiers[0].tpStepPercent ?? normalizedCfg.tpStepPercent}%
+                  </span>
+                )}
+              </span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300">
+                ×{stakeMultiplierCfg} · до {maxStakeStagesCfg} ступ.
+              </span>
+            </>
+          ) : tiers.length === 1 ? (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
               ${anchorSize}/батч, range ±{maxRangePct}%
             </span>
@@ -2999,7 +3021,7 @@ function GridFloatCard({
           {restartMode && (
             <>
               <div>
-                Ступень {stakeStage + 1} из {tiers.length} · ставка{' '}
+                Ступень {stakeStage + 1} из {maxStakeStagesCfg} · ставка{' '}
                 <span className="font-mono text-text-primary">${currentStake}</span>
               </div>
               <div>
@@ -3092,6 +3114,7 @@ function GridFloatCard({
             </div>
             <div className="space-y-1.5">
               {tierDraft.map((t, i) => {
+                if (restartMode && i > 0) return null;
                 const prevUp = i === 0 ? 0 : parseFloat(tierDraft[i - 1].upTo);
                 return (
                   <div key={i} className="flex items-center gap-1.5 flex-wrap">
@@ -3135,7 +3158,7 @@ function GridFloatCard({
                       className="w-12 text-[11px] bg-bg-tertiary border border-border rounded px-1.5 py-0.5 text-text-primary placeholder:text-text-secondary/40"
                     />
                     <span className="text-[10px] text-text-secondary">%</span>
-                    {tierDraft.length > 1 && (
+                    {tierDraft.length > 1 && !restartMode && (
                       <button
                         onClick={() => removeTierRow(i)}
                         className="ml-auto px-1.5 py-0.5 text-[10px] text-accent-red hover:bg-accent-red/10 rounded"
@@ -3149,12 +3172,14 @@ function GridFloatCard({
               })}
             </div>
             <div className="flex items-center gap-2 mt-2 flex-wrap">
-              <button
-                onClick={addTierRow}
-                className="px-2 py-1 text-[10px] font-medium bg-bg-tertiary text-text-secondary rounded-md hover:bg-bg-tertiary/70 transition-colors"
-              >
-                + Ярус
-              </button>
+              {!restartMode && (
+                <button
+                  onClick={addTierRow}
+                  className="px-2 py-1 text-[10px] font-medium bg-bg-tertiary text-text-secondary rounded-md hover:bg-bg-tertiary/70 transition-colors"
+                >
+                  + Ярус
+                </button>
+              )}
               <span className="text-[10px] text-text-secondary">
                 {draftValid
                   ? <>будет <span className="text-text-primary font-medium">{previewSlots}</span> уровней (сейчас {currentSlots})</>
@@ -3225,7 +3250,7 @@ function GridFloatCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -3266,7 +3291,7 @@ function GridFloatCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -3278,7 +3303,7 @@ function GridFloatCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -3702,7 +3727,7 @@ function GridHedgeCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -3743,7 +3768,7 @@ function GridHedgeCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -3755,7 +3780,7 @@ function GridHedgeCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -4339,7 +4364,7 @@ function SmartGridHedgeCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onChart}
           title="График"
@@ -4380,7 +4405,7 @@ function SmartGridHedgeCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -4392,7 +4417,7 @@ function SmartGridHedgeCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -4903,7 +4928,7 @@ function ArbitrageCard({
       <div className="border-t border-border/50" />
 
       {/* Actions */}
-      <div className="px-3 py-2 flex items-center gap-1">
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
         <button
           onClick={onLogs}
           title="Логи"
@@ -4935,7 +4960,7 @@ function ArbitrageCard({
             </button>
             {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
                 value=""
                 onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
               >
@@ -4947,7 +4972,7 @@ function ArbitrageCard({
             )}
             {s.telegramBotId && (
               <select
-                className="text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
                 value={s.telegramBotId}
                 onChange={(e) => onSetTelegramBot(e.target.value || null)}
               >
@@ -5137,6 +5162,8 @@ function AddStrategyModal({
     takeProfitEnabled: false,
     takeProfitTargetUsd: '100',
     restartOnRangeExit: false,
+    stakeMultiplier: '2',
+    maxStakeStages: '5',
     takeProfitContinue: true,
     anchorPriceLimit: '',
   });
@@ -5345,7 +5372,19 @@ function AddStrategyModal({
         checkBeforeFundingMinutes: Number(fcForm.checkBeforeFundingMinutes),
       });
     } else if (strategyType === 'GridFloat') {
-      const tiers = gfTiers
+      const gfMultiplier = Number(gfForm.stakeMultiplier);
+      const gfMaxStages = Number(gfForm.maxStakeStages);
+      if (gfForm.restartOnRangeExit) {
+        if (!(gfMultiplier >= 1)) {
+          setError('Множитель ставки должен быть ≥ 1');
+          return;
+        }
+        if (!Number.isInteger(gfMaxStages) || gfMaxStages < 1 || gfMaxStages > 20) {
+          setError('Макс. ступеней — целое число от 1 до 20');
+          return;
+        }
+      }
+      const tiers = (gfForm.restartOnRangeExit ? gfTiers.slice(0, 1) : gfTiers)
         .map((t) => {
           const upToPercent = Number(t.upTo);
           const sizeUsdt = Number(t.size);
@@ -5406,6 +5445,7 @@ function AddStrategyModal({
         takeProfitEnabled: gfForm.takeProfitEnabled,
         takeProfitTargetUsd: gfTpTarget,
         restartOnRangeExit: gfForm.restartOnRangeExit,
+        ...(gfForm.restartOnRangeExit ? { stakeMultiplier: gfMultiplier, maxStakeStages: gfMaxStages } : {}),
         takeProfitContinue: gfForm.takeProfitContinue,
         anchorPriceLimit: gfAnchorLimit,
       });
@@ -6115,7 +6155,7 @@ function AddStrategyModal({
               <div>
                 <label className={labelCls}>
                   {gfForm.restartOnRangeExit
-                    ? 'Ступени ставки (от T2 используется только $, ярусы держите по возрастанию До %)'
+                    ? 'Диапазон и базовая ставка (T1)'
                     : 'Ярусы сетки'}
                 </label>
                 <div className="rounded-lg border border-border overflow-hidden">
@@ -6133,6 +6173,7 @@ function AddStrategyModal({
                     </thead>
                     <tbody>
                       {gfTiers.map((t, i) => {
+                        if (gfForm.restartOnRangeExit && i > 0) return null;
                         const prevUp = i === 0 ? '0' : gfTiers[i - 1].upTo || '?';
                         return (
                           <tr key={i} className="border-t border-border/50">
@@ -6185,7 +6226,7 @@ function AddStrategyModal({
                               />
                             </td>
                             <td className="px-2 py-1.5 text-right">
-                              {gfTiers.length > 1 && (
+                              {gfTiers.length > 1 && !gfForm.restartOnRangeExit && (
                                 <button
                                   type="button"
                                   onClick={() => setGfTiers((prev) => prev.filter((_, idx) => idx !== i))}
@@ -6202,6 +6243,8 @@ function AddStrategyModal({
                     </tbody>
                   </table>
                 </div>
+                {!gfForm.restartOnRangeExit && (
+                <>
                 <button
                   type="button"
                   onClick={() => setGfTiers((prev) => {
@@ -6219,6 +6262,41 @@ function AddStrategyModal({
                   (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
                   Якорь использует параметры первого яруса.
                 </p>
+                </>
+                )}
+                {gfForm.restartOnRangeExit && (
+                  <div className="mt-3 space-y-2">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className={labelCls}>Множитель ставки</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="1"
+                          value={gfForm.stakeMultiplier}
+                          onChange={(e) => setGfForm({ ...gfForm, stakeMultiplier: e.target.value })}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>Макс. ступеней</label>
+                        <input
+                          type="number"
+                          step="1"
+                          min="1"
+                          max="20"
+                          value={gfForm.maxStakeStages}
+                          onChange={(e) => setGfForm({ ...gfForm, maxStakeStages: e.target.value })}
+                          className={inputCls}
+                        />
+                      </div>
+                    </div>
+                    {(() => {
+                      const seq = formatStakeSequence(Number(gfTiers[0]?.size), Number(gfForm.stakeMultiplier), Number(gfForm.maxStakeStages));
+                      return seq ? <p className="text-xs text-text-secondary">Ставки: {seq}</p> : null;
+                    })()}
+                  </div>
+                )}
               </div>
 
               {/* Restart on range exit (stake ladder) */}
@@ -6232,10 +6310,9 @@ function AddStrategyModal({
                 <div>
                   <span className="text-sm font-medium text-text-primary">Перезапуск при выходе из диапазона</span>
                   <p className="text-xs text-text-secondary mt-0.5">
-                    Сетка строится только по T1 (ширина, шаги DCA/TP). Ярусы становятся ступенями ставки: при выходе цены
-                    за нижнюю границу (Long) всё закрывается по рынку и диапазон переоткрывается со ставкой следующего яруса.
-                    Сброс на ставку T1 — когда серия вышла в ≥ 0 (без тейка) или достигла цели тейка. Выход на последней
-                    ступени — остановка бота.
+                    Сетка строится по T1. При выходе цены за нижнюю границу (Long) / верхнюю (Short) всё закрывается по рынку
+                    и диапазон переоткрывается со ставкой × множитель. Сброс на базовую ставку — когда серия вышла в ≥ 0
+                    (без тейка) или достигла цели тейка. Выход на последней ступени — остановка бота.
                   </p>
                 </div>
               </label>
@@ -7359,6 +7436,8 @@ function EditStrategyModal({
     takeProfitEnabled: cfg.takeProfitEnabled === true,
     takeProfitTargetUsd: String(cfg.takeProfitTargetUsd ?? 100),
     restartOnRangeExit: cfg.restartOnRangeExit ?? false,
+    stakeMultiplier: String(cfg.stakeMultiplier ?? 2),
+    maxStakeStages: String(cfg.maxStakeStages ?? 5),
     takeProfitContinue: cfg.takeProfitContinue ?? true,
     anchorPriceLimit: typeof cfg.anchorPriceLimit === 'number' ? String(cfg.anchorPriceLimit) : '',
   });
@@ -7605,7 +7684,19 @@ function EditStrategyModal({
         checkBeforeFundingMinutes: Number(fcForm.checkBeforeFundingMinutes),
       });
     } else if (isGF) {
-      const tiers = gfTiers
+      const gfMultiplier = Number(gfForm.stakeMultiplier);
+      const gfMaxStages = Number(gfForm.maxStakeStages);
+      if (gfForm.restartOnRangeExit) {
+        if (!(gfMultiplier >= 1)) {
+          setError('Множитель ставки должен быть ≥ 1');
+          return;
+        }
+        if (!Number.isInteger(gfMaxStages) || gfMaxStages < 1 || gfMaxStages > 20) {
+          setError('Макс. ступеней — целое число от 1 до 20');
+          return;
+        }
+      }
+      const tiers = (gfForm.restartOnRangeExit ? gfTiers.slice(0, 1) : gfTiers)
         .map((t) => {
           const upToPercent = Number(t.upTo);
           const sizeUsdt = Number(t.size);
@@ -7664,6 +7755,7 @@ function EditStrategyModal({
         takeProfitEnabled: gfForm.takeProfitEnabled,
         takeProfitTargetUsd: gfTpTarget,
         restartOnRangeExit: gfForm.restartOnRangeExit,
+        ...(gfForm.restartOnRangeExit ? { stakeMultiplier: gfMultiplier, maxStakeStages: gfMaxStages } : {}),
         takeProfitContinue: gfForm.takeProfitContinue,
         anchorPriceLimit: gfAnchorLimit,
       });
@@ -8300,7 +8392,7 @@ function EditStrategyModal({
               <div>
                 <label className={labelCls}>
                   {gfForm.restartOnRangeExit
-                    ? 'Ступени ставки (от T2 используется только $, ярусы держите по возрастанию До %)'
+                    ? 'Диапазон и базовая ставка (T1)'
                     : 'Ярусы сетки'}
                 </label>
                 <div className="rounded-lg border border-border overflow-hidden">
@@ -8318,6 +8410,7 @@ function EditStrategyModal({
                     </thead>
                     <tbody>
                       {gfTiers.map((t, i) => {
+                        if (gfForm.restartOnRangeExit && i > 0) return null;
                         const prevUp = i === 0 ? '0' : gfTiers[i - 1].upTo || '?';
                         return (
                           <tr key={i} className="border-t border-border/50">
@@ -8370,7 +8463,7 @@ function EditStrategyModal({
                               />
                             </td>
                             <td className="px-2 py-1.5 text-right">
-                              {gfTiers.length > 1 && (
+                              {gfTiers.length > 1 && !gfForm.restartOnRangeExit && (
                                 <button
                                   type="button"
                                   onClick={() => setGfTiers((prev) => prev.filter((_, idx) => idx !== i))}
@@ -8387,6 +8480,8 @@ function EditStrategyModal({
                     </tbody>
                   </table>
                 </div>
+                {!gfForm.restartOnRangeExit && (
+                <>
                 <button
                   type="button"
                   onClick={() => setGfTiers((prev) => {
@@ -8404,6 +8499,41 @@ function EditStrategyModal({
                   (или глобального, если поле пустое), а TP каждого фила = его цена ± шаг_TP_яруса.
                   Якорь использует параметры первого яруса.
                 </p>
+                </>
+                )}
+                {gfForm.restartOnRangeExit && (
+                  <div className="mt-3 space-y-2">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className={labelCls}>Множитель ставки</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="1"
+                          value={gfForm.stakeMultiplier}
+                          onChange={(e) => setGfForm({ ...gfForm, stakeMultiplier: e.target.value })}
+                          className={inputCls}
+                        />
+                      </div>
+                      <div>
+                        <label className={labelCls}>Макс. ступеней</label>
+                        <input
+                          type="number"
+                          step="1"
+                          min="1"
+                          max="20"
+                          value={gfForm.maxStakeStages}
+                          onChange={(e) => setGfForm({ ...gfForm, maxStakeStages: e.target.value })}
+                          className={inputCls}
+                        />
+                      </div>
+                    </div>
+                    {(() => {
+                      const seq = formatStakeSequence(Number(gfTiers[0]?.size), Number(gfForm.stakeMultiplier), Number(gfForm.maxStakeStages));
+                      return seq ? <p className="text-xs text-text-secondary">Ставки: {seq}</p> : null;
+                    })()}
+                  </div>
+                )}
               </div>
 
               {/* Restart on range exit (stake ladder) */}
@@ -8417,10 +8547,9 @@ function EditStrategyModal({
                 <div>
                   <span className="text-sm font-medium text-text-primary">Перезапуск при выходе из диапазона</span>
                   <p className="text-xs text-text-secondary mt-0.5">
-                    Сетка строится только по T1 (ширина, шаги DCA/TP). Ярусы становятся ступенями ставки: при выходе цены
-                    за нижнюю границу (Long) всё закрывается по рынку и диапазон переоткрывается со ставкой следующего яруса.
-                    Сброс на ставку T1 — когда серия вышла в ≥ 0 (без тейка) или достигла цели тейка. Выход на последней
-                    ступени — остановка бота.
+                    Сетка строится по T1. При выходе цены за нижнюю границу (Long) / верхнюю (Short) всё закрывается по рынку
+                    и диапазон переоткрывается со ставкой × множитель. Сброс на базовую ставку — когда серия вышла в ≥ 0
+                    (без тейка) или достигла цели тейка. Выход на последней ступени — остановка бота.
                   </p>
                 </div>
               </label>
