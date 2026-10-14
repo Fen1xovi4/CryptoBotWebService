@@ -83,6 +83,8 @@ interface WorkspaceStats {
   totalTrades: number;
   pnl: number;
   unrealizedPnl: number;
+  /** Traded notional across all recorded fills (opens + closes), USDT. */
+  volume?: number;
 }
 
 const defaultConfig: WorkspaceConfig = {
@@ -339,6 +341,7 @@ export default function ActiveBotsPage() {
     totalTrades: 0,
     pnl: 0,
     unrealizedPnl: 0,
+    volume: 0,
   };
 
   const accountOptions = useMemo(() => {
@@ -866,6 +869,13 @@ export default function ActiveBotsPage() {
             <span className="text-xs text-text-secondary">Реализ. PNL:</span>
             <span className={`text-sm font-semibold ${currentStats.pnl < 0 ? 'text-accent-red' : currentStats.pnl > 0 ? 'text-accent-green' : 'text-text-secondary'}`}>
               {currentStats.pnl >= 0 ? '+' : ''}${currentStats.pnl.toFixed(2)}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2" title="Сумма номиналов всех исполнений (открытия + закрытия)">
+            <span className="text-xs text-text-secondary">Объём торгов:</span>
+            <span className="text-sm font-semibold text-text-primary">
+              ${(currentStats.volume ?? 0).toLocaleString('ru-RU', { maximumFractionDigits: 0 })}
             </span>
           </div>
         </div>
@@ -3188,7 +3198,11 @@ function GridFloatCard({
           onChange={(e) => setTpDraftTarget(e.target.value)}
           className="w-20 bg-bg-tertiary border border-border rounded px-2 py-0.5 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
         />
-        <span className="text-[10px] text-text-secondary">USDT (realized + unrealized, останавливает бота)</span>
+        <span className="text-[10px] text-text-secondary">
+          {restartMode
+            ? 'USDT за серию (realized + unrealized) — закрыть всё и вернуться на ставку T1'
+            : 'USDT (realized + unrealized, останавливает бота)'}
+        </span>
         {tpDraftDirty && (
           <button
             type="button"
