@@ -1309,6 +1309,8 @@ public class StrategiesController : ControllerBase
 
             // Reset position state â€” mirrors GridFloatHandler.OnFullClose.
             gfState.RealizedPnlDollar += gfNetPnl;
+            // Stake-ladder series counts manual closes too, so the reset decision stays honest.
+            gfState.SeriesRealizedPnl += gfNetPnl;
             gfState.Batches ??= new List<GridFloatBatch>();
             gfState.DcaOrders ??= new List<GridFloatDcaOrder>();
             gfState.Batches.Clear();

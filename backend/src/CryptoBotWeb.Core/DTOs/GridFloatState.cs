@@ -80,6 +80,18 @@ public class GridFloatState
     // Cumulative realized PnL across all closed batches for reporting.
     public decimal RealizedPnlDollar { get; set; }
 
+    // Restart-on-range-exit mode (config.RestartOnRangeExit). StakeStage indexes config.Tiers
+    // for the per-order size of the current range (0 = base stake). SeriesRealizedPnl is the
+    // net realized PnL since the stake last reset to base — the number that decides whether a
+    // completed grid resets the stake and that the series take-profit is measured against.
+    public int StakeStage { get; set; }
+    public decimal SeriesRealizedPnl { get; set; }
+    public int RangeExitCount { get; set; }
+
+    // Set while config.AnchorPriceLimit keeps a new anchor from opening — only so the block is
+    // logged once per stretch instead of on every closed bar.
+    public DateTime? AnchorBlockedSince { get; set; }
+
     // On placement failure (min-notional, transient net/exchange error) skip further DCA/TP
     // (re)placements until this UTC instant — prevents tight retry storms.
     public DateTime? PlacementCooldownUntil { get; set; }

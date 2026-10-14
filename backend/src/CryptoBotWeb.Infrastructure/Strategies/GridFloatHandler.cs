@@ -60,18 +60,37 @@ public class GridFloatHandler : IStrategyHandler
     // re-arm after restart, or TP heal after restart).
     private const int InterOrderDelayMs = 75;
 
+    // While the account's private order stream is healthy, fills are detected from the stream and
+    // the position-based reconcile drops from every tick to this cadence. It stays as the backstop
+    // for anything the stream missed; with the stream down it runs every tick as before.
+    private static readonly TimeSpan ReconcileIntervalWithStream = TimeSpan.FromSeconds(60);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, DateTime> _lastReconcileUtc = new();
+
+    // A websocket quote older than this is not used as the live price — REST ticker instead.
+    private const double MaxQuoteAgeMs = 5000;
+
     public string StrategyType => StrategyTypes.GridFloat;
 
     private readonly AppDbContext _db;
     private readonly ILogger<GridFloatHandler> _logger;
     private readonly ITelegramSignalService _telegramSignalService;
+    private readonly IOrderStreamService _orderStream;
+    private readonly IQuoteStreamService _quotes;
+
+    // Set at the top of every ProcessAsync (the handler is scoped per strategy tick): the real
+    // config with the full stake-ladder tier list, and the stage the grid view was built for.
+    private GridFloatConfig? _fullConfig;
+    private int _stakeStage;
 
     public GridFloatHandler(AppDbContext db, ILogger<GridFloatHandler> logger,
-        ITelegramSignalService telegramSignalService)
+        ITelegramSignalService telegramSignalService, IOrderStreamService orderStream,
+        IQuoteStreamService quotes)
     {
         _db = db;
         _logger = logger;
         _telegramSignalService = telegramSignalService;
+        _orderStream = orderStream;
+        _quotes = quotes;
     }
 
     public async Task ProcessAsync(Strategy strategy, IFuturesExchangeService exchange, CancellationToken ct)
@@ -106,6 +125,23 @@ public class GridFloatHandler : IStrategyHandler
         var isLongConfig = config.Direction.Equals("Long", StringComparison.OrdinalIgnoreCase);
         var state = JsonSerializer.Deserialize<GridFloatState>(strategy.StateJson, JsonOptions)
                     ?? new GridFloatState();
+
+        // Stake-ladder mode: everything below builds the grid from the current stage's VIEW of
+        // the config (one tier = T1 geometry + this stage's stake). `fullConfig` keeps the real
+        // tier list — the stake steps — for stage transitions and for anything persisted.
+        var fullConfig = config;
+        _fullConfig = fullConfig;
+        _stakeStage = state.StakeStage;
+        config = GridFloatStakeLadder.ForStage(fullConfig, state.StakeStage);
+
+        // Websocket streams: never block, never throw — until they are up everything below
+        // falls back to REST exactly as before.
+        if (strategy.Account != null)
+        {
+            await _orderStream.EnsureSubscribedAsync(strategy.Account, ct);
+            if (config.TakeProfitEnabled || fullConfig.RestartOnRangeExit)
+                await _quotes.EnsureSubscribedAsync(strategy.Account, config.Symbol, ct);
+        }
 
         // 1. Restart re-sync (once per worker boot).
         if (!state.StateInitialized)
@@ -154,21 +190,33 @@ public class GridFloatHandler : IStrategyHandler
         //   exchange.qty < state.qty → missed TP fill(s) → close batches.
         //   exchange.qty > state.qty → missed DCA fill(s) → adopt DCA orders as batches.
         // Runs whenever EITHER batches or DCA orders exist.
-        if (state.Batches.Count > 0 || state.DcaOrders.Count > 0)
+        if ((state.Batches.Count > 0 || state.DcaOrders.Count > 0) && ReconcileDue(strategy))
         {
             await ReconcileBatchesFromPosition(strategy, config, state, exchange, ct);
             SaveState(strategy, state);
             await _db.SaveChangesAsync(ct);
         }
 
+        // 3c'. Stake ladder: series take-profit and losing-side range exit. Both close everything
+        // at market; the tick ends there and the next anchor waits for a closed bar.
+        if (fullConfig.RestartOnRangeExit)
+        {
+            if (state.AnchorPrice > 0 && state.Batches.Count > 0
+                && await HandleStakeLadderAsync(strategy, fullConfig, config, state, exchange, isLongConfig, ct))
+            {
+                SaveState(strategy, state);
+                await _db.SaveChangesAsync(ct);
+                return;
+            }
+        }
         // 3c. Take-profit check — cumulative realized + mark-to-market unrealized.
         // Triggers force-close and stops the bot. Cheap when disabled (single bool check);
         // when enabled and TP is satisfied the ticker fetch is the only extra exchange call
         // per tick beyond what was already in flight.
-        if (config.TakeProfitEnabled && config.TakeProfitTargetUsd > 0m)
+        else if (config.TakeProfitEnabled && config.TakeProfitTargetUsd > 0m)
         {
             decimal? markN = null;
-            try { markN = await exchange.GetTickerPriceAsync(config.Symbol); }
+            try { markN = await GetLivePriceAsync(strategy, config.Symbol, exchange); }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "GridFloat TP check: GetTickerPriceAsync failed for {Symbol}", config.Symbol);
@@ -258,7 +306,8 @@ public class GridFloatHandler : IStrategyHandler
         // to the fresh anchor's qty as untracked dust.
         if (state.Batches.Count == 0 && state.DcaOrders.Count == 0
             && !state.OpenAfterTime.HasValue
-            && !state.OrphanCancelPendingUntil.HasValue)
+            && !state.OrphanCancelPendingUntil.HasValue
+            && !AnchorBlockedByPriceLimit(strategy, fullConfig, state, lastClosed.Close, isLongConfig))
         {
             await OpenAnchor(strategy, config, state, exchange, lastClosed, isLongConfig, ct);
             if (state.AnchorPrice > 0)
@@ -400,9 +449,11 @@ public class GridFloatHandler : IStrategyHandler
         var side = state.IsLong ? "Buy" : "Sell";
         try
         {
+            var placedAt = DateTime.UtcNow;
             var result = await exchange.PlaceLimitOrderAsync(config.Symbol, side, price, qty, reduceOnly: false);
             if (result.Success && !string.IsNullOrEmpty(result.OrderId))
             {
+                SeedPlaced(strategy, result.OrderId, placedAt);
                 state.DcaOrders.Add(new GridFloatDcaOrder
                 {
                     LevelIdx = levelIdx,
@@ -494,9 +545,11 @@ public class GridFloatHandler : IStrategyHandler
         var closeSide = state.IsLong ? "Sell" : "Buy";
         try
         {
+            var placedAt = DateTime.UtcNow;
             var result = await exchange.PlaceLimitOrderAsync(config.Symbol, closeSide, batch.TpPrice, batch.Qty, reduceOnly: true);
             if (result.Success && !string.IsNullOrEmpty(result.OrderId))
             {
+                SeedPlaced(strategy, result.OrderId, placedAt);
                 batch.TpOrderId = result.OrderId;
                 // Fix #10: recovered batch — clear backoff so it's no longer skipped by HealMissingTps.
                 batch.TpFailCount = 0;
@@ -545,6 +598,62 @@ public class GridFloatHandler : IStrategyHandler
 
     // ────────────────────────── Fill detection ──────────────────────────
 
+    /// <summary>
+    /// Order status from the account's websocket cache when it can be trusted, else REST (whose
+    /// answer is fed back into the cache so the next tick is served without a request). Same
+    /// contract as <see cref="IFuturesExchangeService.GetOrderAsync"/>: null = not found, throws
+    /// on a failed lookup.
+    /// </summary>
+    private async Task<OrderStatusDto?> GetOrderStatusAsync(Strategy strategy, string symbol,
+        IFuturesExchangeService exchange, string orderId)
+    {
+        if (_orderStream.TryGetTrusted(strategy.AccountId, orderId, out var cached))
+            return cached;
+
+        // Stamp BEFORE the request: a change racing it must not be covered by this answer.
+        var askedAt = DateTime.UtcNow;
+        var status = await exchange.GetOrderAsync(symbol, orderId);
+        if (status != null)
+        {
+            if (string.IsNullOrEmpty(status.OrderId)) status.OrderId = orderId;
+            _orderStream.Seed(strategy.AccountId, status, askedAt);
+        }
+        return status;
+    }
+
+    /// <summary>A just-placed order is Open as of the moment we sent it; the stream takes it from there.</summary>
+    private void SeedPlaced(Strategy strategy, string orderId, DateTime placedAtUtc)
+        => _orderStream.Seed(strategy.AccountId,
+            new OrderStatusDto { OrderId = orderId, Status = OrderLifecycleStatus.Open }, placedAtUtc);
+
+    /// <summary>
+    /// Every tick while the order stream is down (the old behaviour); once per
+    /// <see cref="ReconcileIntervalWithStream"/> while it is healthy.
+    /// </summary>
+    private bool ReconcileDue(Strategy strategy)
+    {
+        var now = DateTime.UtcNow;
+        if (_orderStream.IsHealthy(strategy.AccountId)
+            && _lastReconcileUtc.TryGetValue(strategy.Id, out var last)
+            && now - last < ReconcileIntervalWithStream)
+            return false;
+
+        _lastReconcileUtc[strategy.Id] = now;
+        return true;
+    }
+
+    /// <summary>Mid of a fresh websocket quote when one is streaming, else the REST ticker.</summary>
+    private async Task<decimal?> GetLivePriceAsync(Strategy strategy, string symbol, IFuturesExchangeService exchange)
+    {
+        if (strategy.Account != null)
+        {
+            var quote = _quotes.TryGetQuote(strategy.Account.ExchangeType, symbol);
+            if (quote is { IsValid: true } && quote.AgeMs(DateTime.UtcNow) <= MaxQuoteAgeMs)
+                return (quote.Bid + quote.Ask) / 2m;
+        }
+        return await exchange.GetTickerPriceAsync(symbol);
+    }
+
     private async Task PollDcaFills(Strategy strategy, GridFloatConfig config, GridFloatState state,
         IFuturesExchangeService exchange, CancellationToken ct)
     {
@@ -553,7 +662,7 @@ public class GridFloatHandler : IStrategyHandler
         foreach (var dca in pending)
         {
             OrderStatusDto? status;
-            try { status = await exchange.GetOrderAsync(config.Symbol, dca.OrderId); }
+            try { status = await GetOrderStatusAsync(strategy, config.Symbol, exchange, dca.OrderId); }
             catch (NotSupportedException) { continue; }
             catch (Exception ex)
             {
@@ -656,7 +765,7 @@ public class GridFloatHandler : IStrategyHandler
             if (string.IsNullOrEmpty(batch.TpOrderId)) continue;
 
             OrderStatusDto? status;
-            try { status = await exchange.GetOrderAsync(config.Symbol, batch.TpOrderId!); }
+            try { status = await GetOrderStatusAsync(strategy, config.Symbol, exchange, batch.TpOrderId!); }
             catch (NotSupportedException) { continue; }
             catch (Exception ex)
             {
@@ -730,6 +839,7 @@ public class GridFloatHandler : IStrategyHandler
             batch.TpOrderId, $"TakeProfit#{batch.LevelIdx}", pnlDollar: netPnl, commission: commission);
 
         state.RealizedPnlDollar += netPnl;
+        state.SeriesRealizedPnl += netPnl;
 
         Log(strategy, "Info",
             $"💰 TP батча #{batch.LevelIdx} филлд: qty={closeQty} @ {closePrice}, " +
@@ -882,7 +992,7 @@ public class GridFloatHandler : IStrategyHandler
         decimal price = 0m;
         try
         {
-            var ticker = await exchange.GetTickerPriceAsync(config.Symbol);
+            var ticker = await GetLivePriceAsync(strategy, config.Symbol, exchange);
             if (ticker is not (null or <= 0)) price = ticker.Value;
         }
         catch (Exception ex)
@@ -1288,6 +1398,26 @@ public class GridFloatHandler : IStrategyHandler
             $"≥ цели ${Math.Round(config.TakeProfitTargetUsd, 2)} @ mark {Math.Round(markAtTrigger, 8)}. " +
             "Снимаю все лимиты и закрываю позиции по рынку.");
 
+        await CloseAllAtMarketAsync(strategy, config, state, exchange, isLong, markAtTrigger, "TakeProfitClose");
+
+        // Halt the bot so the next-bar anchor logic doesn't re-open a position. User flips it
+        // back via Start when they want to resume.
+        strategy.Status = StrategyStatus.Stopped;
+        Log(strategy, "Info",
+            $"🎯 TAKE-PROFIT выполнен. Total realized = ${Math.Round(state.RealizedPnlDollar, 2)}. Бот остановлен.");
+    }
+
+    /// <summary>
+    /// Cancel everything, market-close the live position, book the close PnL (into both the
+    /// lifetime and the stake-ladder series counters) and reset positional state. Leaves
+    /// OpenAfterTime and Status to the caller. Returns false when a position was there and
+    /// the market close did not go through — callers that would otherwise keep trading must
+    /// stop the bot instead, since the position may still be open on the exchange.
+    /// </summary>
+    private async Task<bool> CloseAllAtMarketAsync(Strategy strategy, GridFloatConfig config,
+        GridFloatState state, IFuturesExchangeService exchange, bool isLong, decimal markAtTrigger,
+        string tradeReason)
+    {
         try { await exchange.CancelAllOrdersAsync(config.Symbol); }
         catch (Exception ex)
         {
@@ -1345,17 +1475,24 @@ public class GridFloatHandler : IStrategyHandler
         var closeCommission = totalCost * exchange.TakerFeeRate;
         var netClosePnl = grossClosePnl - closeCommission;
 
-        if (totalQty > 0m)
+        var closedOk = totalQty <= 0m || closeResult is { Success: true };
+        if (totalQty > 0m && closedOk)
         {
             RecordTrade(strategy, config.Symbol, isLong ? "Sell" : "Buy",
-                totalQty, closePrice, closeResult?.OrderId, "TakeProfitClose",
+                totalQty, closePrice, closeResult?.OrderId, tradeReason,
                 pnlDollar: netClosePnl, commission: closeCommission);
             state.RealizedPnlDollar += netClosePnl;
+            state.SeriesRealizedPnl += netClosePnl;
+        }
+        else if (!closedOk)
+        {
+            Log(strategy, "Error",
+                $"Закрытие рынком не прошло ({closeResult?.ErrorMessage ?? "исключение"}): позиция qty={Math.Round(totalQty, 8)} " +
+                "может остаться на бирже — проверьте и закройте вручную.");
         }
 
-        // Reset position state. We DO NOT set OpenAfterTime here (no cooldown re-open needed —
-        // the bot is going to Stopped) but we DO set OrphanCancelPendingUntil so a subsequent
-        // manual restart still benefits from the orderbook-clean check.
+        // Reset position state. OpenAfterTime is the caller's call; OrphanCancelPendingUntil
+        // makes the next ticks confirm the book is clean before any new anchor.
         state.Batches.Clear();
         state.DcaOrders.Clear();
         state.AnchorPrice = 0;
@@ -1363,14 +1500,155 @@ public class GridFloatHandler : IStrategyHandler
         state.PlacementCooldownUntil = null;
         state.OrphanCancelPendingUntil = DateTime.UtcNow.AddMinutes(30);
 
-        // Halt the bot so the next-bar anchor logic doesn't re-open a position. User flips it
-        // back via Start when they want to resume.
-        strategy.Status = StrategyStatus.Stopped;
+        if (closedOk)
+            Log(strategy, "Info",
+                $"Закрыто по рынку ({tradeReason}): qty={Math.Round(totalQty, 8)} @ {Math.Round(closePrice, 8)}, " +
+                $"PnL закрытия = ${Math.Round(netClosePnl, 2)} (commission ≈ ${Math.Round(closeCommission, 4)}).");
+        return closedOk;
+    }
 
+    // ────────────────────────── Stake ladder (RestartOnRangeExit) ──────────────────────────
+
+    /// <summary>
+    /// Series take-profit and losing-side range exit for the stake-ladder mode. Returns true when
+    /// it closed the grid this tick (the caller then ends the tick).
+    /// </summary>
+    private async Task<bool> HandleStakeLadderAsync(Strategy strategy, GridFloatConfig fullConfig,
+        GridFloatConfig config, GridFloatState state, IFuturesExchangeService exchange, bool isLong,
+        CancellationToken ct)
+    {
+        decimal? priceN = null;
+        try { priceN = await GetLivePriceAsync(strategy, config.Symbol, exchange); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat stake ladder: price fetch failed for {Symbol}", config.Symbol);
+        }
+        if (priceN is not > 0m) return false;
+        var price = priceN.Value;
+
+        var unrealized = state.Batches.Sum(b => isLong ? b.Qty * (price - b.FillPrice) : b.Qty * (b.FillPrice - price));
+        var series = state.SeriesRealizedPnl + unrealized;
+        var stake = fullConfig.Tiers[Math.Clamp(state.StakeStage, 0, fullConfig.Tiers.Count - 1)].SizeUsdt;
+
+        // ── Series take-profit → close everything, back to the base stake, keep trading ──
+        if (fullConfig.TakeProfitEnabled && fullConfig.TakeProfitTargetUsd > 0m
+            && series >= fullConfig.TakeProfitTargetUsd)
+        {
+            Log(strategy, "Warning",
+                $"🎯 Тейк серии: ${Math.Round(series, 2)} (realized ${Math.Round(state.SeriesRealizedPnl, 2)} + " +
+                $"unreal ${Math.Round(unrealized, 2)}) ≥ цели ${fullConfig.TakeProfitTargetUsd} @ {Math.Round(price, 8)}, " +
+                $"ступень {state.StakeStage + 1} (${stake}). Закрываю всё по рынку.");
+
+            if (!await CloseAllAtMarketAsync(strategy, config, state, exchange, isLong, price, "SeriesTakeProfit"))
+            {
+                await StopWithAlertAsync(strategy, "GridFloat: тейк серии не закрылся",
+                    "Закрытие по рынку не прошло — бот остановлен, проверьте позицию на бирже.", ct);
+                return true;
+            }
+            ResetSeries(strategy, state, "тейк серии");
+            state.OpenAfterTime = DateTime.UtcNow;
+            return true;
+        }
+
+        // ── Losing-side range exit → close everything, next stake (or stop on the last) ──
+        if (!GridFloatStakeLadder.IsOutsideRange(fullConfig, state.AnchorPrice, price, isLong))
+            return false;
+
+        // Irreversible action on one quote: confirm with the REST ticker first, so a stale or
+        // glitched websocket book can't stop out the whole grid.
+        decimal? confirm = null;
+        try { confirm = await exchange.GetTickerPriceAsync(config.Symbol); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "GridFloat range exit: confirm ticker failed for {Symbol}", config.Symbol);
+        }
+        if (confirm is not > 0m || !GridFloatStakeLadder.IsOutsideRange(fullConfig, state.AnchorPrice, confirm.Value, isLong))
+            return false;
+        price = confirm.Value;
+
+        var bound = GridFloatStakeLadder.RangeBound(fullConfig, state.AnchorPrice, isLong);
+        Log(strategy, "Warning",
+            $"📉 Выход из диапазона: цена {Math.Round(price, 8)} за границей {Math.Round(bound, 8)} " +
+            $"(якорь {Math.Round(state.AnchorPrice, 8)}), ступень {state.StakeStage + 1} (${stake}). Закрываю всё по рынку.");
+
+        var closed = await CloseAllAtMarketAsync(strategy, config, state, exchange, isLong, price, "RangeExit");
+        state.RangeExitCount++;
+        if (!closed)
+        {
+            await StopWithAlertAsync(strategy, "GridFloat: выход из диапазона не закрылся",
+                "Закрытие по рынку не прошло — бот остановлен, проверьте позицию на бирже.", ct);
+            return true;
+        }
+
+        if (state.StakeStage + 1 >= fullConfig.Tiers.Count)
+        {
+            await StopWithAlertAsync(strategy, "GridFloat: ступени ставки исчерпаны",
+                $"{config.Symbol}: выход из диапазона на последней ступени (${stake}). Позиции закрыты, бот остановлен. " +
+                $"Результат серии: ${Math.Round(state.SeriesRealizedPnl, 2)}.", ct);
+            return true;
+        }
+
+        state.StakeStage++;
+        state.OpenAfterTime = DateTime.UtcNow;
         Log(strategy, "Info",
-            $"🎯 TAKE-PROFIT выполнен: закрыто qty={Math.Round(totalQty, 8)} @ {Math.Round(closePrice, 8)}, " +
-            $"PnL закрытия = ${Math.Round(netClosePnl, 2)} (commission ≈ ${Math.Round(closeCommission, 4)}). " +
-            $"Total realized = ${Math.Round(state.RealizedPnlDollar, 2)}. Бот остановлен.");
+            $"➡️ Ступень {state.StakeStage + 1}: ставка ${fullConfig.Tiers[state.StakeStage].SizeUsdt}, " +
+            $"серия ${Math.Round(state.SeriesRealizedPnl, 2)}. Новый диапазон — на следующей закрытой свече.");
+        return true;
+    }
+
+    /// <summary>After a grid closed by its own TPs: reset to the base stake once the series hits its threshold.</summary>
+    private void OnStakeLadderFullClose(Strategy strategy, GridFloatState state)
+    {
+        if (_fullConfig is not { RestartOnRangeExit: true } full) return;
+
+        var threshold = full.TakeProfitEnabled && full.TakeProfitTargetUsd > 0m ? full.TakeProfitTargetUsd : 0m;
+        if (state.SeriesRealizedPnl >= threshold)
+        {
+            ResetSeries(strategy, state, full.TakeProfitEnabled ? "серия достигла цели" : "серия в плюсе");
+        }
+        else if (state.StakeStage > 0)
+        {
+            Log(strategy, "Info",
+                $"Сетка закрылась по TP, серия ${Math.Round(state.SeriesRealizedPnl, 2)} < ${threshold} — " +
+                $"остаюсь на ступени {state.StakeStage + 1} (${full.Tiers[Math.Min(state.StakeStage, full.Tiers.Count - 1)].SizeUsdt}).");
+        }
+    }
+
+    private void ResetSeries(Strategy strategy, GridFloatState state, string why)
+    {
+        if (state.StakeStage > 0 || state.SeriesRealizedPnl != 0m)
+            Log(strategy, "Info",
+                $"🔄 Сброс на базовую ставку ({why}): серия закрыта с ${Math.Round(state.SeriesRealizedPnl, 2)}, " +
+                $"была ступень {state.StakeStage + 1}.");
+        state.StakeStage = 0;
+        state.SeriesRealizedPnl = 0m;
+    }
+
+    private async Task StopWithAlertAsync(Strategy strategy, string title, string details, CancellationToken ct)
+    {
+        strategy.Status = StrategyStatus.Stopped;
+        Log(strategy, "Error", $"🛑 {title}. {details}");
+        try { await _telegramSignalService.SendStrategyAlertAsync(strategy, title, details, ct); }
+        catch (Exception ex) { _logger.LogWarning(ex, "GridFloat: Telegram alert failed for strategy {Id}", strategy.Id); }
+    }
+
+    /// <summary>Applies <see cref="GridFloatConfig.AnchorPriceLimit"/>; logs once per blocked stretch.</summary>
+    private bool AnchorBlockedByPriceLimit(Strategy strategy, GridFloatConfig fullConfig, GridFloatState state,
+        decimal price, bool isLong)
+    {
+        if (!GridFloatStakeLadder.IsAnchorBlocked(fullConfig, price, isLong))
+        {
+            state.AnchorBlockedSince = null;
+            return false;
+        }
+        if (state.AnchorBlockedSince == null)
+        {
+            state.AnchorBlockedSince = DateTime.UtcNow;
+            Log(strategy, "Info",
+                $"⏸ Новый якорь не открываю: цена {Math.Round(price, 8)} {(isLong ? "выше" : "ниже")} лимита " +
+                $"{fullConfig.AnchorPriceLimit}. Жду возврата цены.");
+        }
+        return true;
     }
 
     private async Task OnFullClose(Strategy strategy, GridFloatConfig config, GridFloatState state,
@@ -1398,6 +1676,7 @@ public class GridFloatHandler : IStrategyHandler
         Log(strategy, "Info",
             $"🏁 Полное закрытие сетки: realized={Math.Round(state.RealizedPnlDollar, 2)}USD, " +
             $"кулдаун до {state.OpenAfterTime.Value:HH:mm:ss} → новый якорь на следующей закрытой свече");
+        OnStakeLadderFullClose(strategy, state);
         await Task.CompletedTask;
     }
 
@@ -1994,7 +2273,17 @@ public class GridFloatHandler : IStrategyHandler
             // is recognisable in the UI (e.g. $10 → $11, not $10.4087).
             var oldSize = tier.SizeUsdt;
             tier.SizeUsdt = Math.Ceiling(minNotional);
-            PersistConfigJson(strategy, config);
+            if (_fullConfig is { RestartOnRangeExit: true } full && full.Tiers.Count > 0)
+            {
+                // `config` is the stage view (a copy) — mirror the bump onto the real stake step
+                // and persist the full ladder, never the one-tier view.
+                full.Tiers[Math.Clamp(_stakeStage, 0, full.Tiers.Count - 1)].SizeUsdt = tier.SizeUsdt;
+                PersistConfigJson(strategy, full);
+            }
+            else
+            {
+                PersistConfigJson(strategy, config);
+            }
             Log(strategy, "Info",
                 $"⚙️ Автокоррекция тира #{levelIdx}: ${oldSize} → ${tier.SizeUsdt} " +
                 $"(минимум биржи: {info.minQty} @ {Math.Round(price, 8)} = ${Math.Round(minNotional, 4)} USDT). " +

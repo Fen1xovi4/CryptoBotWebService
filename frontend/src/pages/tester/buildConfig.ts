@@ -129,6 +129,11 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
       if (forms.gf.takeProfitEnabled && !(gfTpTarget > 0)) {
         return { ok: false, error: 'Цель Take-Profit должна быть > 0 USDT' };
       }
+      const gfAnchorLimitRaw = forms.gf.anchorPriceLimit.trim();
+      const gfAnchorLimit = gfAnchorLimitRaw === '' ? null : Number(gfAnchorLimitRaw);
+      if (gfAnchorLimit !== null && !(gfAnchorLimit > 0)) {
+        return { ok: false, error: 'Лимит цены якоря должен быть > 0 (или оставьте пустым)' };
+      }
       const configJson = JSON.stringify({
         symbol: sym,
         timeframe: forms.gf.timeframe,
@@ -137,9 +142,11 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
         dcaStepPercent: Number(forms.gf.dcaStepPercent),
         tpStepPercent: Number(forms.gf.tpStepPercent),
         leverage: Number(forms.gf.leverage),
-        useStaticRange: forms.gf.useStaticRange,
+        useStaticRange: forms.gf.restartOnRangeExit ? false : forms.gf.useStaticRange,
         takeProfitEnabled: forms.gf.takeProfitEnabled,
         takeProfitTargetUsd: gfTpTarget,
+        restartOnRangeExit: forms.gf.restartOnRangeExit,
+        anchorPriceLimit: gfAnchorLimit,
       });
       return { ok: true, configJson };
     }

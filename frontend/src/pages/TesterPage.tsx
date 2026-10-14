@@ -638,6 +638,9 @@ function SimulationResults({
         <StatCard label="Циклов" value={s.completedCycles} />
         <StatCard label="Откр. позиций" value={s.openPositionsAtEnd} />
         <StatCard label="Незафикс. PnL" value={fmtUsd(s.unrealizedPnlAtEndUsd)} color={s.unrealizedPnlAtEndUsd >= 0 ? 'green' : 'red'} />
+        {s.extras?.map((x) => (
+          <StatCard key={x.label} label={x.label} value={x.value} />
+        ))}
       </div>
 
       <p className="text-xs text-text-secondary">

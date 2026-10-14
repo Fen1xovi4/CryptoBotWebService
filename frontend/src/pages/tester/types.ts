@@ -140,6 +140,8 @@ export interface SimulationSummary {
   startTime: string;
   endTime: string;
   pathCandlesProcessed: number;
+  /** Strategy-specific figures (e.g. GridFloat stake-ladder stats). */
+  extras?: { label: string; value: string }[];
 }
 
 /* ── Parameter optimization (POST /tester/optimize + polling) ── */

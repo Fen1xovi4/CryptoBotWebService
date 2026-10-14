@@ -74,6 +74,24 @@ public class GridFloatConfig
     public bool TakeProfitEnabled { get; set; } = false;
     public decimal TakeProfitTargetUsd { get; set; } = 100m;
 
+    // Restart-on-range-exit ("stake ladder") mode. Tiers stop being an expanding grid and
+    // become STAKE STEPS: the grid only ever spans Tiers[0]'s geometry (UpToPercent width,
+    // DCA/TP steps), and the per-order size comes from Tiers[StakeStage].SizeUsdt.
+    //   - Price leaves the range on the losing side (below anchor·(1−width%) for Long) →
+    //     cancel everything, market-close, StakeStage++, re-anchor after one closed bar.
+    //   - Grid fully closes by its own TPs → if the series (PnL since the last reset) is
+    //     ≥ 0 and no take-profit is set, StakeStage resets to 0; otherwise the stage stays.
+    //   - With TakeProfitEnabled the target applies to the SERIES and, instead of stopping
+    //     the bot, closes everything and restarts at the base stake.
+    //   - Range exit on the last stage → close everything and stop the bot.
+    // UseStaticRange is ignored in this mode.
+    public bool RestartOnRangeExit { get; set; } = false;
+
+    // Optional anchor price guard. Long: no new anchor while price is ABOVE this; Short: no
+    // new anchor while price is BELOW it. Stops the bot from building a fresh grid at the top
+    // of a parabolic move that the pullback would then fill all the way down. Null = off.
+    public decimal? AnchorPriceLimit { get; set; }
+
     // ───────────── Legacy fields (back-compat, read-only on load) ─────────────
     // Older configs (pre-tier-grid) used a single BaseSizeUsdt + RangePercent. We keep these
     // optional fields on the DTO so deserialization of stored ConfigJson succeeds; the

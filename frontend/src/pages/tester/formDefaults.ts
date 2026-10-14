@@ -78,6 +78,8 @@ export interface GfForm {
   useStaticRange: boolean;
   takeProfitEnabled: boolean;
   takeProfitTargetUsd: string;
+  restartOnRangeExit: boolean;
+  anchorPriceLimit: string;
 }
 
 export interface GhForm {
@@ -207,6 +209,8 @@ export const defaultGfForm: GfForm = {
   useStaticRange: false,
   takeProfitEnabled: false,
   takeProfitTargetUsd: '100',
+  restartOnRangeExit: false,
+  anchorPriceLimit: '',
 };
 
 export const defaultGfTiers: GfTier[] = [{ upTo: '10', size: '100', dca: '', tp: '' }];

@@ -338,7 +338,9 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
         </div>
 
         <div>
-          <label className={labelCls}>Ярусы сетки</label>
+          <label className={labelCls}>
+            {gf.restartOnRangeExit ? 'Ступени ставки (от T2 используется только $, ярусы держите по возрастанию До %)' : 'Ярусы сетки'}
+          </label>
           <div className="rounded-lg border border-border overflow-hidden">
             <table className="w-full text-xs">
               <thead>
@@ -407,15 +409,42 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
         </div>
 
         <label className="flex items-start gap-2 cursor-pointer select-none">
-          <input type="checkbox" checked={gf.useStaticRange} onChange={(e) => patch('gf', { useStaticRange: e.target.checked })}
+          <input type="checkbox" checked={gf.restartOnRangeExit} onChange={(e) => patch('gf', { restartOnRangeExit: e.target.checked })}
             className="w-4 h-4 mt-0.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
           <div>
-            <span className="text-sm font-medium text-text-primary">Статический диапазон</span>
+            <span className="text-sm font-medium text-text-primary">Перезапуск при выходе из диапазона</span>
             <p className="text-xs text-text-secondary mt-0.5">
-              Граница фиксируется на первом якоре. По умолчанию (выключено) — динамический диапазон.
+              Сетка строится только по T1 (ширина, шаги DCA/TP). Ярусы становятся ступенями ставки: при выходе цены
+              за нижнюю границу (Long) всё закрывается по рынку и диапазон переоткрывается со ставкой следующего яруса.
+              Сброс на ставку T1 — когда серия вышла в ≥ 0 (без тейка) или достигла цели тейка. Выход на последней
+              ступени — остановка бота.
             </p>
           </div>
         </label>
+
+        {!gf.restartOnRangeExit && (
+          <label className="flex items-start gap-2 cursor-pointer select-none">
+            <input type="checkbox" checked={gf.useStaticRange} onChange={(e) => patch('gf', { useStaticRange: e.target.checked })}
+              className="w-4 h-4 mt-0.5 rounded border-border bg-bg-tertiary text-accent-blue focus:ring-accent-blue/50 cursor-pointer" />
+            <div>
+              <span className="text-sm font-medium text-text-primary">Статический диапазон</span>
+              <p className="text-xs text-text-secondary mt-0.5">
+                Граница фиксируется на первом якоре. По умолчанию (выключено) — динамический диапазон.
+              </p>
+            </div>
+          </label>
+        )}
+
+        <div>
+          <label className={labelCls}>
+            {gf.direction === 'Short' ? 'Не открывать якорь ниже цены' : 'Не открывать якорь выше цены'}
+          </label>
+          <input type="number" step="any" min="0" value={gf.anchorPriceLimit} placeholder="не задано"
+            onChange={(e) => patch('gf', { anchorPriceLimit: e.target.value })} className={inputCls + ' max-w-[180px]'} />
+          <p className="text-xs text-text-secondary mt-0.5">
+            Защита от набора сетки на вершине резкого роста. Пусто — без ограничения.
+          </p>
+        </div>
 
         <div>
           <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -426,7 +455,11 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
           {gf.takeProfitEnabled && (
             <div className="mt-2 flex items-center gap-2">
               <input type="number" step="1" min="0" value={gf.takeProfitTargetUsd} onChange={(e) => patch('gf', { takeProfitTargetUsd: e.target.value })} className={inputCls + ' max-w-[140px]'} />
-              <span className="text-xs text-text-secondary">USDT (realized + unrealized, останавливает бота)</span>
+              <span className="text-xs text-text-secondary">
+                {gf.restartOnRangeExit
+                  ? 'USDT за серию (realized + unrealized) — закрыть всё и вернуться на ставку T1'
+                  : 'USDT (realized + unrealized, останавливает бота)'}
+              </span>
             </div>
           )}
         </div>
