@@ -109,6 +109,13 @@ interface GridLotData {
   openedAt: string;
 }
 
+interface GridPendingData {
+  level: number;
+  price: number;
+  quantity: number;
+  orderSize: number;
+}
+
 /** Compact grid summary for MaratGGrid bot cards (state.gridLots & friends). */
 function MaratGGridBlock({ state, coinName }: { state: Record<string, unknown> | null; coinName: string }) {
   if (!state) return null;
@@ -120,6 +127,9 @@ function MaratGGridBlock({ state, coinName }: { state: Record<string, unknown> |
   const closed = typeof state.gridLotsClosed === 'number' ? state.gridLotsClosed : 0;
   const nextLot = typeof state.nextGridLotSize === 'number' ? state.nextGridLotSize : 0;
   const reopenAt = typeof state.gridStarterReopenAt === 'string' ? state.gridStarterReopenAt : null;
+  const pending: GridPendingData[] = Array.isArray(state.gridPendingOrders)
+    ? [...(state.gridPendingOrders as GridPendingData[])].sort((a, b) => a.level - b.level)
+    : [];
 
   const lotUnrealized = (l: GridLotData): number | null => {
     if (!lastPrice || !l.entryPrice) return null;
@@ -171,6 +181,14 @@ function MaratGGridBlock({ state, coinName }: { state: Record<string, unknown> |
           {nextLot > 0 && <span>След. лот: <span className="font-semibold text-text-primary">${nextLot.toFixed(2)}</span></span>}
           {reopenAt && (
             <span>Старт. лот откроется: <span className="font-semibold text-text-primary">{new Date(reopenAt).toLocaleTimeString('ru-RU')}</span></span>
+          )}
+          {pending.length > 0 && (
+            <span title="Выставленные лимитные ордера сетки">
+              Лимитки:{' '}
+              <span className="font-semibold text-text-primary font-mono">
+                {pending.map((o) => `${o.level === 0 ? 'S' : `#${o.level}`} @ ${o.price}`).join(', ')}
+              </span>
+            </span>
           )}
         </div>
       </div>

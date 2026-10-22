@@ -475,6 +475,21 @@ public class StrategiesController : ControllerBase
         if (strategy == null)
             return NotFound();
 
+        // MaratGGrid: a stopped bot must not leave grid limits working on the exchange.
+        if (strategy.Type == StrategyTypes.MaratGGrid)
+        {
+            var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var saveOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+            var gridState = JsonSerializer.Deserialize<EmaBounceState>(strategy.StateJson, jsonOpts);
+            var gridConfig = JsonSerializer.Deserialize<EmaBounceConfig>(strategy.ConfigJson, jsonOpts);
+            if (gridState != null && gridConfig != null && !string.IsNullOrEmpty(gridConfig.Symbol))
+            {
+                using var gridExchange = _exchangeFactory.CreateFutures(strategy.Account);
+                await CancelMaratGGridOrdersAsync(strategy, gridExchange, gridConfig.Symbol, gridState, gridConfig);
+                strategy.StateJson = JsonSerializer.Serialize(gridState, saveOpts);
+            }
+        }
+
         strategy.Status = StrategyStatus.Stopped;
         await _db.SaveChangesAsync();
 
@@ -1190,6 +1205,11 @@ public class StrategiesController : ControllerBase
         var currentPrice2 = await exchange2.GetTickerPriceAsync(symbol2);
 
         var results = new List<string>();
+        // MaratGGrid: its resting limits go first — a buy limit left behind would reopen a
+        // position, and lots whose TP filled meanwhile must not be closed a second time.
+        if (strategy.Type == StrategyTypes.MaratGGrid && emaConfig != null)
+            results.AddRange(await CancelMaratGGridOrdersAsync(strategy, exchange2, symbol2, state, emaConfig));
+
         // MaratGGrid lots live in the same one-way position as the base: close them with it and
         // book each lot separately (same fee estimate as the base below).
         var gridIsLong = state.OpenLong != null;
@@ -1348,6 +1368,7 @@ public class StrategiesController : ControllerBase
             });
 
             state.GridLots.Clear();
+            state.GridPendingOrders.Clear();
             state.GridStarterReopenAt = null;
             state.GridRetryAfter = null;
         }
@@ -1363,6 +1384,64 @@ public class StrategiesController : ControllerBase
         await _db.SaveChangesAsync();
 
         return Ok(new { message = "ĐźĐľĐ·Đ¸Ń†Đ¸ŃŹ Đ·Đ°ĐşŃ€Ń‹Ń‚Đ° ĐżĐľ Ń€Ń‹Đ˝ĐşŃ", details = results });
+    }
+
+    /// <summary>
+    /// MaratGGrid: cancels the bot's resting grid limits and books lot take-profits that filled
+    /// before the cancel (state is mutated; the caller saves it). Returns lines for the response.
+    /// </summary>
+    private async Task<List<string>> CancelMaratGGridOrdersAsync(Strategy strategy, IFuturesExchangeService exchange,
+        string symbol, EmaBounceState state, EmaBounceConfig config)
+    {
+        var lines = new List<string>();
+        if (state.GridPendingOrders.Count == 0 && state.GridLots.All(l => l.TpOrderId == null))
+            return lines;
+
+        var isLong = state.OpenShort == null;
+        var cancel = await EmaBounceHandler.CancelGridOrdersOverRestAsync(exchange, symbol, state, config.GridStepPercent);
+
+        foreach (var (part, price, fee, orderId) in cancel.TpFills)
+        {
+            var gross = isLong ? part.Quantity * (price - part.EntryPrice) : part.Quantity * (part.EntryPrice - price);
+            var commission = (part.EntryFee ?? part.EntryPrice * part.Quantity * exchange.TakerFeeRate) + fee;
+            var net = gross - commission;
+
+            state.GridRealizedPnl += net;
+            state.CycleGridPnl += net;
+            state.GridLotsClosed++;
+            if (config.UseMartingale)
+                state.RunningPnlDollar += gross;
+
+            _db.Trades.Add(new Trade
+            {
+                Id = Guid.NewGuid(),
+                StrategyId = strategy.Id,
+                AccountId = strategy.AccountId,
+                ExchangeOrderId = orderId,
+                Symbol = symbol,
+                Side = isLong ? "Sell" : "Buy",
+                Quantity = part.Quantity,
+                Price = price,
+                Status = "GridTP",
+                ExecutedAt = DateTime.UtcNow,
+                PnlDollar = net,
+                Commission = commission
+            });
+            lines.Add($"Grid lot L{part.Level} TP filled before cancel: qty={part.Quantity}, price={price}, PnL=${Math.Round(net, 2)}");
+        }
+
+        var message = $"Сетка: сняты лимитные ордера; TP исполнено до снятия: {cancel.TpFills.Count}" +
+                      (cancel.Unsettled > 0 ? $"; не подтверждено {cancel.Unsettled} — отправлена отмена всех ордеров по {symbol}, проверьте биржу" : "");
+        _db.StrategyLogs.Add(new StrategyLog
+        {
+            Id = Guid.NewGuid(),
+            StrategyId = strategy.Id,
+            Level = cancel.Unsettled > 0 ? "Warning" : "Info",
+            Message = message,
+            CreatedAt = DateTime.UtcNow
+        });
+        lines.Add(message);
+        return lines;
     }
 
     [HttpPost("{id:guid}/reset-losses")]
