@@ -29,7 +29,11 @@ public class EmaBounceState
     // together with the base; the bot tracks which quantity belongs to which lot.
     public List<GridLotInfo> GridLots { get; set; } = new();
 
-    // When the starter lot (level 0) took profit, it is reopened at market once this moment
+    // Resting buy limits that become lots when they fill: at most one level order (the nearest
+    // free level) plus the starter-reopen order. All cancelled before the base closes.
+    public List<GridPendingOrder> GridPendingOrders { get; set; } = new();
+
+    // When the starter lot (level 0) took profit, its reopen limit is placed once this moment
     // (the open of the next candle) has passed — as long as the base position still exists.
     public DateTime? GridStarterReopenAt { get; set; }
 
@@ -70,6 +74,29 @@ public class GridLotInfo
     // Fee the exchange reported for the opening fill; null = estimate at the taker rate on close.
     public decimal? EntryFee { get; set; }
     public string? ExchangeOrderId { get; set; }
+    // Resting reduce-only limit at TakeProfit for exactly this lot's quantity; null = not placed yet.
+    public string? TpOrderId { get; set; }
+    public DateTime? TpPlacedAt { get; set; }
+}
+
+/// <summary>What cancelling a MaratGGrid's resting orders found: TP fills to book, orders left unconfirmed.</summary>
+public class GridOrdersCancelResult
+{
+    public List<(GridLotInfo Part, decimal Price, decimal Fee, string OrderId)> TpFills { get; } = new();
+    public int Unsettled { get; set; }
+}
+
+public class GridPendingOrder
+{
+    // 0 = starter reopen, k >= 1 = level k against the base entry.
+    public int Level { get; set; }
+    public string OrderId { get; set; } = string.Empty;
+    public decimal Price { get; set; }
+    public decimal Quantity { get; set; }
+    public decimal OrderSize { get; set; }
+    public DateTime PlacedAt { get; set; }
+    // Starter reopen only: still unfilled at this moment (next candle open) → re-placed at the current price.
+    public DateTime? RepriceAt { get; set; }
 }
 
 public class OpenPositionInfo
