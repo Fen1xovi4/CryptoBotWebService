@@ -62,6 +62,21 @@ public static class SymbolHelper
         return symbol;
     }
 
+    /// <summary>
+    /// Canonical BTCUSDT → ("BTC", "USDT"). Falls back to a USDT quote when no known suffix
+    /// matches, so an odd symbol still yields a usable base-asset name for balance lookups.
+    /// </summary>
+    public static (string baseAsset, string quoteAsset) SplitSymbol(string symbol)
+    {
+        symbol = symbol.Replace(" ", "").Replace("-", "").Replace("/", "").Trim().ToUpperInvariant();
+        foreach (var quote in QuoteAssets)
+        {
+            if (symbol.EndsWith(quote, StringComparison.Ordinal) && symbol.Length > quote.Length)
+                return (symbol[..^quote.Length], quote);
+        }
+        return (symbol, "USDT");
+    }
+
     public static TimeSpan GetTimeframeSpan(string timeframe)
     {
         return timeframe.ToLowerInvariant() switch

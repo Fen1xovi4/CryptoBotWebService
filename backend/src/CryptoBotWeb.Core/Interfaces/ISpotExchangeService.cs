@@ -2,12 +2,11 @@ using CryptoBotWeb.Core.DTOs;
 
 namespace CryptoBotWeb.Core.Interfaces;
 
-// Spot trading surface. V1 ships Bybit-only; the GridHedge SameTicker variant uses this for
-// the long-grid leg (limit buys + reduce-only limit sells for per-batch TP + market sell for
-// the stop-loss / out-of-range exit).
+// Spot trading surface: Bybit, BingX and Bitget. Used by the GridHedge SameTicker long-grid leg
+// (Bybit only) and by SpotPingPong (all three). Dzengi has no spot client.
 public interface ISpotExchangeService : IDisposable
 {
-    // Bybit non-VIP spot fees — both legs identical at 0.1%. Override per-exchange if needed.
+    // Non-VIP spot fees — 0.1% both legs on all three exchanges. Override per-exchange if needed.
     decimal TakerFeeRate => 0.001m;
     decimal MakerFeeRate => 0.001m;
 

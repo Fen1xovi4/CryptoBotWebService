@@ -53,8 +53,13 @@ public class ExchangeServiceFactory : IExchangeServiceFactory
         return account.ExchangeType switch
         {
             ExchangeType.Bybit => new BybitSpotExchangeService(apiKey, apiSecret, proxy, _bybitBrokerId),
+            ExchangeType.BingX => new BingXSpotExchangeService(apiKey, apiSecret, proxy),
+            ExchangeType.Bitget => new BitgetSpotExchangeService(
+                apiKey, apiSecret,
+                account.PassphraseEncrypted != null ? _encryption.Decrypt(account.PassphraseEncrypted) : null,
+                proxy),
             _ => throw new NotSupportedException(
-                $"Spot trading is not implemented for {account.ExchangeType}. V1 ships Bybit-only spot.")
+                $"Spot trading is not implemented for {account.ExchangeType}.")
         };
     }
 

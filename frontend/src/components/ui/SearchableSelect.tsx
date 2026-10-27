@@ -8,6 +8,9 @@ interface SearchableSelectProps {
   isLoading?: boolean;
   disabled?: boolean;
   className?: string;
+  // Let the user pick what they typed even when it is not in `options` (spot symbols are
+  // not in the futures symbol list the exchange endpoint returns).
+  allowCustom?: boolean;
 }
 
 export default function SearchableSelect({
@@ -18,6 +21,7 @@ export default function SearchableSelect({
   isLoading = false,
   disabled = false,
   className = '',
+  allowCustom = false,
 }: SearchableSelectProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
@@ -54,6 +58,9 @@ export default function SearchableSelect({
     setSearch('');
   };
 
+  const customValue = search.replace(/[\s/-]/g, '').toUpperCase();
+  const showCustom = allowCustom && customValue.length > 0 && !options.includes(customValue);
+
   return (
     <div ref={containerRef} className="relative">
       <button
@@ -84,12 +91,27 @@ export default function SearchableSelect({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Поиск символа..."
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && showCustom) {
+                  e.preventDefault();
+                  handleSelect(customValue);
+                }
+              }}
+              placeholder={allowCustom ? 'Поиск или свой символ...' : 'Поиск символа...'}
               className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
             />
           </div>
           <div className="max-h-60 overflow-y-auto">
-            {filtered.length === 0 ? (
+            {showCustom && (
+              <button
+                type="button"
+                onClick={() => handleSelect(customValue)}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-accent-blue/10 transition-colors text-accent-blue border-b border-border/50"
+              >
+                Использовать «{customValue}»
+              </button>
+            )}
+            {filtered.length === 0 && !showCustom ? (
               <div className="px-3 py-2 text-sm text-text-secondary">
                 {isLoading ? 'Загрузка...' : 'Не найдено'}
               </div>
