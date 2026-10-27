@@ -76,6 +76,33 @@ public class ExchangeController : ControllerBase
         }
     }
 
+    // Spot pairs for spot strategies (SpotPingPong). Spot and futures lists differ.
+    [HttpGet("{accountId:guid}/spot-symbols")]
+    public async Task<ActionResult<List<SymbolDto>>> GetSpotSymbols(Guid accountId)
+    {
+        var account = await _db.ExchangeAccounts
+            .Include(a => a.AccountProxies).ThenInclude(ap => ap.Proxy)
+            .FirstOrDefaultAsync(a => a.Id == accountId && a.UserId == GetUserId());
+
+        if (account == null)
+            return NotFound();
+
+        try
+        {
+            using var service = _exchangeFactory.CreateSpot(account);
+            var symbols = await service.GetSymbolsAsync();
+            return Ok(symbols);
+        }
+        catch (NotSupportedException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
     /// <summary>
     /// Probes whether the account is configured in hedge mode for the given symbol.
     /// Used by the Grid Hedge bot card to warn the user if they picked PositionMode=Hedge

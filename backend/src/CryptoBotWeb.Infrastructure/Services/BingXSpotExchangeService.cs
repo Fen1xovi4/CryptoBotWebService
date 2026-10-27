@@ -41,6 +41,17 @@ public class BingXSpotExchangeService : ISpotExchangeService
         return ticker?.LastPrice;
     }
 
+    public async Task<List<SymbolDto>> GetSymbolsAsync()
+    {
+        var result = await _client.SpotApi.ExchangeData.GetSymbolsAsync();
+        if (!result.Success || result.Data == null) return new List<SymbolDto>();
+        return result.Data
+            .Where(s => s.ApiBuyable && s.ApiSellable && !string.IsNullOrEmpty(s.Name))
+            .Select(s => new SymbolDto { Symbol = s.Name.Replace("-", "") })
+            .OrderBy(s => s.Symbol)
+            .ToList();
+    }
+
     public async Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolFiltersAsync(string symbol)
     {
         var result = await _client.SpotApi.ExchangeData.GetSymbolsAsync(Sym(symbol));

@@ -114,7 +114,7 @@ public class SpotPingPongHandler : IStrategyHandler
             }
 
             var cfg = config!;
-            var symbol = cfg.Symbol.Replace(" ", "").ToUpperInvariant();
+            var symbol = SymbolHelper.NormalizeSymbol(cfg.Symbol);
             var (baseAsset, quoteAsset) = SymbolHelper.SplitSymbol(symbol);
 
             SyncLevelStates(cfg, state);
@@ -502,7 +502,7 @@ public class SpotPingPongHandler : IStrategyHandler
         var state = Deserialize<SpotPingPongState>(strategy.StateJson) ?? new SpotPingPongState();
         if (config == null || string.IsNullOrWhiteSpace(config.Symbol)) return 0;
 
-        var symbol = config.Symbol.Replace(" ", "").ToUpperInvariant();
+        var symbol = SymbolHelper.NormalizeSymbol(config.Symbol);
         var (baseAsset, quoteAsset) = SymbolHelper.SplitSymbol(symbol);
         ISpotExchangeService spot;
         try { spot = _factory.CreateSpot(strategy.Account); }
@@ -583,7 +583,7 @@ public class SpotPingPongHandler : IStrategyHandler
         var cancelled = await CancelAllOrdersAsync(strategy, ct);
         var state = Deserialize<SpotPingPongState>(strategy.StateJson) ?? new SpotPingPongState();
 
-        var symbol = config.Symbol.Replace(" ", "").ToUpperInvariant();
+        var symbol = SymbolHelper.NormalizeSymbol(config.Symbol);
         var (baseAsset, _) = SymbolHelper.SplitSymbol(symbol);
         var holding = state.LevelStates.Where(l => l.Phase == SpotPingPongLevelPhase.WaitingSell && l.SellQty > 0).ToList();
 

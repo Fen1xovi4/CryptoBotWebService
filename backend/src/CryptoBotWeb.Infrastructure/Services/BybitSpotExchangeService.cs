@@ -40,6 +40,17 @@ public class BybitSpotExchangeService : ISpotExchangeService
         return ticker?.LastPrice;
     }
 
+    public async Task<List<SymbolDto>> GetSymbolsAsync()
+    {
+        var result = await _client.V5Api.ExchangeData.GetSpotSymbolsAsync();
+        if (!result.Success || result.Data?.List == null) return new List<SymbolDto>();
+        return result.Data.List
+            .Where(s => s.Status == SymbolStatus.Trading && !string.IsNullOrEmpty(s.Name))
+            .Select(s => new SymbolDto { Symbol = s.Name })
+            .OrderBy(s => s.Symbol)
+            .ToList();
+    }
+
     public async Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolFiltersAsync(string symbol)
     {
         var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
