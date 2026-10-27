@@ -8,6 +8,9 @@ import SearchableSelect from '../components/ui/SearchableSelect';
 import CandlestickChart from '../components/Chart/CandlestickChart';
 import type { CandleData, IndicatorDataPoint } from '../components/Chart/CandlestickChart';
 import { formatStakeSequence } from './tester/formDefaults';
+import { SpotPingPongLevels } from '../components/SpotPingPongLevels';
+import { validateSppLevels, emptySppLevel } from '../components/sppLevelsUtils';
+import type { SppLevelForm } from '../components/sppLevelsUtils';
 
 interface Strategy {
   id: string;
@@ -540,6 +543,7 @@ export default function ActiveBotsPage() {
           >
             <option value="MaratG">MaratG</option>
             <option value="MaratGGrid">MaratG+Grid</option>
+            <option value="SpotPingPong">Spot Ping-Pong</option>
             <option value="HuntingFunding">HuntingFunding</option>
             <option value="SmaDca">SMA DCA</option>
             <option value="GridFloat">Grid Float</option>
@@ -655,6 +659,13 @@ export default function ActiveBotsPage() {
             <div className="h-6 w-px bg-border" />
             <p className="text-sm text-text-secondary italic">
               Режим (Spot+Futures vs Cross-Ticker), диапазон, шаги DCA/TP, размер хеджа (ratio × β) и плечи задаются в каждом боте.
+            </p>
+          </>
+        ) : activeWorkspace?.strategyType === 'SpotPingPong' ? (
+          <>
+            <div className="h-6 w-px bg-border" />
+            <p className="text-sm text-text-secondary italic">
+              Спот, long-only. Уровни (цена покупки, цена продажи, сумма USDT) задаются в каждом боте. Bybit / BingX / Bitget.
             </p>
           </>
         ) : activeWorkspace?.strategyType === 'SmartGridHedge' ? (
@@ -961,6 +972,28 @@ export default function ActiveBotsPage() {
                   s={s}
                   cfg={cfg}
                   state={state}
+                  isRunning={isRunning}
+                  onStart={() => startMutation.mutate(s.id)}
+                  onStop={() => stopMutation.mutate(s.id)}
+                  onDelete={() => { if (confirm('Удалить этого бота?')) deleteMutation.mutate(s.id); }}
+                  onEdit={() => setEditingStrategy(s)}
+                  onLogs={() => setLogStrategy(s)}
+                  onChart={() => setChartStrategy(s)}
+                  onClosePosition={() => closePositionMutation.mutate(s.id)}
+                  closePositionPending={closePositionMutation.isPending}
+                  telegramBots={telegramBots}
+                  onSetTelegramBot={(botId) => setTelegramBotMutation.mutate({ strategyId: s.id, telegramBotId: botId })}
+                />
+              );
+            }
+
+            if (s.type === 'SpotPingPong') {
+              return (
+                <SpotPingPongCard
+                  key={s.id}
+                  s={s}
+                  cfg={cfg as SppCfg | null}
+                  state={state as SppStateData | null}
                   isRunning={isRunning}
                   onStart={() => startMutation.mutate(s.id)}
                   onStop={() => stopMutation.mutate(s.id)}
@@ -1863,6 +1896,289 @@ function HuntingFundingCard({
         {isRunning ? (
           <button
             onClick={onStop}
+            className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
+          >
+            Стоп
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={onStart}
+              className="px-2.5 py-1 text-[11px] font-medium bg-accent-green/10 text-accent-green rounded-lg hover:bg-accent-green/20 transition-colors"
+            >
+              Старт
+            </button>
+            <button
+              onClick={onEdit}
+              title="Редактировать"
+              className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
+              </svg>
+            </button>
+          </>
+        )}
+
+        <button
+          onClick={onDelete}
+          title="Удалить"
+          className="p-1.5 text-text-secondary/30 hover:text-accent-red rounded-lg hover:bg-accent-red/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Spot Ping-Pong Card ───────────────────────────────── */
+
+interface SppCfgLevel {
+  buyPrice: number;
+  sellPrice: number;
+  amountUsdt: number;
+}
+
+interface SppCfg {
+  symbol: string;
+  levels?: SppCfgLevel[];
+}
+
+interface SppLevelState {
+  phase: number; // 0 = WaitingBuy, 1 = WaitingSell
+  filledQty: number;
+  filledPrice: number;
+  completedCycles: number;
+  realizedPnlUsd: number;
+  lastError: string | null;
+  retryAfter: string | null;
+}
+
+interface SppStateData {
+  levelStates?: SppLevelState[];
+  completedCycles: number;
+  realizedPnlUsd: number;
+  feesUsd: number;
+  lastPrice: number | null;
+  lastTickAt: string | null;
+}
+
+const sppSigned = (v: number) => `${v >= 0 ? '+' : '-'}$${Math.abs(v).toFixed(2)}`;
+const sppColor = (v: number) => (v > 0 ? 'text-accent-green' : v < 0 ? 'text-accent-red' : 'text-text-secondary');
+
+function SpotPingPongCard({
+  s,
+  cfg,
+  state,
+  isRunning,
+  onStart,
+  onStop,
+  onDelete,
+  onEdit,
+  onLogs,
+  onChart,
+  onClosePosition,
+  closePositionPending,
+  telegramBots,
+  onSetTelegramBot,
+}: {
+  s: Strategy;
+  cfg: SppCfg | null;
+  state: SppStateData | null;
+  isRunning: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onLogs: () => void;
+  onChart: () => void;
+  onClosePosition: () => void;
+  closePositionPending: boolean;
+  telegramBots: TelegramBotOption[] | undefined;
+  onSetTelegramBot: (botId: string | null) => void;
+}) {
+  const levels = cfg?.levels ?? [];
+  const levelStates = state?.levelStates ?? [];
+  const holding = levelStates.filter((l) => l.phase === 1).length;
+  const errors = levelStates.filter((l) => !!l.lastError).length;
+  const hasCoins = holding > 0;
+
+  const borderAccent = isRunning
+    ? errors > 0 ? 'border-l-accent-red' : hasCoins ? 'border-l-accent-yellow' : 'border-l-accent-green'
+    : 'border-l-border';
+
+  const totalPnl = state?.realizedPnlUsd ?? 0;
+
+  return (
+    <div className={`bg-bg-secondary rounded-xl border border-border border-l-2 ${borderAccent} overflow-hidden transition-colors hover:border-text-secondary/20`}>
+      {/* Header */}
+      <div className="px-4 pt-3 pb-2 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-mono font-semibold text-text-primary truncate">
+              {cfg?.symbol || '—'}
+            </span>
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-400">
+              SPOT
+            </span>
+            {state?.lastPrice != null && (
+              <span className="text-[10px] font-mono text-text-secondary">{state.lastPrice}</span>
+            )}
+          </div>
+          <div className="text-[11px] text-text-secondary mt-0.5 truncate">
+            {s.name} · {s.accountName}
+          </div>
+        </div>
+        <StatusBadge status={s.status} />
+      </div>
+
+      {/* Config chips */}
+      <div className="px-4 pb-2 flex flex-wrap gap-1">
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+          {levels.length} уровней
+        </span>
+        {levels.length > 0 && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-bg-tertiary text-text-secondary">
+            ${levels.reduce((sum, l) => sum + (l.amountUsdt || 0), 0)} всего
+          </span>
+        )}
+      </div>
+
+      <div className="border-t border-border/50" />
+
+      {/* Levels */}
+      <div className="px-4 py-2 space-y-1">
+        {levels.length === 0 ? (
+          <span className="text-text-secondary text-xs">—</span>
+        ) : (
+          levels.map((l, i) => {
+            const ls = levelStates[i];
+            const inCoin = ls?.phase === 1;
+            return (
+              <div key={i} className="text-[10px] font-mono">
+                <div className="flex items-center gap-2 text-text-secondary">
+                  <span className="w-5 text-text-primary">#{i + 1}</span>
+                  {!ls ? (
+                    <span>{l.buyPrice} → {l.sellPrice}</span>
+                  ) : inCoin ? (
+                    <span>
+                      <span className="text-accent-yellow">в монете @{ls.filledPrice}</span> → продажа @{l.sellPrice}
+                    </span>
+                  ) : (
+                    <span>ждём покупку @{l.buyPrice} → {l.sellPrice}</span>
+                  )}
+                  <span className="ml-auto hidden sm:inline">${l.amountUsdt}</span>
+                  {ls && <span title="Циклов">×{ls.completedCycles}</span>}
+                  {ls && <span className={`w-14 text-right ${sppColor(ls.realizedPnlUsd)}`}>{sppSigned(ls.realizedPnlUsd)}</span>}
+                </div>
+                {ls?.lastError && (
+                  <div className="text-accent-red whitespace-normal break-words pl-7 font-sans">{ls.lastError}</div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* Totals */}
+      <div className="px-4 pb-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-text-secondary">
+        <span>Циклов: <span className="text-text-primary font-medium">{state?.completedCycles ?? 0}</span></span>
+        <span>PnL: <span className={`font-semibold ${sppColor(totalPnl)}`}>{sppSigned(totalPnl)}</span></span>
+        <span>Комиссии: <span className="text-text-primary font-medium">${(state?.feesUsd ?? 0).toFixed(2)}</span></span>
+        {hasCoins && <span>В монете: <span className="text-text-primary font-medium">{holding}/{levels.length}</span></span>}
+      </div>
+
+      <div className="border-t border-border/50" />
+
+      {/* Actions */}
+      <div className="px-3 py-2 flex flex-wrap items-center gap-1">
+        <button
+          onClick={onChart}
+          title="График"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-blue rounded-lg hover:bg-accent-blue/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+          </svg>
+        </button>
+        <button
+          onClick={onLogs}
+          title="Логи"
+          className="p-1.5 text-text-secondary/60 hover:text-accent-yellow rounded-lg hover:bg-accent-yellow/10 transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+          </svg>
+        </button>
+
+        {/* TG signal toggle */}
+        {telegramBots && telegramBots.length > 0 && (
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                if (s.telegramBotId) {
+                  onSetTelegramBot(null);
+                } else if (telegramBots.filter((b) => b.isActive).length === 1) {
+                  onSetTelegramBot(telegramBots.filter((b) => b.isActive)[0].id);
+                }
+              }}
+              title={s.telegramBotId ? 'Disable TG signals' : 'Enable TG signals'}
+              className={`px-1.5 py-1 text-[10px] font-bold rounded-lg transition-colors ${
+                s.telegramBotId
+                  ? 'bg-accent-blue/15 text-accent-blue'
+                  : 'bg-bg-tertiary text-text-secondary/40 hover:text-text-secondary'
+              }`}
+            >
+              TG
+            </button>
+            {!s.telegramBotId && telegramBots.filter((b) => b.isActive).length > 1 && (
+              <select
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-text-secondary"
+                value=""
+                onChange={(e) => { if (e.target.value) onSetTelegramBot(e.target.value); }}
+              >
+                <option value="">Select bot...</option>
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+            {s.telegramBotId && (
+              <select
+                className="max-w-[110px] truncate text-[10px] bg-bg-tertiary border border-border rounded px-1 py-0.5 text-accent-blue"
+                value={s.telegramBotId}
+                onChange={(e) => onSetTelegramBot(e.target.value || null)}
+              >
+                {telegramBots.filter((b) => b.isActive).map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1" />
+
+        {(isRunning || hasCoins) && (
+          <button
+            onClick={() => {
+              if (confirm('Отменить ордера, продать все монеты по рынку и остановить бота?')) onClosePosition();
+            }}
+            disabled={closePositionPending}
+            title="Отменяет ордера и продаёт все монеты по рынку"
+            className="px-2 py-1 text-[11px] font-medium bg-accent-yellow/10 text-accent-yellow rounded-lg hover:bg-accent-yellow/20 transition-colors disabled:opacity-50"
+          >
+            {closePositionPending ? '...' : 'Закрыть'}
+          </button>
+        )}
+
+        {isRunning ? (
+          <button
+            onClick={onStop}
+            title="Отменяет ордера, монеты остаются на споте"
             className="px-2.5 py-1 text-[11px] font-medium bg-accent-red/10 text-accent-red rounded-lg hover:bg-accent-red/20 transition-colors"
           >
             Стоп
@@ -4196,6 +4512,9 @@ function AddStrategyModal({
     gridMaxLots: '0',
   });
 
+  // SpotPingPong levels
+  const [sppLevels, setSppLevels] = useState<SppLevelForm[]>([emptySppLevel()]);
+
   // HuntingFunding fields
   const [hfLevels, setHfLevels] = useState<HFLevel[]>([{ offsetPercent: 1.5, sizeUsdt: 50 }]);
   const [autoRotateTicker, setAutoRotateTicker] = useState(true);
@@ -4281,7 +4600,8 @@ function AddStrategyModal({
     [symbolsData],
   );
 
-  const activeAccounts = accounts?.filter((a) => a.isActive) || [];
+  // SpotPingPong has no Dzengi spot client.
+  const activeAccounts = accounts?.filter((a) => a.isActive && !(strategyType === 'SpotPingPong' && a.exchangeType === 4)) || [];
   const currentAccountExchangeType = activeAccounts.find((a) => a.id === accountId)?.exchangeType ?? 0;
   const isBybit = currentAccountExchangeType === 1;
 
@@ -4384,7 +4704,21 @@ function AddStrategyModal({
     }
 
     let configJson: string;
-    if (strategyType === 'HuntingFunding') {
+    if (strategyType === 'SpotPingPong') {
+      const sppError = validateSppLevels(sppLevels);
+      if (sppError) {
+        setError(sppError);
+        return;
+      }
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        levels: sppLevels.map((l) => ({
+          buyPrice: Number(l.buyPrice),
+          sellPrice: Number(l.sellPrice),
+          amountUsdt: Number(l.amountUsdt),
+        })),
+      });
+    } else if (strategyType === 'HuntingFunding') {
       if (hfLevels.length === 0) {
         setError('Добавьте хотя бы один уровень');
         return;
@@ -4711,10 +5045,23 @@ function AddStrategyModal({
               isLoading={symbolsLoading}
               disabled={!accountId}
               className={inputCls}
+              allowCustom={strategyType === 'SpotPingPong'}
             />
           </div>
 
-          {strategyType === 'SmaDca' ? (
+          {strategyType === 'SpotPingPong' ? (
+            <>
+          <SpotPingPongLevels levels={sppLevels} onChange={setSppLevels} />
+
+          <p className="text-xs text-text-secondary italic">
+            Спот, только покупка → продажа. Каждый уровень независим: лимитная покупка по цене покупки, затем лимитная
+            продажа всего купленного по цене продажи, затем снова покупка. Стоп-лосса нет: если цена ушла вниз, бот держит
+            монеты и ждёт; если вверх, покупка просто висит. Цена продажи должна быть выше цены покупки минимум на 0.21%.
+            На BingX и Bitget USDT должен лежать в спот-кошельке. «Стоп» отменяет ордера и оставляет монеты, «Закрыть» —
+            отменяет ордера и продаёт все монеты по рынку.
+          </p>
+            </>
+          ) : strategyType === 'SmaDca' ? (
             <>
               {/* Timeframe */}
               <div>
@@ -6099,6 +6446,17 @@ function EditStrategyModal({
   const isGF = strategy.type === 'GridFloat';
   const isGH = strategy.type === 'GridHedge';
   const isGSH = strategy.type === 'SmartGridHedge';
+  const isSPP = strategy.type === 'SpotPingPong';
+
+  const [sppLevels, setSppLevels] = useState<SppLevelForm[]>(() => {
+    const raw: unknown = cfg.levels;
+    if (!Array.isArray(raw) || raw.length === 0) return [emptySppLevel()];
+    return raw.map((l: { buyPrice?: number; sellPrice?: number; amountUsdt?: number }) => ({
+      buyPrice: String(l.buyPrice ?? ''),
+      sellPrice: String(l.sellPrice ?? ''),
+      amountUsdt: String(l.amountUsdt ?? ''),
+    }));
+  });
 
   const [name, setName] = useState(strategy.name);
   const [symbol, setSymbol] = useState(cfg.symbol || 'BTCUSDT');
@@ -6553,6 +6911,20 @@ function EditStrategyModal({
         takeProfitEnabled: sghForm.takeProfitEnabled,
         takeProfitTargetUsd: tpTarget,
       });
+    } else if (isSPP) {
+      const sppError = validateSppLevels(sppLevels);
+      if (sppError) {
+        setError(sppError);
+        return;
+      }
+      configJson = JSON.stringify({
+        symbol: symbol.replace(/\s+/g, '').toUpperCase(),
+        levels: sppLevels.map((l) => ({
+          buyPrice: Number(l.buyPrice),
+          sellPrice: Number(l.sellPrice),
+          amountUsdt: Number(l.amountUsdt),
+        })),
+      });
     } else {
       configJson = JSON.stringify({
         indicatorType: mgForm.indicatorType,
@@ -6643,10 +7015,23 @@ function EditStrategyModal({
               placeholder="Выберите символ"
               isLoading={symbolsLoading}
               className={inputCls}
+              allowCustom={isSPP}
             />
           </div>
 
-          {isSD ? (
+          {isSPP ? (
+            <>
+          <SpotPingPongLevels levels={sppLevels} onChange={setSppLevels} />
+
+          <p className="text-xs text-text-secondary italic">
+            Спот, только покупка → продажа. Каждый уровень независим: лимитная покупка по цене покупки, затем лимитная
+            продажа всего купленного по цене продажи, затем снова покупка. Стоп-лосса нет: если цена ушла вниз, бот держит
+            монеты и ждёт; если вверх, покупка просто висит. Цена продажи должна быть выше цены покупки минимум на 0.21%.
+            На BingX и Bitget USDT должен лежать в спот-кошельке. «Стоп» отменяет ордера и оставляет монеты, «Закрыть» —
+            отменяет ордера и продаёт все монеты по рынку.
+          </p>
+            </>
+          ) : isSD ? (
             <>
               <div>
                 <label className={labelCls}>Таймфрейм</label>

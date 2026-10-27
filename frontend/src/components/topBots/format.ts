@@ -10,6 +10,7 @@ export const STRATEGY_LABELS: Record<string, string> = {
   GridFloat: 'GridFloat',
   GridHedge: 'GridHedge',
   SmartGridHedge: 'SmartGridHedge',
+  SpotPingPong: 'Spot Ping-Pong',
 };
 
 export const STRATEGY_TYPES = Object.keys(STRATEGY_LABELS);
@@ -51,7 +52,7 @@ const L = {
     tpStep: 'Шаг TP', leverage: 'Плечо', levels: 'Уровни', maxCycles: 'Макс. циклов', lot: 'Лот', step: 'Шаг',
     nUp: 'Ячеек вверх', nDown: 'Ячеек вниз', range: 'Диапазон', hedge: 'Хедж', bet: 'Ставка',
     restart: 'Лестница ставок', autoRestart: 'Авто-рестарт', secondsBefore: 'Сек. до фандинга',
-    gridStep: 'Шаг сетки', gridMaxLots: 'Макс. докупок',
+    gridStep: 'Шаг сетки', gridMaxLots: 'Макс. докупок', firstLevel: 'Уровень 1 (покупка → продажа / сумма)',
   },
   en: {
     indicator: 'Indicator', timeframe: 'Timeframe', tp: 'Take profit', sl: 'Stop loss', orderSize: 'Order size',
@@ -60,7 +61,7 @@ const L = {
     tpStep: 'TP step', leverage: 'Leverage', levels: 'Levels', maxCycles: 'Max cycles', lot: 'Lot', step: 'Step',
     nUp: 'Cells up', nDown: 'Cells down', range: 'Range', hedge: 'Hedge', bet: 'Bet',
     restart: 'Stake ladder', autoRestart: 'Auto-restart', secondsBefore: 'Sec. before funding',
-    gridStep: 'Grid step', gridMaxLots: 'Max add-ons',
+    gridStep: 'Grid step', gridMaxLots: 'Max add-ons', firstLevel: 'Level 1 (buy → sell / amount)',
   },
 } as const;
 
@@ -171,6 +172,15 @@ export function getKeySettings(bot: TopBot, lang: TopLang = 'ru'): SettingItem[]
       add(l.nDown, plain(c.nDown));
       add(l.leverage, lev(c.leverage));
       if (typeof c.autoRestart === 'boolean') add(l.autoRestart, c.autoRestart ? l.yes : l.no);
+      break;
+    }
+    case 'SpotPingPong': {
+      const lv = rows(c.levels);
+      if (lv.length > 0) {
+        add(l.levels, String(lv.length));
+        const f = lv[0];
+        add(l.firstLevel, `${String(f.buyPrice ?? '?')} → ${String(f.sellPrice ?? '?')} / $${String(f.amountUsdt ?? '?')}`);
+      }
       break;
     }
     default: {

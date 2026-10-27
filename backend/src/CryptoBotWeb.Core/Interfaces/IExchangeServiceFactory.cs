@@ -20,7 +20,7 @@ public interface IExchangeServiceFactory
     /// </summary>
     ProxyServer? SelectProxyFor(ExchangeAccount account);
 
-    // V1 ships Bybit-only spot support. Other ExchangeType values throw NotSupportedException
-    // — GridHedge SameTicker (spot+futures hedge) refuses to start on those exchanges.
+    // Bybit, BingX and Bitget. Dzengi throws NotSupportedException — spot strategies refuse to
+    // start on it.
     ISpotExchangeService CreateSpot(ExchangeAccount account);
 }

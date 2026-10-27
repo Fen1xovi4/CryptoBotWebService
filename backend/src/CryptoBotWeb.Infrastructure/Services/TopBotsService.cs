@@ -39,6 +39,7 @@ public class TopBotsService
         [StrategyTypes.GridFloat] = typeof(GridFloatConfig),
         [StrategyTypes.GridHedge] = typeof(GridHedgeConfig),
         [StrategyTypes.SmartGridHedge] = typeof(SmartGridHedgeConfig),
+        [StrategyTypes.SpotPingPong] = typeof(SpotPingPongConfig),
     };
 
     private static readonly string[] SupportedTypes = ConfigTypes.Keys.ToArray();

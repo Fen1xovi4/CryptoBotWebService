@@ -24,17 +24,37 @@ public class StrategiesController : ControllerBase
     private readonly IExchangeServiceFactory _exchangeFactory;
     private readonly GridHedgeHandler _gridHedgeHandler;
     private readonly SmartGridHedgeHandler _smartGridHedgeHandler;
+    private readonly SpotPingPongHandler _spotPingPongHandler;
 
     public StrategiesController(
         AppDbContext db,
         IExchangeServiceFactory exchangeFactory,
         GridHedgeHandler gridHedgeHandler,
-        SmartGridHedgeHandler smartGridHedgeHandler)
+        SmartGridHedgeHandler smartGridHedgeHandler,
+        SpotPingPongHandler spotPingPongHandler)
     {
         _db = db;
         _exchangeFactory = exchangeFactory;
         _gridHedgeHandler = gridHedgeHandler;
         _smartGridHedgeHandler = smartGridHedgeHandler;
+        _spotPingPongHandler = spotPingPongHandler;
+    }
+
+    // SpotPingPong configs are checked on create/update so a bad level never reaches the worker
+    // (which would stop the bot with a log line instead of a form error).
+    private static string? ValidateSpotPingPong(string type, string? configJson, ExchangeType exchangeType)
+    {
+        if (type != StrategyTypes.SpotPingPong) return null;
+        if (exchangeType == ExchangeType.Dzengi)
+            return "SpotPingPong не работает на Dzengi — нужен аккаунт Bybit, Bitget или BingX.";
+        SpotPingPongConfig? config;
+        try
+        {
+            config = JsonSerializer.Deserialize<SpotPingPongConfig>(configJson ?? "{}",
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException ex) { return $"Конфигурация не распарсилась: {ex.Message}"; }
+        return SpotPingPongHandler.ValidateConfig(config);
     }
 
     private Guid GetUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
@@ -234,6 +254,9 @@ public class StrategiesController : ControllerBase
         if (account == null)
             return NotFound(new { message = "Account not found" });
 
+        if (ValidateSpotPingPong(request.Type, request.ConfigJson, account.ExchangeType) is { } sppError)
+            return BadRequest(new { message = sppError });
+
         if (request.WorkspaceId.HasValue)
         {
             var ws = await _db.Workspaces
@@ -405,6 +428,25 @@ public class StrategiesController : ControllerBase
             }
             strategy.StateJson = JsonSerializer.Serialize(freshGhState, jsonOpts);
         }
+        else if (strategy.Type == StrategyTypes.SpotPingPong)
+        {
+            // SpotPingPong Start: the state IS the holdings (levels sitting in coins after Stop
+            // cancelled their sells) — keep it whole, drop only the transient backoffs so the
+            // first tick re-places every missing order at once.
+            if (ValidateSpotPingPong(strategy.Type, strategy.ConfigJson, strategy.Account.ExchangeType) is { } sppError)
+                return BadRequest(new { message = sppError });
+
+            var sppState = string.IsNullOrEmpty(strategy.StateJson) || strategy.StateJson == "{}"
+                ? new SpotPingPongState()
+                : JsonSerializer.Deserialize<SpotPingPongState>(strategy.StateJson, jsonOpts) ?? new SpotPingPongState();
+            foreach (var l in sppState.LevelStates)
+            {
+                l.RetryAfter = null;
+                l.LastError = null;
+                l.PollMisses = 0;
+            }
+            SpotPingPongHandler.SaveState(strategy, sppState);
+        }
         else
         {
             // Preserve martingale state across restarts; clear counters so handler recalculates from history
@@ -487,6 +529,16 @@ public class StrategiesController : ControllerBase
                 using var gridExchange = _exchangeFactory.CreateFutures(strategy.Account);
                 await CancelMaratGGridOrdersAsync(strategy, gridExchange, gridConfig.Symbol, gridState, gridConfig);
                 strategy.StateJson = JsonSerializer.Serialize(gridState, saveOpts);
+            }
+        }
+
+        // SpotPingPong: cancel every resting buy/sell, keep the coins (the state remembers them).
+        if (strategy.Type == StrategyTypes.SpotPingPong)
+        {
+            try { await _spotPingPongHandler.CancelAllOrdersAsync(strategy, HttpContext.RequestAborted); }
+            catch (Exception ex)
+            {
+                return StatusCode(502, new { message = $"Не удалось отменить ордера на бирже: {ex.Message}. Бот не остановлен." });
             }
         }
 
@@ -687,6 +739,9 @@ public class StrategiesController : ControllerBase
         if (strategy.Status == StrategyStatus.Running || strategy.Status == StrategyStatus.Paused)
             return BadRequest(new { message = "ĐťĐµĐ»ŃŚĐ·ŃŹ Ń€ĐµĐ´Đ°ĐşŃ‚Đ¸Ń€ĐľĐ˛Đ°Ń‚ŃŚ Đ·Đ°ĐżŃŃ‰ĐµĐ˝Đ˝ĐľĐłĐľ Đ±ĐľŃ‚Đ° Đ¸Đ»Đ¸ Đ±ĐľŃ‚Đ° Đ˝Đ° ĐżĐ°ŃĐ·Đµ. ĐˇĐ˝Đ°Ń‡Đ°Đ»Đ° ĐľŃŃ‚Đ°Đ˝ĐľĐ˛Đ¸Ń‚Đµ ĐµĐłĐľ." });
 
+        if (ValidateSpotPingPong(strategy.Type, request.ConfigJson ?? strategy.ConfigJson, strategy.Account.ExchangeType) is { } sppError)
+            return BadRequest(new { message = sppError });
+
         strategy.Name = request.Name;
         strategy.ConfigJson = request.ConfigJson ?? strategy.ConfigJson;
         await _db.SaveChangesAsync();
@@ -779,6 +834,24 @@ public class StrategiesController : ControllerBase
 
         var jsonOpts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var saveOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+        // --- SpotPingPong path: cancel everything, market-sell all held coins, stop the bot ---
+        if (strategy.Type == StrategyTypes.SpotPingPong)
+        {
+            var sppResult = await _spotPingPongHandler.ForceCloseAsync(strategy, HttpContext.RequestAborted);
+            if (!sppResult.Ok)
+                return BadRequest(new { message = sppResult.Message });
+
+            return Ok(new
+            {
+                message = sppResult.Message,
+                details = new[]
+                {
+                    $"SpotPingPong closed: orders cancelled={sppResult.CancelledOrders}, " +
+                    $"sold={Math.Round(sppResult.SoldQty, 8)}, PnL=${Math.Round(sppResult.PnlUsd, 2)}"
+                }
+            });
+        }
 
         if (strategy.Type == StrategyTypes.HuntingFunding)
         {

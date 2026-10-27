@@ -10,8 +10,12 @@ namespace CryptoBotWeb.Infrastructure.Simulation;
 /// </summary>
 public static class ConfigJsonMutator
 {
-    /// <summary>Hard cap on the cartesian product — protects against accidental million-run sweeps.</summary>
-    public const int MaxCombinations = 3000;
+    /// <summary>
+    /// Hard cap on the cartesian product — protects against accidental multi-million-run sweeps.
+    /// Each combination keeps only a <see cref="SimulationRunSummary"/> in memory (~1 KB), so
+    /// 100k results are ~100 MB at worst; results are served sorted and paged, never whole.
+    /// </summary>
+    public const int MaxCombinations = 100_000;
 
     private const int MaxValuesPerParameter = 1000;
 

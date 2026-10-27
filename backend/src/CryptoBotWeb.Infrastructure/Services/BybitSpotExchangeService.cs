@@ -212,36 +212,43 @@ public class BybitSpotExchangeService : ISpotExchangeService
         catch { return false; }
     }
 
+    // Null = Bybit knows no such order (empty realtime AND history lookups). A failed call
+    // (proxy, timeout, auth, rate limit) throws, like the BingX/Bitget clients, so a caller
+    // never mistakes a transport glitch for a vanished order and re-places a duplicate.
+    // GridHedge and SpotPingPong both wrap this call in try/catch.
     public async Task<OrderStatusDto?> GetOrderAsync(string symbol, string orderId)
     {
-        try
+        var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
+
+        var open = await _client.V5Api.Trading.GetOrdersAsync(
+            Category.Spot, bybitSymbol, orderId: orderId);
+        if (!open.Success)
+            throw new InvalidOperationException($"Bybit spot GetOrders failed for {orderId}: {open.Error}");
+        var order = open.Data?.List?.FirstOrDefault();
+
+        // Bybit moves spot orders to history shortly after they finalize — same fallback
+        // we use on derivatives.
+        if (order == null)
         {
-            var bybitSymbol = SymbolHelper.ToExchangeSymbol(symbol, Core.Enums.ExchangeType.Bybit);
-
-            var open = await _client.V5Api.Trading.GetOrdersAsync(
+            var hist = await _client.V5Api.Trading.GetOrderHistoryAsync(
                 Category.Spot, bybitSymbol, orderId: orderId);
-            var order = open.Success ? open.Data?.List?.FirstOrDefault() : null;
-
-            // Bybit moves spot orders to history shortly after they finalize — same fallback
-            // we use on derivatives.
-            if (order == null)
-            {
-                var hist = await _client.V5Api.Trading.GetOrderHistoryAsync(
-                    Category.Spot, bybitSymbol, orderId: orderId);
-                order = hist.Success ? hist.Data?.List?.FirstOrDefault() : null;
-            }
-
-            if (order == null) return null;
-
-            return new OrderStatusDto
-            {
-                OrderId = order.OrderId ?? orderId,
-                Status = MapOrderStatus(order.Status),
-                FilledQuantity = order.QuantityFilled ?? 0m,
-                AverageFilledPrice = order.AveragePrice ?? 0m
-            };
+            if (!hist.Success)
+                throw new InvalidOperationException($"Bybit spot GetOrderHistory failed for {orderId}: {hist.Error}");
+            order = hist.Data?.List?.FirstOrDefault();
         }
-        catch { return null; }
+
+        if (order == null) return null;
+
+        return new OrderStatusDto
+        {
+            OrderId = order.OrderId ?? orderId,
+            Status = MapOrderStatus(order.Status),
+            FilledQuantity = order.QuantityFilled ?? 0m,
+            AverageFilledPrice = order.AveragePrice ?? 0m,
+            // Spot BUY fee is charged in the base coin (FeeAsset = base); SELL in quote.
+            Fee = order.ExecutedFee.HasValue ? Math.Abs(order.ExecutedFee.Value) : null,
+            FeeAsset = string.IsNullOrWhiteSpace(order.FeeAsset) ? null : order.FeeAsset
+        };
     }
 
     private static OrderLifecycleStatus MapOrderStatus(OrderStatus s) => s switch

@@ -5,6 +5,7 @@ import type { AllForms } from './formDefaults';
 import { formatStakeSequence } from './formDefaults';
 import type { HFLevel, StrategyType } from './types';
 import { gridHedgeRecommendation } from './buildConfig';
+import { SpotPingPongLevels } from '../../components/SpotPingPongLevels';
 
 const inputCls =
   'w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue transition-colors';
@@ -632,6 +633,18 @@ export default function StrategyConfigForm({ strategyType, symbol, accountId, fo
             </div>
           )}
         </div>
+      </>
+    );
+  }
+
+  if (strategyType === 'SpotPingPong') {
+    return (
+      <>
+        <div className="rounded-lg border border-border/60 bg-bg-tertiary/40 px-3 py-2 text-xs text-text-secondary">
+          Спот, long-only. Таймфрейм и индикаторы не используются — каждый уровень независимо покупает по цене покупки
+          и продаёт по цене продажи. Стоп-лосса нет.
+        </div>
+        <SpotPingPongLevels levels={forms.sppLevels} onChange={(l) => setForms((f) => ({ ...f, sppLevels: l }))} />
       </>
     );
   }

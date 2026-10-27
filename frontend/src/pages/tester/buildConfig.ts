@@ -1,5 +1,6 @@
 import type { AllForms } from './formDefaults';
 import type { StrategyType } from './types';
+import { validateSppLevels } from '../../components/sppLevelsUtils';
 
 export interface BuildResult {
   ok: boolean;
@@ -217,6 +218,20 @@ export function buildSimConfig(strategyType: StrategyType, symbol: string, forms
         takerFeeBps: Number(sgh.takerFeeBps),
         takeProfitEnabled: sgh.takeProfitEnabled,
         takeProfitTargetUsd: tpTarget,
+      });
+      return { ok: true, configJson };
+    }
+
+    case 'SpotPingPong': {
+      const err = validateSppLevels(forms.sppLevels);
+      if (err) return { ok: false, error: err };
+      const configJson = JSON.stringify({
+        symbol: sym,
+        levels: forms.sppLevels.map((l) => ({
+          buyPrice: Number(l.buyPrice),
+          sellPrice: Number(l.sellPrice),
+          amountUsdt: Number(l.amountUsdt),
+        })),
       });
       return { ok: true, configJson };
     }

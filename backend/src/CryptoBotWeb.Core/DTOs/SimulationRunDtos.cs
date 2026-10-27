@@ -95,8 +95,12 @@ public class SimulationRunResult
     /// <summary>Equity samples (realized + unrealized, net of fees/funding) over time.</summary>
     public List<EquityPoint> EquityCurve { get; set; } = new();
 
-    /// <summary>Candles for charting, aggregated to the strategy timeframe. Filled by the engine.</summary>
+    /// <summary>Candles for charting at the modeled timeframe (strategy TF, or the path TF for
+    /// tick-driven strategies). Filled by the engine.</summary>
     public List<CandleDto> ChartCandles { get; set; } = new();
+
+    /// <summary>Timeframe of <see cref="ChartCandles"/> (e.g. "15m").</summary>
+    public string ChartTimeframe { get; set; } = string.Empty;
 
     public SimulationRunSummary Summary { get; set; } = new();
     public List<string> Warnings { get; set; } = new();

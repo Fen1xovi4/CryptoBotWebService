@@ -54,6 +54,7 @@ builder.Services.AddScoped<TopBotsService>();
 // worker runs on a natural exit trigger. Scoped because it relies on the scoped AppDbContext.
 builder.Services.AddScoped<GridHedgeHandler>();
 builder.Services.AddScoped<SmartGridHedgeHandler>();
+builder.Services.AddScoped<SpotPingPongHandler>();
 
 // Simulator (backtesting) — admin-only Tester module. One IStrategySimulator per strategy
 // type, resolved by SimulationEngine the same way the Worker resolves live handlers.
@@ -64,6 +65,7 @@ builder.Services.AddScoped<IStrategySimulator, GridFloatSimulator>();
 builder.Services.AddScoped<IStrategySimulator, GridHedgeSimulator>();
 builder.Services.AddScoped<IStrategySimulator, SmartGridHedgeSimulator>();
 builder.Services.AddScoped<IStrategySimulator, HuntingFundingSimulator>();
+builder.Services.AddScoped<IStrategySimulator, SpotPingPongSimulator>();
 builder.Services.AddScoped<KlineHistoryCache>(); // DB-backed 1m history cache used by the engine
 builder.Services.AddScoped<SimulationEngine>();
 // Parameter optimizer: singleton because sweep jobs run in the background past the request's

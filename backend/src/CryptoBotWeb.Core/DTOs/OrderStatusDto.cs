@@ -24,4 +24,11 @@ public class OrderStatusDto
     /// negative numbers, Bybit as positive), so implementations normalise to the absolute value.
     /// </summary>
     public decimal? Fee { get; set; }
+
+    /// <summary>
+    /// Asset the <see cref="Fee"/> is denominated in, when the exchange reports it. Spot clients
+    /// fill this: a spot BUY is typically charged in the base coin (the wallet receives
+    /// FilledQuantity − Fee), a SELL in the quote coin. Null = unknown / assume quote.
+    /// </summary>
+    public string? FeeAsset { get; set; }
 }
