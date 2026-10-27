@@ -1586,8 +1586,18 @@ public class StrategiesController : ControllerBase
 
         try
         {
-            using var exchange = _exchangeFactory.CreateFutures(strategy.Account);
-            var candles = await exchange.GetKlinesAsync(symbol, resolvedTf, limit);
+            List<CandleDto> candles;
+            if (strategy.Type == StrategyTypes.SpotPingPong)
+            {
+                // Spot strategy: the futures feed has no bars for spot-only pairs.
+                using var spot = _exchangeFactory.CreateSpot(strategy.Account);
+                candles = await spot.GetKlinesAsync(SymbolHelper.NormalizeSymbol(symbol), resolvedTf, limit);
+            }
+            else
+            {
+                using var exchange = _exchangeFactory.CreateFutures(strategy.Account);
+                candles = await exchange.GetKlinesAsync(symbol, resolvedTf, limit);
+            }
 
             // The MA overlay is only meaningful for the EMA/SMA bounce strategy (MaratG).
             // For every other strategy type we return bare candles — no misleading indicator line.

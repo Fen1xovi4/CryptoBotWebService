@@ -54,6 +54,45 @@ public class BitgetSpotExchangeService : ISpotExchangeService
             .ToList();
     }
 
+    public async Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit)
+    {
+        var result = await _client.SpotApiV2.ExchangeData.GetKlinesAsync(Sym(symbol), MapInterval(timeframe), limit: limit);
+        if (!result.Success)
+            throw new Exception($"Bitget spot GetKlines failed: {result.Error?.Message ?? "unknown error"}");
+        if (result.Data == null) return new List<CandleDto>();
+
+        var span = SymbolHelper.GetTimeframeSpan(timeframe);
+        return result.Data
+            .Select(k => new CandleDto
+            {
+                OpenTime = k.OpenTime,
+                CloseTime = k.OpenTime + span,
+                Open = k.OpenPrice,
+                High = k.HighPrice,
+                Low = k.LowPrice,
+                Close = k.ClosePrice,
+                Volume = k.Volume
+            })
+            .OrderBy(c => c.OpenTime)
+            .ToList();
+    }
+
+    // Bitget spot has no 3m bar; it falls back to 5m.
+    private static KlineInterval MapInterval(string timeframe) => timeframe.ToLowerInvariant() switch
+    {
+        "1m" => KlineInterval.OneMinute,
+        "5m" or "3m" => KlineInterval.FiveMinutes,
+        "15m" => KlineInterval.FifteenMinutes,
+        "30m" => KlineInterval.ThirtyMinutes,
+        "1h" => KlineInterval.OneHour,
+        "4h" => KlineInterval.FourHours,
+        "6h" => KlineInterval.SixHours,
+        "12h" => KlineInterval.TwelveHours,
+        "1d" => KlineInterval.OneDay,
+        "1w" => KlineInterval.OneWeek,
+        _ => KlineInterval.OneHour
+    };
+
     public async Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolFiltersAsync(string symbol)
     {
         var result = await _client.SpotApiV2.ExchangeData.GetSymbolsAsync(Sym(symbol));

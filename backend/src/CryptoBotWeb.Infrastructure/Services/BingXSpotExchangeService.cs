@@ -52,6 +52,46 @@ public class BingXSpotExchangeService : ISpotExchangeService
             .ToList();
     }
 
+    public async Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit)
+    {
+        var result = await _client.SpotApi.ExchangeData.GetKlinesAsync(Sym(symbol), MapInterval(timeframe), limit: limit);
+        if (!result.Success)
+            throw new Exception($"BingX spot GetKlines failed: {result.Error?.Message ?? "unknown error"}");
+        if (result.Data == null) return new List<CandleDto>();
+
+        var span = SymbolHelper.GetTimeframeSpan(timeframe);
+        return result.Data
+            .Select(k => new CandleDto
+            {
+                OpenTime = k.OpenTime,
+                CloseTime = k.OpenTime + span,
+                Open = k.OpenPrice,
+                High = k.HighPrice,
+                Low = k.LowPrice,
+                Close = k.ClosePrice,
+                Volume = k.Volume
+            })
+            .OrderBy(c => c.OpenTime)
+            .ToList();
+    }
+
+    private static KlineInterval MapInterval(string timeframe) => timeframe.ToLowerInvariant() switch
+    {
+        "1m" => KlineInterval.OneMinute,
+        "3m" => KlineInterval.ThreeMinutes,
+        "5m" => KlineInterval.FiveMinutes,
+        "15m" => KlineInterval.FifteenMinutes,
+        "30m" => KlineInterval.ThirtyMinutes,
+        "1h" => KlineInterval.OneHour,
+        "2h" => KlineInterval.TwoHours,
+        "4h" => KlineInterval.FourHours,
+        "6h" => KlineInterval.SixHours,
+        "12h" => KlineInterval.TwelveHours,
+        "1d" => KlineInterval.OneDay,
+        "1w" => KlineInterval.OneWeek,
+        _ => KlineInterval.OneHour
+    };
+
     public async Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolFiltersAsync(string symbol)
     {
         var result = await _client.SpotApi.ExchangeData.GetSymbolsAsync(Sym(symbol));
