@@ -4589,8 +4589,11 @@ function AddStrategyModal({
   });
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
-    queryKey: ['symbols', accountId],
-    queryFn: () => api.get(`/exchange/${accountId}/symbols`).then((r) => r.data),
+    queryKey: ['symbols', accountId, strategyType === 'SpotPingPong' ? 'spot' : 'futures'],
+    queryFn: () =>
+      api
+        .get(`/exchange/${accountId}/${strategyType === 'SpotPingPong' ? 'spot-symbols' : 'symbols'}`)
+        .then((r) => r.data),
     enabled: !!accountId,
     staleTime: 5 * 60 * 1000,
   });
@@ -6584,8 +6587,9 @@ function EditStrategyModal({
   });
 
   const { data: symbolsData, isLoading: symbolsLoading } = useQuery<{ symbol: string }[]>({
-    queryKey: ['symbols', strategy.accountId],
-    queryFn: () => api.get(`/exchange/${strategy.accountId}/symbols`).then((r) => r.data),
+    queryKey: ['symbols', strategy.accountId, isSPP ? 'spot' : 'futures'],
+    queryFn: () =>
+      api.get(`/exchange/${strategy.accountId}/${isSPP ? 'spot-symbols' : 'symbols'}`).then((r) => r.data),
     staleTime: 5 * 60 * 1000,
   });
 

@@ -58,7 +58,9 @@ export default function SearchableSelect({
     setSearch('');
   };
 
-  const customValue = search.replace(/[\s/-]/g, '').toUpperCase();
+  // A bare coin ("WFI") becomes a USDT pair ("WFIUSDT") — exchanges reject a symbol without a quote.
+  const typed = search.replace(/[\s/-]/g, '').toUpperCase();
+  const customValue = typed && !/(USDT|USDC|BUSD)$/.test(typed) ? `${typed}USDT` : typed;
   const showCustom = allowCustom && customValue.length > 0 && !options.includes(customValue);
 
   return (

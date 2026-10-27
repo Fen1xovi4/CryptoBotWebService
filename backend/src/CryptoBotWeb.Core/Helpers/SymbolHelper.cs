@@ -63,6 +63,22 @@ public static class SymbolHelper
     }
 
     /// <summary>
+    /// Canonical trading symbol for storage: spaces/dashes/slashes removed, upper-cased, and a
+    /// bare coin ("WFI") gets the USDT quote appended ("WFIUSDT"). Exchange-specific formatting
+    /// (BingX "WFI-USDT") is applied later by ToExchangeSymbol.
+    /// </summary>
+    public static string NormalizeSymbol(string symbol)
+    {
+        symbol = symbol.Replace(" ", "").Replace("-", "").Replace("/", "").Trim().ToUpperInvariant();
+        foreach (var quote in QuoteAssets)
+        {
+            if (symbol.EndsWith(quote, StringComparison.Ordinal) && symbol.Length > quote.Length)
+                return symbol;
+        }
+        return symbol.Length > 0 ? symbol + "USDT" : symbol;
+    }
+
+    /// <summary>
     /// Canonical BTCUSDT → ("BTC", "USDT"). Falls back to a USDT quote when no known suffix
     /// matches, so an odd symbol still yields a usable base-asset name for balance lookups.
     /// </summary>

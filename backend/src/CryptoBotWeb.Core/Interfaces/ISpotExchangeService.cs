@@ -12,6 +12,10 @@ public interface ISpotExchangeService : IDisposable
 
     Task<decimal?> GetTickerPriceAsync(string symbol);
 
+    // Tradable spot pairs in canonical form (BTCUSDT). Spot lists differ from the futures
+    // contract list — many small coins trade on spot only.
+    Task<List<SymbolDto>> GetSymbolsAsync();
+
     // Exchange-side lot/price filters. qtyStep + minQty drive the pre-placement minimum-notional
     // guard; priceStep is used to round limit prices into a valid tick.
     Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolFiltersAsync(string symbol);

@@ -43,6 +43,17 @@ public class BitgetSpotExchangeService : ISpotExchangeService
         return ticker?.LastPrice;
     }
 
+    public async Task<List<SymbolDto>> GetSymbolsAsync()
+    {
+        var result = await _client.SpotApiV2.ExchangeData.GetSymbolsAsync();
+        if (!result.Success || result.Data == null) return new List<SymbolDto>();
+        return result.Data
+            .Where(s => s.Status == Bitget.Net.Enums.SymbolStatus.Online && !string.IsNullOrEmpty(s.Symbol))
+            .Select(s => new SymbolDto { Symbol = s.Symbol })
+            .OrderBy(s => s.Symbol)
+            .ToList();
+    }
+
     public async Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolFiltersAsync(string symbol)
     {
         var result = await _client.SpotApiV2.ExchangeData.GetSymbolsAsync(Sym(symbol));
