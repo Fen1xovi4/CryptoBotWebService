@@ -16,6 +16,10 @@ public interface ISpotExchangeService : IDisposable
     // contract list — many small coins trade on spot only.
     Task<List<SymbolDto>> GetSymbolsAsync();
 
+    // Latest `limit` spot candles, ascending. Used by the bot chart for spot strategies — the
+    // futures kline feed has no data for spot-only pairs.
+    Task<List<CandleDto>> GetKlinesAsync(string symbol, string timeframe, int limit);
+
     // Exchange-side lot/price filters. qtyStep + minQty drive the pre-placement minimum-notional
     // guard; priceStep is used to round limit prices into a valid tick.
     Task<(decimal qtyStep, decimal minQty, decimal priceStep)> GetSymbolFiltersAsync(string symbol);

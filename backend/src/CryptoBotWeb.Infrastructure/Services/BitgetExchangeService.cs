@@ -26,9 +26,29 @@ public class BitgetExchangeService : IExchangeService, IDisposable
         return (result.Success, result.Error?.ToString());
     }
 
+    // Futures wallet plus the separate spot wallet (spot strategies trade from it), merged per
+    // asset so the UI's per-asset rows and USDT total cover both.
     public async Task<List<BalanceDto>> GetBalancesAsync()
     {
-        // Platform trades only USDT-M perpetual futures, so report the futures wallet, not spot.
+        var merged = new Dictionary<string, BalanceDto>(StringComparer.OrdinalIgnoreCase);
+        foreach (var b in await GetFuturesBalancesAsync()) BalanceMerge.Add(merged, b);
+        foreach (var b in await GetSpotBalancesAsync()) BalanceMerge.Add(merged, b);
+        return merged.Values.ToList();
+    }
+
+    private async Task<List<BalanceDto>> GetSpotBalancesAsync()
+    {
+        var result = await _client.SpotApiV2.Account.GetSpotBalancesAsync();
+        if (!result.Success || result.Data == null)
+            return new List<BalanceDto>();
+        return result.Data
+            .Where(b => b.Available > 0 || b.Frozen > 0 || b.Locked > 0)
+            .Select(b => new BalanceDto { Asset = b.Asset, Free = b.Available, Locked = b.Frozen + b.Locked })
+            .ToList();
+    }
+
+    private async Task<List<BalanceDto>> GetFuturesBalancesAsync()
+    {
         var result = await _client.FuturesApiV2.Account.GetBalancesAsync(BitgetProductTypeV2.UsdtFutures);
         if (!result.Success || result.Data == null)
             return new List<BalanceDto>();
