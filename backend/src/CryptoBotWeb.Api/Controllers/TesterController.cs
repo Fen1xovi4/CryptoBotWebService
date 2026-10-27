@@ -129,16 +129,149 @@ public class TesterController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Progress and, when Done, the result page: sorted server-side by <paramref name="sortBy"/>
+    /// (summary metric name, "pnlToDd", or "p:&lt;path&gt;") and cut to <paramref name="limit"/>
+    /// rows — sweeps may hold 100k summaries, which are never shipped whole.
+    /// </summary>
     [HttpGet("optimize/{jobId:guid}")]
-    public IActionResult GetOptimization(Guid jobId)
+    public IActionResult GetOptimization(
+        Guid jobId, [FromQuery] string? sortBy, [FromQuery] bool desc = true,
+        [FromQuery] int limit = OptimizationJobService.DefaultPageSize, [FromQuery] int minTrades = 0)
     {
-        var status = _optimizer.GetStatus(jobId);
+        var status = _optimizer.GetStatus(jobId, sortBy, desc, limit, Math.Max(0, minTrades));
         return status == null ? NotFound() : Ok(status);
     }
 
     [HttpPost("optimize/{jobId:guid}/cancel")]
     public IActionResult CancelOptimization(Guid jobId) =>
         _optimizer.Cancel(jobId) ? Ok() : NotFound();
+
+    // ───────────── saved parameter sets (per exchange + symbol + strategy) ─────────────
+
+    /// <summary>Saved sets, newest first. All filters optional; symbol is matched case-insensitively.</summary>
+    [HttpGet("param-sets")]
+    public async Task<IActionResult> GetParamSets(
+        [FromQuery] ExchangeType? exchangeType, [FromQuery] string? symbol, [FromQuery] string? strategyType,
+        CancellationToken ct)
+    {
+        var q = _db.TesterParamSets.AsNoTracking();
+        if (exchangeType.HasValue) q = q.Where(p => p.ExchangeType == exchangeType.Value);
+        if (!string.IsNullOrWhiteSpace(symbol))
+        {
+            var sym = NormalizeSymbol(symbol);
+            q = q.Where(p => p.Symbol == sym);
+        }
+        if (!string.IsNullOrWhiteSpace(strategyType)) q = q.Where(p => p.StrategyType == strategyType);
+
+        var list = await q.OrderByDescending(p => p.CreatedAt).Take(500).ToListAsync(ct);
+        return Ok(list.Select(ToDto));
+    }
+
+    [HttpPost("param-sets")]
+    public async Task<IActionResult> SaveParamSet([FromBody] SaveTesterParamSetRequest request, CancellationToken ct)
+    {
+        var account = await _db.ExchangeAccounts.AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Id == request.AccountId && a.UserId == GetUserId(), ct);
+        if (account == null)
+            return NotFound(new { message = "Аккаунт не найден." });
+        if (string.IsNullOrWhiteSpace(request.Symbol))
+            return BadRequest(new { message = "Не указан символ." });
+        if (string.IsNullOrWhiteSpace(request.StrategyType) || !_engine.SupportedStrategyTypes.Contains(request.StrategyType))
+            return BadRequest(new { message = "Неизвестный тип стратегии." });
+        if (request.Summary == null)
+            return BadRequest(new { message = "Нет результата симуляции — нечего сохранять." });
+
+        try
+        {
+            // Reject malformed JSON up front; the column is jsonb and would fail later with a 500.
+            using var _ = System.Text.Json.JsonDocument.Parse(request.ConfigJson);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return BadRequest(new { message = "ConfigJson не является корректным JSON." });
+        }
+
+        var s = request.Summary;
+        var entity = new TesterParamSet
+        {
+            ExchangeType = account.ExchangeType,
+            Symbol = NormalizeSymbol(request.Symbol),
+            StrategyType = request.StrategyType,
+            Name = string.IsNullOrWhiteSpace(request.Name)
+                ? $"{NormalizeSymbol(request.Symbol)} {request.StrategyType} {DateTime.UtcNow:yyyy-MM-dd}"
+                : request.Name.Trim(),
+            Note = string.IsNullOrWhiteSpace(request.Note) ? null : request.Note.Trim(),
+            ConfigJson = request.ConfigJson,
+            SweptParamsJson = System.Text.Json.JsonSerializer.Serialize(request.SweptParams ?? new()),
+            PeriodFromUtc = s.StartTime == default ? null : s.StartTime,
+            PeriodToUtc = s.EndTime == default ? null : s.EndTime,
+            PathTimeframe = string.IsNullOrWhiteSpace(request.PathTimeframe) ? "1m" : request.PathTimeframe,
+            NetPnlUsd = s.NetPnlUsd,
+            MaxDrawdownUsd = s.MaxDrawdownUsd,
+            MaxDrawdownPercent = s.MaxDrawdownPercent,
+            WinRate = s.WinRate,
+            TotalTrades = s.TotalTrades,
+            CreatedByUserId = GetUserId(),
+        };
+        _db.TesterParamSets.Add(entity);
+        await _db.SaveChangesAsync(ct);
+        return Ok(ToDto(entity));
+    }
+
+    [HttpPatch("param-sets/{id:guid}")]
+    public async Task<IActionResult> UpdateParamSet(Guid id, [FromBody] UpdateTesterParamSetRequest request, CancellationToken ct)
+    {
+        var entity = await _db.TesterParamSets.FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (entity == null) return NotFound();
+        if (request.Name != null && !string.IsNullOrWhiteSpace(request.Name)) entity.Name = request.Name.Trim();
+        if (request.Note != null) entity.Note = string.IsNullOrWhiteSpace(request.Note) ? null : request.Note.Trim();
+        await _db.SaveChangesAsync(ct);
+        return Ok(ToDto(entity));
+    }
+
+    [HttpDelete("param-sets/{id:guid}")]
+    public async Task<IActionResult> DeleteParamSet(Guid id, CancellationToken ct)
+    {
+        var removed = await _db.TesterParamSets.Where(p => p.Id == id).ExecuteDeleteAsync(ct);
+        return removed == 0 ? NotFound() : Ok();
+    }
+
+    private static string NormalizeSymbol(string symbol) =>
+        new string(symbol.Where(c => !char.IsWhiteSpace(c)).ToArray()).ToUpperInvariant();
+
+    private static TesterParamSetDto ToDto(TesterParamSet p)
+    {
+        Dictionary<string, decimal> swept;
+        try
+        {
+            swept = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, decimal>>(p.SweptParamsJson) ?? new();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            swept = new();
+        }
+        return new TesterParamSetDto
+        {
+            Id = p.Id,
+            ExchangeType = (int)p.ExchangeType,
+            Symbol = p.Symbol,
+            StrategyType = p.StrategyType,
+            Name = p.Name,
+            Note = p.Note,
+            ConfigJson = p.ConfigJson,
+            SweptParams = swept,
+            PeriodFromUtc = p.PeriodFromUtc,
+            PeriodToUtc = p.PeriodToUtc,
+            PathTimeframe = p.PathTimeframe,
+            NetPnlUsd = p.NetPnlUsd,
+            MaxDrawdownUsd = p.MaxDrawdownUsd,
+            MaxDrawdownPercent = p.MaxDrawdownPercent,
+            WinRate = p.WinRate,
+            TotalTrades = p.TotalTrades,
+            CreatedAt = p.CreatedAt,
+        };
+    }
 
     // ───────────── kline history cache (admin maintenance) ─────────────
 

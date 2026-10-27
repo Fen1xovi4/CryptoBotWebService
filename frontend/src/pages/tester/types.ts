@@ -8,6 +8,7 @@ export const STRATEGY_TYPES = [
   'GridHedge',
   'SmartGridHedge',
   'HuntingFunding',
+  'SpotPingPong',
 ] as const;
 
 export type StrategyType = (typeof STRATEGY_TYPES)[number];
@@ -20,6 +21,7 @@ export const STRATEGY_LABELS: Record<StrategyType, string> = {
   GridHedge: 'GridHedge (сетка + хедж)',
   SmartGridHedge: 'SmartGridHedge (геометрическая сетка + хедж)',
   HuntingFunding: 'HuntingFunding (охота за фандингом)',
+  SpotPingPong: 'Spot Ping-Pong (спот, пинг-понг по уровням)',
 };
 
 export interface Account {
@@ -32,6 +34,12 @@ export interface Account {
 export interface HFLevel {
   offsetPercent: number;
   sizeUsdt: number;
+}
+
+export interface SppLevel {
+  buyPrice: string;
+  sellPrice: string;
+  amountUsdt: string;
 }
 
 export interface SdLevel {
@@ -147,11 +155,16 @@ export interface OptimizationParameterSpec {
 
 export interface OptimizeRequest extends SimulateRequest {
   parameters: OptimizationParameterSpec[];
+  /** Share of the window (from the end) held out as the out-of-sample check; 0 = off. */
+  outOfSamplePercent: number;
 }
 
 export interface OptimizationComboResult {
   parameters: Record<string, number>;
+  /** In-sample result (whole window when no split). */
   summary?: SimulationSummary | null;
+  /** Out-of-sample result; null when the split is off. */
+  oosSummary?: SimulationSummary | null;
   error?: string | null;
 }
 
@@ -164,8 +177,53 @@ export interface OptimizationStatus {
   error?: string | null;
   warnings: string[];
   history?: SimulationHistoryStats | null;
-  /** Present only when status === 'Done'. */
+  outOfSamplePercent: number;
+  inSampleFromUtc?: string | null;
+  inSampleToUtc?: string | null;
+  outOfSampleFromUtc?: string | null;
+  outOfSampleToUtc?: string | null;
+  /** Successful / failed combination counts (Done only). */
+  okCount: number;
+  failedCount: number;
+  /** Rows hidden by the minTrades filter (Done only). */
+  filteredOutCount: number;
+  firstError?: string | null;
+  /** Present only when status === 'Done': one page, already sorted server-side by the requested key. */
   results?: OptimizationComboResult[] | null;
+}
+
+/* ── Saved parameter sets (GET/POST/PATCH/DELETE /tester/param-sets) ── */
+
+export interface TesterParamSet {
+  id: string;
+  exchangeType: number;
+  symbol: string;
+  strategyType: string;
+  name: string;
+  note?: string | null;
+  configJson: string;
+  sweptParams: Record<string, number>;
+  periodFromUtc?: string | null;
+  periodToUtc?: string | null;
+  pathTimeframe: string;
+  netPnlUsd: number;
+  maxDrawdownUsd: number;
+  maxDrawdownPercent: number;
+  winRate: number;
+  totalTrades: number;
+  createdAt: string;
+}
+
+export interface SaveTesterParamSetRequest {
+  accountId: string;
+  symbol: string;
+  strategyType: StrategyType;
+  name: string;
+  note?: string | null;
+  configJson: string;
+  sweptParams?: Record<string, number> | null;
+  pathTimeframe: string;
+  summary: SimulationSummary;
 }
 
 export interface SimulationResult {
@@ -173,6 +231,8 @@ export interface SimulationResult {
   indicatorValues: { time: string; value: number }[];
   equityCurve: EquityPoint[];
   chartCandles: CandleData[];
+  /** Timeframe of chartCandles — the modeled one unless the window was too long. */
+  chartTimeframe: string;
   summary: SimulationSummary;
   warnings: string[];
   history?: SimulationHistoryStats;

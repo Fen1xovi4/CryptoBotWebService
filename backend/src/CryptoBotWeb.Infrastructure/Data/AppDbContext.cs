@@ -29,6 +29,7 @@ public class AppDbContext : DbContext
     public DbSet<BalanceSnapshot> BalanceSnapshots => Set<BalanceSnapshot>();
     public DbSet<MarketCandle> MarketCandles => Set<MarketCandle>();
     public DbSet<MarketCandleRange> MarketCandleRanges => Set<MarketCandleRange>();
+    public DbSet<TesterParamSet> TesterParamSets => Set<TesterParamSet>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -378,6 +379,31 @@ public class AppDbContext : DbContext
             e.Property(x => x.Symbol).HasMaxLength(40);
             e.Property(x => x.Timeframe).HasMaxLength(8);
             e.HasIndex(x => new { x.ExchangeType, x.Symbol, x.Timeframe });
+        });
+
+        // Tester: parameter sets saved from the optimizer / a simulation run, per instrument + strategy.
+        modelBuilder.Entity<TesterParamSet>(e =>
+        {
+            e.ToTable("tester_param_sets");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasDefaultValueSql("gen_random_uuid()");
+            e.Property(x => x.ExchangeType).HasConversion<short>();
+            e.Property(x => x.Symbol).HasMaxLength(40);
+            e.Property(x => x.StrategyType).HasMaxLength(50);
+            e.Property(x => x.Name).HasMaxLength(200);
+            e.Property(x => x.Note).HasMaxLength(2000);
+            e.Property(x => x.PathTimeframe).HasMaxLength(8);
+            e.Property(x => x.ConfigJson).HasColumnType("jsonb");
+            e.Property(x => x.SweptParamsJson).HasColumnType("jsonb");
+            e.Property(x => x.NetPnlUsd).HasPrecision(18, 8);
+            e.Property(x => x.MaxDrawdownUsd).HasPrecision(18, 8);
+            e.Property(x => x.MaxDrawdownPercent).HasPrecision(18, 8);
+            e.Property(x => x.WinRate).HasPrecision(18, 8);
+            e.HasOne(x => x.CreatedBy)
+                .WithMany()
+                .HasForeignKey(x => x.CreatedByUserId)
+                .OnDelete(DeleteBehavior.SetNull);
+            e.HasIndex(x => new { x.ExchangeType, x.Symbol, x.StrategyType });
         });
     }
 }

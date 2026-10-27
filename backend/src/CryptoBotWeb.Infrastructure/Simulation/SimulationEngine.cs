@@ -16,7 +16,11 @@ namespace CryptoBotWeb.Infrastructure.Simulation;
 public class SimulationEngine
 {
     private const int MaxWindowDays = 1461; // 4 years
-    private const int MaxChartCandles = 3000;
+    /// <summary>
+    /// Chart candles per result. Large on purpose: the chart must show the modeled timeframe to
+    /// verify fills (4 years of 15m ≈ 140k bars); lightweight-charts handles this and nginx gzips the JSON.
+    /// </summary>
+    private const int MaxChartCandles = 200_000;
 
     /// <summary>
     /// Cap on path candles per series, not on days: 1m stays limited to ~a year (525 600 bars),
@@ -57,7 +61,8 @@ public class SimulationEngine
         result.History = BuildHistoryStats(request, stats, exchangeType);
 
         if (result.ChartCandles.Count == 0)
-            result.ChartCandles = BuildChartCandles(ctx.PathCandles, request.ConfigJson, request.PathTimeframe);
+            (result.ChartCandles, result.ChartTimeframe) =
+                BuildChartCandles(ctx.PathCandles, request.ConfigJson, request.PathTimeframe, result.Warnings);
 
         return result;
     }
@@ -198,38 +203,40 @@ public class SimulationEngine
     }
 
     /// <summary>
-    /// Aggregates the price path to the strategy's configured timeframe for charting,
-    /// stepping up to coarser timeframes when the window would produce too many candles.
-    /// Never charts finer than the path itself — a bar can't be split.
+    /// Aggregates the price path to the modeled timeframe for charting — the strategy's own
+    /// timeframe, or the path timeframe for tick-driven strategies (grids/funding) — so fills can
+    /// be checked bar by bar. Steps up to a coarser timeframe only when the window would exceed
+    /// <see cref="MaxChartCandles"/>, with a warning. Never charts finer than the path itself.
     /// </summary>
-    private static List<CandleDto> BuildChartCandles(List<CandleDto> path, string configJson, string pathTimeframe)
+    private static (List<CandleDto> Candles, string Timeframe) BuildChartCandles(
+        List<CandleDto> path, string configJson, string pathTimeframe, List<string> warnings)
     {
-        var ladder = new[] { "1m", "5m", "15m", "30m", "1h", "4h", "1d" };
-        var tf = ReadTimeframe(configJson) ?? "1h";
+        var pathTf = string.IsNullOrWhiteSpace(pathTimeframe) ? "1m" : pathTimeframe.Trim().ToLowerInvariant();
+        var pathSpan = SymbolHelper.GetTimeframeSpan(pathTf);
+        var modeledTf = ReadTimeframe(configJson)?.Trim().ToLowerInvariant() ?? pathTf;
+        if (SymbolHelper.GetTimeframeSpan(modeledTf) < pathSpan) modeledTf = pathTf;
 
-        var start = Array.IndexOf(ladder, tf.ToLowerInvariant());
-        if (start < 0) start = Array.IndexOf(ladder, "1h");
+        var candles = CandleAggregator.Aggregate(path, modeledTf);
+        if (candles.Count <= MaxChartCandles)
+            return (candles, modeledTf);
 
-        // Coarse paths (e.g. 4h, or 3m/6h/12h that aren't on the ladder) push the start up to the
-        // first ladder step the path bars divide evenly into.
-        var pathSpan = SymbolHelper.GetTimeframeSpan(
-            string.IsNullOrWhiteSpace(pathTimeframe) ? "1m" : pathTimeframe.Trim().ToLowerInvariant());
-        var pathStep = Array.FindIndex(ladder, l =>
+        var modeledSpan = SymbolHelper.GetTimeframeSpan(modeledTf);
+        var ladder = new[] { "5m", "15m", "30m", "1h", "4h", "1d" };
+        foreach (var tf in ladder)
         {
-            var s = SymbolHelper.GetTimeframeSpan(l);
-            return s >= pathSpan && s.Ticks % pathSpan.Ticks == 0;
-        });
-        if (pathStep < 0) pathStep = ladder.Length - 1;
-        if (pathStep > start) start = pathStep;
-
-        for (var i = start; i < ladder.Length; i++)
-        {
-            var candles = CandleAggregator.Aggregate(path, ladder[i]);
-            if (candles.Count <= MaxChartCandles || i == ladder.Length - 1)
-                return candles;
+            var span = SymbolHelper.GetTimeframeSpan(tf);
+            if (span <= modeledSpan || span.Ticks % pathSpan.Ticks != 0) continue;
+            candles = CandleAggregator.Aggregate(path, tf);
+            if (candles.Count <= MaxChartCandles || tf == "1d")
+            {
+                warnings.Add(
+                    $"График укрупнён до {tf}: на {modeledTf} окно дало бы больше {MaxChartCandles:N0} свечей. " +
+                    $"Чтобы проверить сделки на {modeledTf}, сократите период.");
+                return (candles, tf);
+            }
         }
 
-        return CandleAggregator.Aggregate(path, "1d");
+        return (candles, modeledTf);
     }
 
     private static string? ReadTimeframe(string configJson)

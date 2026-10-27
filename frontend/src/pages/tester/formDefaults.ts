@@ -1,4 +1,4 @@
-import type { GfTier, HFLevel, SdLevel, SdTpShift } from './types';
+import type { GfTier, HFLevel, SdLevel, SdTpShift, SppLevel } from './types';
 
 /* Field lists, defaults and units mirror the real bot-creation form in
  * ActiveBotsPage.tsx (AddStrategyModal) so a simulated config matches what a
@@ -116,6 +116,7 @@ export interface AllForms {
   gfTiers: GfTier[];
   gh: GhForm;
   sgh: SghForm;
+  sppLevels: SppLevel[];
 }
 
 export const defaultMgForm: MgForm = {
@@ -221,6 +222,8 @@ export const defaultSghForm: SghForm = {
   takeProfitTargetUsd: '100',
 };
 
+export const defaultSppLevels: SppLevel[] = [{ buyPrice: '', sellPrice: '', amountUsdt: '50' }];
+
 export function makeDefaultForms(): AllForms {
   return {
     mg: { ...defaultMgForm },
@@ -233,6 +236,7 @@ export function makeDefaultForms(): AllForms {
     gfTiers: defaultGfTiers.map((t) => ({ ...t })),
     gh: { ...defaultGhForm },
     sgh: { ...defaultSghForm },
+    sppLevels: defaultSppLevels.map((l) => ({ ...l })),
   };
 }
 

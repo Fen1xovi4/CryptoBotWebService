@@ -718,6 +718,88 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                     b.ToTable("telegram_subscribers", (string)null);
                 });
 
+            modelBuilder.Entity("CryptoBotWeb.Core.Entities.TesterParamSet", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasDefaultValueSql("gen_random_uuid()");
+
+                    b.Property<string>("ConfigJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CreatedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<short>("ExchangeType")
+                        .HasColumnType("smallint");
+
+                    b.Property<decimal>("MaxDrawdownPercent")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.Property<decimal>("MaxDrawdownUsd")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<decimal>("NetPnlUsd")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("PathTimeframe")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
+                    b.Property<DateTime?>("PeriodFromUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("PeriodToUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("StrategyType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<string>("SweptParamsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("Symbol")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<int>("TotalTrades")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("WinRate")
+                        .HasPrecision(18, 8)
+                        .HasColumnType("numeric(18,8)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedByUserId");
+
+                    b.HasIndex("ExchangeType", "Symbol", "StrategyType");
+
+                    b.ToTable("tester_param_sets", (string)null);
+                });
+
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.Trade", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1090,6 +1172,16 @@ namespace CryptoBotWeb.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("TelegramBot");
+                });
+
+            modelBuilder.Entity("CryptoBotWeb.Core.Entities.TesterParamSet", b =>
+                {
+                    b.HasOne("CryptoBotWeb.Core.Entities.User", "CreatedBy")
+                        .WithMany()
+                        .HasForeignKey("CreatedByUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("CreatedBy");
                 });
 
             modelBuilder.Entity("CryptoBotWeb.Core.Entities.Trade", b =>

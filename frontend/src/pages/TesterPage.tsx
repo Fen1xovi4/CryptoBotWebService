@@ -8,12 +8,15 @@ import StrategyConfigForm from './tester/StrategyConfigForm';
 import EquityChart from './tester/EquityChart';
 import TradesTable from './tester/TradesTable';
 import OptimizationPanel from './tester/OptimizationPanel';
+import SavedParamSetsPanel, { PARAM_SETS_QUERY_KEY } from './tester/SavedParamSetsPanel';
+import { configToForms } from './tester/loadConfig';
 import { describeError } from './tester/errors';
+import { aggregateCandles, chartTimeframeOptions, snapIndicator, snapMarkers } from './tester/chartAggregate';
 import { buildSimConfig } from './tester/buildConfig';
 import { makeDefaultForms } from './tester/formDefaults';
 import type { AllForms } from './tester/formDefaults';
 import { STRATEGY_LABELS, STRATEGY_TYPES } from './tester/types';
-import type { Account, KlineCacheEntry, SimulateRequest, SimulationResult, StrategyType } from './tester/types';
+import type { Account, KlineCacheEntry, SaveTesterParamSetRequest, SimulateRequest, SimulationResult, StrategyType } from './tester/types';
 
 const EXCHANGE_NAMES: Record<number, string> = { 1: 'Bybit', 2: 'Bitget', 3: 'BingX', 4: 'Dzengi' };
 // SimulationEngine downloads kline history via GetKlinesRangeAsync, which only Bybit/Bitget/BingX
@@ -210,7 +213,7 @@ export default function TesterPage() {
     simulateMutation.mutate(req.body);
   };
 
-  /** Full simulation of one optimizer combination — its configJson replaces the form-built one. */
+  /** Full simulation of one optimizer combination / saved set — its configJson replaces the form-built one. */
   const handleSimulateConfig = (configJson: string) => {
     setFormError('');
     const req = buildRequestBody();
@@ -219,6 +222,42 @@ export default function TesterPage() {
       return;
     }
     simulateMutation.mutate({ ...req.body, configJson });
+  };
+
+  /** Saved parameter set → strategy form, so the values are visible and editable before a re-run. */
+  const handleLoadToForm = (configJson: string) => {
+    setFormError('');
+    try {
+      setForms((f) => configToForms(strategyType, configJson, f));
+    } catch (err) {
+      setFormError((err as Error).message);
+    }
+  };
+
+  const selectedAccount = simAccounts.find((a) => a.id === accountId);
+
+  // Save the config of the run currently on screen as a named parameter set for this instrument.
+  const saveRunMutation = useMutation({
+    mutationFn: (body: SaveTesterParamSetRequest) => api.post('/tester/param-sets', body).then((r) => r.data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: [PARAM_SETS_QUERY_KEY] }),
+  });
+  const handleSaveRun = () => {
+    const run = simulateMutation.variables;
+    const result = simulateMutation.data;
+    if (!run || !result) return;
+    const defaultName = `${run.symbol} ${run.strategyType} ${new Date().toISOString().slice(0, 10)}`;
+    const name = window.prompt('Название набора параметров', defaultName);
+    if (name === null) return;
+    saveRunMutation.mutate({
+      accountId: run.accountId,
+      symbol: run.symbol,
+      strategyType: run.strategyType,
+      name: name.trim() || defaultName,
+      configJson: run.configJson,
+      sweptParams: null,
+      pathTimeframe: run.pathTimeframe,
+      summary: result.summary,
+    });
   };
 
   const simResult = simulateMutation.data;
@@ -483,8 +522,19 @@ export default function TesterPage() {
         </div>
       </div>
 
+      {/* Saved parameter sets for this exchange + symbol + strategy */}
+      <SavedParamSetsPanel
+        exchangeType={selectedAccount?.exchangeType}
+        symbol={symbol}
+        strategyType={strategyType}
+        onLoadToForm={handleLoadToForm}
+        onSimulateConfig={handleSimulateConfig}
+        simulatePending={simulateMutation.isPending}
+      />
+
       {/* Parameter optimization (grid search over config fields) */}
       <OptimizationPanel
+        strategyType={strategyType}
         baseConfigJson={baseBuild.ok ? baseBuild.configJson : undefined}
         buildRequestBody={buildRequestBody}
         onSimulateConfig={handleSimulateConfig}
@@ -493,7 +543,14 @@ export default function TesterPage() {
 
       {/* Results or live preview */}
       {simResult ? (
-        <SimulationResults result={simResult} chartMarkers={chartMarkers} indicatorData={indicatorData} />
+        <SimulationResults
+          key={simulateMutation.submittedAt}
+          result={simResult}
+          chartMarkers={chartMarkers}
+          indicatorData={indicatorData}
+          onSave={handleSaveRun}
+          saveState={saveRunMutation.isPending ? 'saving' : saveRunMutation.isSuccess ? 'saved' : saveRunMutation.isError ? describeError(saveRunMutation.error) : 'idle'}
+        />
       ) : (
         <>
           <div className="flex items-center gap-2 mb-3">
@@ -545,13 +602,32 @@ function SimulationResults({
   result,
   chartMarkers,
   indicatorData,
+  onSave,
+  saveState,
 }: {
   result: SimulationResult;
   chartMarkers: ChartMarker[];
   indicatorData: IndicatorDataPoint[];
+  onSave: () => void;
+  /** 'idle' | 'saving' | 'saved' | error message */
+  saveState: string;
 }) {
   const s = result.summary;
   const h = result.history;
+
+  // Chart opens on the modeled timeframe (to check fills bar by bar); coarser views are
+  // aggregated client-side from the same candles. Remounted per run (key), so it resets.
+  const baseTf = result.chartTimeframe || '1h';
+  const tfOptions = useMemo(() => chartTimeframeOptions(baseTf), [baseTf]);
+  const [chartTf, setChartTf] = useState(baseTf);
+  const viewTf = tfOptions.includes(chartTf) ? chartTf : baseTf;
+  const viewCandles = useMemo(
+    () => (viewTf === baseTf ? result.chartCandles : aggregateCandles(result.chartCandles, viewTf)),
+    [result.chartCandles, viewTf, baseTf],
+  );
+  const viewMarkers = useMemo(() => snapMarkers(chartMarkers, viewTf), [chartMarkers, viewTf]);
+  const viewIndicator = useMemo(() => snapIndicator(indicatorData, viewTf), [indicatorData, viewTf]);
+
   return (
     <div className="space-y-4">
       {h && (
@@ -572,8 +648,29 @@ function SimulationResults({
       )}
 
       {/* Candlestick chart with trade markers + indicator overlay */}
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium text-text-secondary">ТФ графика:</span>
+        <div className="flex rounded-lg overflow-hidden border border-border">
+          {tfOptions.map((tf) => (
+            <button
+              key={tf}
+              onClick={() => setChartTf(tf)}
+              className={`px-3 py-2 text-xs font-medium transition-colors ${
+                viewTf === tf
+                  ? 'bg-accent-blue text-white'
+                  : 'bg-bg-primary text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
+              }`}
+            >
+              {tf.toUpperCase()}
+            </button>
+          ))}
+        </div>
+        <span className="text-[11px] text-text-secondary">
+          {viewCandles.length.toLocaleString('ru-RU')} свечей · моделирование на {baseTf}
+        </span>
+      </div>
       <div className="bg-bg-secondary rounded-xl border border-border p-1">
-        <CandlestickChart data={result.chartCandles} isLoading={false} markers={chartMarkers} indicatorData={indicatorData} />
+        <CandlestickChart data={viewCandles} isLoading={false} markers={viewMarkers} indicatorData={viewIndicator} />
       </div>
 
       {/* Equity curve */}
@@ -601,9 +698,23 @@ function SimulationResults({
         ))}
       </div>
 
-      <p className="text-xs text-text-secondary">
-        Период: {new Date(s.startTime).toLocaleString('ru-RU')} — {new Date(s.endTime).toLocaleString('ru-RU')} · обработано свечей: {s.pathCandlesProcessed}
-      </p>
+      <div className="flex flex-wrap items-center gap-4 text-xs text-text-secondary">
+        <span>
+          Период: {new Date(s.startTime).toLocaleString('ru-RU')} — {new Date(s.endTime).toLocaleString('ru-RU')} · обработано свечей: {s.pathCandlesProcessed}
+        </span>
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saveState === 'saving' || saveState === 'saved'}
+          className="text-accent-blue hover:underline disabled:opacity-60 disabled:no-underline"
+          title="Сохранить конфиг этого прогона как набор параметров для инструмента и стратегии"
+        >
+          {saveState === 'saving' ? 'Сохранение…' : saveState === 'saved' ? 'Набор сохранён ✓' : 'Сохранить набор'}
+        </button>
+        {saveState !== 'idle' && saveState !== 'saving' && saveState !== 'saved' && (
+          <span className="text-accent-red">{saveState}</span>
+        )}
+      </div>
 
       {/* Trades table */}
       <TradesTable trades={result.trades} />
